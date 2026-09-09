@@ -231,33 +231,45 @@ function Icon({ name }: { name: IconName }) {
 
 function ScreenLinkMascot() {
   return (
-    <svg className="waiting-mascot" viewBox="0 0 180 160" aria-hidden="true">
-      <ellipse className="mascot-shadow" cx="91" cy="144" rx="40" ry="6" />
+    <svg className="waiting-mascot" viewBox="0 0 180 142" aria-hidden="true">
+      <defs>
+        <radialGradient id="screenlink-mascot-body" cx="0" cy="0" r="1" gradientTransform="translate(71 54) rotate(68) scale(91 112)" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#86dce8" />
+          <stop offset=".5" stopColor="#7ad5e2" />
+          <stop offset=".78" stopColor="#70cedc" />
+          <stop offset="1" stopColor="#62bfd1" />
+        </radialGradient>
+        <linearGradient id="screenlink-mascot-ear" x1="90" y1="46" x2="90" y2="75" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#6bcbd8" />
+          <stop offset="1" stopColor="#50aebf" />
+        </linearGradient>
+        <linearGradient id="screenlink-mascot-antenna" x1="90" y1="10" x2="90" y2="31" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#b5f1f5" />
+          <stop offset=".48" stopColor="#86dce7" />
+          <stop offset="1" stopColor="#62c3d3" />
+        </linearGradient>
+        <linearGradient id="screenlink-mascot-lower" x1="90" y1="94" x2="90" y2="132" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#5ab9cb" stopOpacity="0" />
+          <stop offset="1" stopColor="#43a7ba" stopOpacity=".22" />
+        </linearGradient>
+      </defs>
       <g className="mascot-float">
         <g className="mascot-signal-group">
-          <path className="mascot-signal-arc" d="M91 39c0-7 1-11 3-15" />
-          <circle className="mascot-signal" cx="94" cy="20" r="3.5" />
-          <circle className="mascot-signal-ring" cx="94" cy="20" r="7" />
+          <path className="mascot-signal-arc" d="M90 30V20" />
+          <circle className="mascot-signal" cx="90" cy="15.5" r="4.5" fill="url(#screenlink-mascot-antenna)" />
         </g>
-        <path className="mascot-ear mascot-ear-left" d="M51 51C39 43 25 45 23 57c8-3 13 2 14 11 5-3 10-8 14-17Z" />
-        <path className="mascot-ear mascot-ear-right" d="M130 48c13-7 25-3 27 8-7-2-12 3-13 12-6-4-10-10-14-20Z" />
-        <path className="mascot-body" d="M53 38c20-13 57-13 77 3 17 14 18 53 4 72-15 20-64 23-86 6-18-14-18-61 5-81Z" />
-        <path className="mascot-belly" d="M58 101c19 11 48 11 67-2-5 19-16 27-34 28-17 0-28-8-33-26Z" />
-        <path className="mascot-highlight" d="M59 43c13-8 35-10 49-6" />
+        <path className="mascot-ear mascot-ear-left" d="M44 49c-10-8-23-9-31-3-7 5-9 13-7 20 10-3 19 1 26 11 3-10 7-19 12-28Z" fill="url(#screenlink-mascot-ear)" />
+        <path className="mascot-ear mascot-ear-right" d="M136 49c10-8 23-9 31-3 7 5 9 13 7 20-10-3-19 1-26 11-3-10-7-19-12-28Z" fill="url(#screenlink-mascot-ear)" />
+        <path className="mascot-body" d="M42 36c14-9 33-12 48-12 16 0 35 3 48 12 14 10 20 30 17 51-2 19-9 32-25 40-17 8-63 8-80 0-16-8-23-21-25-40-3-21 3-41 17-51Z" fill="url(#screenlink-mascot-body)" />
+        <path className="mascot-lower-shade" d="M42 36c14-9 33-12 48-12 16 0 35 3 48 12 14 10 20 30 17 51-2 19-9 32-25 40-17 8-63 8-80 0-16-8-23-21-25-40-3-21 3-41 17-51Z" fill="url(#screenlink-mascot-lower)" />
+        <path className="mascot-highlight" d="M54 46c15-8 34-10 53-8" />
         <g className="mascot-face">
-          <ellipse cx="74" cy="73" rx="4" ry="5" />
-          <ellipse cx="108" cy="72" rx="4" ry="5" />
-          <path d="M82 87c6 5 14 5 20 0" />
+          <ellipse cx="69" cy="78" rx="6.3" ry="6.7" />
+          <ellipse cx="111" cy="78" rx="6.3" ry="6.7" />
+          <path d="M77.5 93.5c8 8 17 8 25 0" />
         </g>
-        <circle className="mascot-cheek" cx="62" cy="87" r="3.5" />
-        <circle className="mascot-cheek" cx="120" cy="86" r="3.5" />
-        <g className="mascot-mark">
-          <rect x="82" y="106" width="12" height="9" rx="3" />
-          <rect x="96" y="106" width="12" height="9" rx="3" />
-          <path d="M92 110h6" />
-        </g>
-        <g className="mascot-spark mascot-spark-one"><path d="m147 29 1-9m-5 5 10-1" /></g>
-        <g className="mascot-spark mascot-spark-two"><path d="m31 40-3-6m0 8-7-2" /></g>
+        <circle className="mascot-cheek" cx="56.5" cy="94" r="4.6" />
+        <circle className="mascot-cheek" cx="123.5" cy="94" r="4.6" />
       </g>
     </svg>
   );
