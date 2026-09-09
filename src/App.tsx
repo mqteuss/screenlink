@@ -134,6 +134,31 @@ function SegmentedControl<T extends number>({ label, suffix, options, value, dis
   );
 }
 
+function ToggleTile({ icon, label, description, checked, disabled = false, onClick }: {
+  icon: IconName;
+  label: string;
+  description: string;
+  checked: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      className={`toggle-tile ${checked ? 'is-active' : ''}`}
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      <span className="toggle-tile-icon"><Icon name={icon} /></span>
+      <span className="toggle-tile-copy"><strong>{label}</strong><small>{description}</small></span>
+      <span className="toggle-tile-switch" aria-hidden="true"><i /></span>
+    </button>
+  );
+}
+
 type ModelContext = {
   registerTool: (tool: {
     name: string;
@@ -173,11 +198,14 @@ function Icon({ name }: { name: IconName }) {
   return <svg className="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
 }
 
-function Header({ status, live = false }: { status: string; live?: boolean }) {
+function Header({ status, live = false, meta }: { status: string; live?: boolean; meta?: string }) {
   return (
     <header className="topbar">
       <div className="brand"><span className="brand-mark"><span /></span><strong>ScreenLink</strong></div>
-      <div className={`status-pill ${live ? 'live' : ''}`}><i />{status}</div>
+      <div className="topbar-session">
+        {meta && <span className="topbar-meta">{meta}</span>}
+        <div className={`status-pill ${live ? 'live' : ''}`}><i />{status}</div>
+      </div>
     </header>
   );
 }
@@ -236,6 +264,7 @@ function HostApp() {
   const [status, setStatus] = useState<HostStatus>('idle');
   const [audience, setAudience] = useState<AudienceStatus>('empty');
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [sourceLabel, setSourceLabel] = useState('');
   const [shareUrl, setShareUrl] = useState('');
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState('');
@@ -454,6 +483,7 @@ function HostApp() {
     stopStream(streamRef.current);
     streamRef.current = null;
     setLocalStream(null);
+    setSourceLabel('');
     inviteRef.current = null;
     setShareUrl('');
     setProfileStatus('idle');
@@ -482,6 +512,7 @@ function HostApp() {
     streamRef.current = null;
     inviteRef.current = null;
     setLocalStream(null);
+    setSourceLabel('');
     setShareUrl('');
     setCopied(false);
     setProfileStatus('idle');
@@ -749,6 +780,7 @@ function HostApp() {
 
       streamRef.current = stream;
       setLocalStream(stream);
+      setSourceLabel(stream.getVideoTracks()[0]?.label || 'Tela ou janela selecionada');
       videoPausedRef.current = false;
       setVideoPaused(false);
       stream.getVideoTracks()[0]?.addEventListener('ended', () => stopSharingRef.current(), { once: true });
@@ -966,27 +998,58 @@ function HostApp() {
   const metricCopy = connectionMetrics.bitrateKbps
     ? `${(connectionMetrics.bitrateKbps / 1_000).toFixed(1)} Mbps · ${connectionMetrics.rttMs || '—'} ms`
     : 'WebRTC P2P direto';
+  const screenAudioCopy = !localStream
+    ? audioEnabled ? 'Solicitar ao escolher a tela' : 'Começar sem som do sistema'
+    : audioAvailable
+      ? audioEnabled ? 'Som da tela sendo enviado' : 'Som da tela silenciado'
+      : 'Fonte selecionada sem áudio';
+  const microphoneCopy = !localStream
+    ? microphoneEnabled ? 'Solicitar antes de transmitir' : 'Desativado por padrão'
+    : microphoneAvailable
+      ? microphoneEnabled ? 'Sua voz está sendo enviada' : 'Microfone silenciado'
+      : 'Permissão não concedida';
 
   return (
     <div className="app">
-      <Header status={hostLabel} live={status === 'live'} />
+      <Header
+        status={hostLabel}
+        live={status === 'live'}
+        meta={localStream ? `${sessionDuration} · ${connectedViewerCount}/${maxViewers} assistindo` : 'Sessão privada · P2P'}
+      />
       <main className="host-main">
         <section className={`share-stage ${localStream ? 'is-live' : ''} ${videoPaused ? 'is-paused' : ''}`}>
           <video ref={videoRef} autoPlay playsInline muted />
           {!localStream && (
-            <div className="stage-copy">
-              <span className="eyebrow"><Icon name="screen" /> Seu computador</span>
-              <h1>Compartilhe sua tela.</h1>
-              <p>Escolha uma tela ou janela. Depois, envie o link privado para quem vai assistir.</p>
-              <button className="primary-action" type="button" onClick={startSharing} disabled={status === 'starting'}>
-                <Icon name="screen" /> {status === 'starting' ? 'Preparando…' : 'Compartilhar minha tela'}
-              </button>
-              {error && <p className="error-message" role="alert">{error}</p>}
+            <div className="stage-intro">
+              <div className="stage-copy">
+                <span className="eyebrow"><Icon name="screen" /> Transmissão privada</span>
+                <h1>Sua tela em primeiro plano.</h1>
+                <p>Escolha o conteúdo, ajuste a qualidade e compartilhe um único link. O espectador não precisa instalar nada.</p>
+                <button className="primary-action" type="button" onClick={startSharing} disabled={status === 'starting'}>
+                  <Icon name="screen" /> {status === 'starting' ? 'Abrindo seletor…' : 'Escolher tela e transmitir'}
+                </button>
+                <div className="stage-assurances" aria-label="Recursos da transmissão">
+                  <span><i /> Vídeo direto</span>
+                  <span><i /> Link privado</span>
+                  <span><i /> Sem gravação</span>
+                </div>
+                {error && <p className="error-message" role="alert">{error}</p>}
+              </div>
+              <div className="preflight-preview" aria-hidden="true">
+                <div className="preflight-windowbar"><i /><i /><i /><span>PRÉVIA</span></div>
+                <div className="preflight-canvas">
+                  <span className="preflight-orbit"><Icon name="screen" /></span>
+                  <strong>Pronto para transmitir</strong>
+                  <small>Você escolhe exatamente o que será exibido</small>
+                </div>
+                <div className="preflight-footer"><span><i /> P2P</span><span>720p · 30 FPS</span></div>
+              </div>
             </div>
           )}
           {localStream && (
             <>
               <div className={`live-badge ${videoPaused ? 'paused' : ''}`}><span /> {videoPaused ? 'Transmissão pausada' : `${resolution}p · até ${fps} FPS`} · {sessionDuration}</div>
+              <div className="source-live-chip"><Icon name="screen" /><span><small>Compartilhando</small><strong>{sourceLabel}</strong></span></div>
               <div className="host-call-dock" aria-label="Controles da transmissão">
                 <button type="button" onClick={toggleVideoPaused} aria-label={videoPaused ? 'Retomar transmissão' : 'Pausar transmissão'} aria-pressed={videoPaused} data-label={videoPaused ? 'Retomar' : 'Pausar'}>
                   <Icon name={videoPaused ? 'play' : 'pause'} />
@@ -1005,43 +1068,60 @@ function HostApp() {
         </section>
 
         <aside className="control-panel">
-          <div className="panel-heading">
-            <span className="step-number">01</span>
-            <div><h2>{localStream ? 'Tela selecionada' : 'Compartilhe'}</h2><p>{localStream ? 'A prévia está ativa neste computador.' : 'Você escolhe exatamente o que será mostrado.'}</p></div>
+          <div className="stream-panel-heading">
+            <span className={`panel-kicker ${localStream ? 'is-live' : ''}`}><i /> {localStream ? 'Transmissão ativa' : 'Configuração'}</span>
+            <h2>{localStream ? 'Sua transmissão' : 'Preparar transmissão'}</h2>
+            <p>{localStream ? audienceCopy : 'Configure como sua tela chegará aos espectadores.'}</p>
           </div>
-          <section className="profile-controls" aria-label="Qualidade da transmissão">
-            <div className="audio-setting auto-setting">
-              <div>
-                <span className="audio-setting-title"><Icon name="auto" /> Qualidade automática</span>
-                <small>{automaticQuality ? 'Ajusta resolução e FPS conforme a rede.' : 'Você controla resolução e FPS.'}</small>
-              </div>
-              <button className="switch-control" type="button" role="switch" aria-label="Ajustar qualidade automaticamente" aria-checked={automaticQuality} onClick={toggleAutomaticQuality}><i /></button>
+
+          <section className={`source-card ${localStream ? 'is-selected' : ''}`} aria-label="Fonte da transmissão">
+            <span className="source-card-icon"><Icon name="screen" /></span>
+            <span className="source-card-copy">
+              <small>O que será transmitido</small>
+              <strong>{localStream ? sourceLabel : 'Uma tela, janela ou aba'}</strong>
+              <span>{localStream ? 'A prévia está visível somente neste computador.' : 'O navegador abrirá o seletor antes de iniciar.'}</span>
+            </span>
+            <span className="source-card-state">{localStream ? 'ATIVA' : 'DEPOIS'}</span>
+          </section>
+
+          <section className="control-section" aria-labelledby="quality-title">
+            <div className="control-section-heading">
+              <div><span>01</span><h3 id="quality-title">Qualidade da transmissão</h3></div>
+              <small>{automaticQuality ? 'AUTOMÁTICA' : 'MANUAL'}</small>
             </div>
-            <SegmentedControl
-              label="Qualidade"
-              suffix="resolução"
-              options={RESOLUTIONS}
-              value={resolution}
-              disabled={profileStatus === 'applying' || automaticQuality}
-              onChange={nextResolution => selectManualProfile({ resolution: nextResolution, fps })}
+            <ToggleTile
+              icon="auto"
+              label="Ajuste automático"
+              description={automaticQuality ? `Usando ${resolution}p a ${fps} FPS` : 'Resolução e FPS definidos por você'}
+              checked={automaticQuality}
+              onClick={toggleAutomaticQuality}
             />
-            <SegmentedControl
-              label="Fluidez"
-              suffix="FPS"
-              options={FRAME_RATES}
-              value={fps}
-              disabled={profileStatus === 'applying' || automaticQuality}
-              onChange={nextFps => selectManualProfile({ resolution, fps: nextFps })}
-            />
-            <SegmentedControl
-              label="Espectadores"
-              suffix="máximo"
-              options={VIEWER_LIMITS}
-              value={maxViewers}
-              disabled={Boolean(localStream)}
-              onChange={setMaxViewers}
-            />
-            <p className="profile-summary"><i />P2P envia um fluxo por espectador; mais pessoas exigem mais upload do computador.</p>
+            <div className="quality-controls">
+              <SegmentedControl
+                label="Qualidade"
+                suffix="resolução"
+                options={RESOLUTIONS}
+                value={resolution}
+                disabled={profileStatus === 'applying' || automaticQuality}
+                onChange={nextResolution => selectManualProfile({ resolution: nextResolution, fps })}
+              />
+              <SegmentedControl
+                label="Fluidez"
+                suffix="FPS"
+                options={FRAME_RATES}
+                value={fps}
+                disabled={profileStatus === 'applying' || automaticQuality}
+                onChange={nextFps => selectManualProfile({ resolution, fps: nextFps })}
+              />
+              <SegmentedControl
+                label="Espectadores"
+                suffix="máximo"
+                options={VIEWER_LIMITS}
+                value={maxViewers}
+                disabled={Boolean(localStream)}
+                onChange={setMaxViewers}
+              />
+            </div>
             <p className={`profile-summary ${profileStatus}`} aria-live="polite">
               <i />
               {profileStatus === 'applying'
@@ -1052,68 +1132,60 @@ function HostApp() {
                     ? `Auto · ${resolution}p · até ${fps} FPS`
                     : `${resolution}p · até ${fps} FPS · bitrate adaptativo`}
             </p>
-            <div className="audio-setting">
-              <div>
-                <span className="audio-setting-title"><Icon name={audioEnabled && audioAvailable !== false ? 'volume' : 'volumeOff'} /> Áudio da tela</span>
-                <small aria-live="polite">
-                  {!localStream
-                    ? audioEnabled ? 'Será solicitado ao escolher a tela.' : 'A transmissão começará sem áudio.'
-                    : audioAvailable
-                      ? audioEnabled ? 'Enviando o áudio capturado.' : 'Áudio pausado.'
-                      : audioEnabled ? 'A fonte escolhida não ofereceu áudio.' : 'Reinicie para solicitar áudio.'}
-                </small>
-              </div>
-              <button
-                className="switch-control"
-                type="button"
-                role="switch"
-                aria-label="Compartilhar áudio da tela"
-                aria-checked={audioEnabled && audioAvailable !== false}
+            <p className="section-hint"><Icon name="signal" /> P2P envia um fluxo por espectador; mais pessoas usam mais upload.</p>
+          </section>
+
+          <section className="control-section" aria-labelledby="audio-title">
+            <div className="control-section-heading">
+              <div><span>02</span><h3 id="audio-title">Áudio</h3></div>
+              <small>OPCIONAL</small>
+            </div>
+            <div className="media-tile-grid">
+              <ToggleTile
+                icon={audioEnabled && audioAvailable !== false ? 'volume' : 'volumeOff'}
+                label="Áudio da tela"
+                description={screenAudioCopy}
+                checked={audioEnabled && audioAvailable !== false}
                 disabled={Boolean(localStream && audioAvailable === false)}
                 onClick={toggleScreenAudio}
-              ><i /></button>
-            </div>
-            <div className="audio-setting">
-              <div>
-                <span className="audio-setting-title"><Icon name={microphoneEnabled && microphoneAvailable !== false ? 'microphone' : 'microphoneOff'} /> Microfone</span>
-                <small aria-live="polite">
-                  {!localStream
-                    ? microphoneEnabled ? 'Será solicitado ao iniciar.' : 'Opcional para conversar durante a sessão.'
-                    : microphoneAvailable
-                      ? microphoneEnabled ? 'Sua voz está sendo enviada.' : 'Microfone silenciado.'
-                      : 'Ative antes de compartilhar e permita o acesso.'}
-                </small>
-              </div>
-              <button
-                className="switch-control"
-                type="button"
-                role="switch"
-                aria-label="Compartilhar microfone"
-                aria-checked={microphoneEnabled && microphoneAvailable !== false}
+              />
+              <ToggleTile
+                icon={microphoneEnabled && microphoneAvailable !== false ? 'microphone' : 'microphoneOff'}
+                label="Microfone"
+                description={microphoneCopy}
+                checked={microphoneEnabled && microphoneAvailable !== false}
                 disabled={Boolean(localStream && microphoneAvailable !== true)}
                 onClick={toggleMicrophone}
-              ><i /></button>
+              />
             </div>
           </section>
-          <div className="divider" />
-          <div className={`panel-heading ${shareUrl ? '' : 'muted-step'}`}>
-            <span className="step-number">02</span>
-            <div><h2>Envie o link</h2><p>{shareUrl ? audienceCopy : 'O convite privado aparecerá aqui após escolher a tela.'}</p></div>
-          </div>
 
           {shareUrl && (
-            <div className="invite-card">
-              <label htmlFor="invite-link">Link para assistir</label>
-              <div className="invite-row">
-                <input id="invite-link" ref={inviteInputRef} readOnly value={shareUrl} onFocus={event => event.currentTarget.select()} />
-                <button type="button" onClick={copyInvite} aria-label="Copiar link privado"><Icon name={copied ? 'check' : 'copy'} /></button>
+            <section className="control-section invite-section" aria-labelledby="invite-title">
+              <div className="control-section-heading">
+                <div><span>03</span><h3 id="invite-title">Convidar espectadores</h3></div>
+                <small>{connectedViewerCount}/{maxViewers}</small>
               </div>
-              <div className="invite-actions">
-                <button type="button" onClick={() => setQrOpen(true)} disabled={!qrCode}><Icon name="qr" /> QR Code</button>
-                {typeof navigator.share === 'function' && <button type="button" onClick={shareInvite}><Icon name="share" /> Compartilhar</button>}
+              <div className="invite-card">
+                <label htmlFor="invite-link"><Icon name="link" /> Link privado para assistir</label>
+                <div className="invite-row">
+                  <input id="invite-link" ref={inviteInputRef} readOnly value={shareUrl} onFocus={event => event.currentTarget.select()} />
+                  <button type="button" onClick={copyInvite} aria-label="Copiar link privado"><Icon name={copied ? 'check' : 'copy'} /></button>
+                </div>
+                <div className="invite-actions">
+                  <button type="button" onClick={() => setQrOpen(true)} disabled={!qrCode}><Icon name="qr" /> QR Code</button>
+                  {typeof navigator.share === 'function' && <button type="button" onClick={shareInvite}><Icon name="share" /> Compartilhar</button>}
+                </div>
+                <span className="copy-feedback" aria-live="polite">{copied ? 'Link copiado' : 'Abra este link no celular ou em outro PC'}</span>
               </div>
-              <span className="copy-feedback" aria-live="polite">{copied ? 'Link copiado' : 'Abra este link no celular ou em outro PC'}</span>
-            </div>
+            </section>
+          )}
+
+          {!shareUrl && (
+            <section className="invite-placeholder" aria-label="Convite ainda indisponível">
+              <span><Icon name="link" /></span>
+              <div><strong>O convite vem depois</strong><small>O link e o QR Code aparecem assim que você escolher a tela.</small></div>
+            </section>
           )}
 
           {shareUrl && (
@@ -1124,7 +1196,6 @@ function HostApp() {
           )}
 
           <div className="privacy-note"><Icon name="shield" /><span><strong>Conexão privada</strong>O vídeo não é gravado nem armazenado pelo ScreenLink.</span></div>
-          {localStream && <button className="stop-action" type="button" onClick={stopSharing}><Icon name="stop" /> Encerrar compartilhamento</button>}
         </aside>
       </main>
       {qrOpen && qrCode && (
