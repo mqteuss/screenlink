@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import QRCode from 'qrcode';
 import {
   createPrivateRoom,
@@ -10,11 +10,21 @@ import {
   type ServerMessage
 } from './protocol';
 
-type IconName = 'screen' | 'link' | 'shield' | 'stop' | 'copy' | 'phone' | 'expand' | 'check' | 'signal' | 'volume' | 'volumeOff' | 'pause' | 'play' | 'microphone' | 'microphoneOff' | 'share' | 'qr' | 'zoom' | 'pip' | 'wake' | 'auto';
-type HostStatus = 'idle' | 'starting' | 'live' | 'reconnecting' | 'error';
+type IconName = 'screen' | 'screenOff' | 'link' | 'shield' | 'stop' | 'copy' | 'phone' | 'call' | 'hangup' | 'message' | 'send' | 'expand' | 'check' | 'signal' | 'volume' | 'volumeOff' | 'pause' | 'play' | 'microphone' | 'microphoneOff' | 'share' | 'qr' | 'zoom' | 'pip' | 'wake' | 'auto';
+type CallState = 'idle' | 'starting' | 'connected' | 'reconnecting' | 'error';
+type ScreenShareState = 'idle' | 'selecting' | 'sharing';
 type AudienceStatus = 'empty' | 'connecting' | 'connected';
-type ViewerStatus = 'connecting' | 'waiting' | 'live' | 'ended' | 'error';
-type PeerRecord = { id: string; pc: RTCPeerConnection; queued: RTCIceCandidateInit[]; remoteAudio: HTMLAudioElement | null };
+type ViewerStatus = 'connecting' | 'connected' | 'ended' | 'error';
+type PeerRecord = {
+  id: string;
+  pc: RTCPeerConnection;
+  queued: RTCIceCandidateInit[];
+  remoteAudio: HTMLAudioElement | null;
+  callAudioSender: RTCRtpSender;
+  screenVideoSender: RTCRtpSender;
+  screenAudioSender: RTCRtpSender;
+  chatChannel: RTCDataChannel | null;
+};
 type RuntimeConfig = { viewerOrigin?: string; mode?: 'p2p-stun'; turnEnabled?: boolean };
 type Resolution = 360 | 480 | 720 | 1080;
 type FrameRate = 15 | 30 | 45 | 60;
@@ -22,7 +32,19 @@ type VideoProfile = { resolution: Resolution; fps: FrameRate };
 type ProfileStatus = 'idle' | 'applying' | 'applied' | 'error';
 type ConnectionQuality = 'waiting' | 'excellent' | 'good' | 'limited' | 'blocked';
 type ConnectionMetrics = { bitrateKbps: number; availableKbps: number; rttMs: number; packetLoss: number };
-type HostPanel = 'stream' | 'audio';
+type HostPanel = 'stream' | 'audio' | 'chat';
+type ChatMessage = {
+  id: string;
+  kind: 'message' | 'system';
+  senderId: string;
+  senderName: string;
+  text: string;
+  sentAt: number;
+};
+type ChatWirePayload =
+  | { type: 'chat-send'; text: string }
+  | { type: 'chat-message'; message: ChatMessage }
+  | { type: 'chat-history'; messages: ChatMessage[] };
 
 type WakeLockSentinelLike = {
   released: boolean;
@@ -40,6 +62,9 @@ type PictureInPictureDocument = Document & { pictureInPictureEnabled?: boolean; 
 const RESOLUTIONS: readonly Resolution[] = [360, 480, 720, 1080];
 const FRAME_RATES: readonly FrameRate[] = [15, 30, 45, 60];
 const VIEWER_LIMITS = [1, 2, 3, 4, 5, 6, 7, 8] as const;
+const CHAT_MESSAGE_LIMIT = 1_000;
+const CHAT_HISTORY_LIMIT = 120;
+const CHAT_BUFFER_LIMIT = 256_000;
 const VIDEO_SIZES: Record<Resolution, { width: number; height: number; bitrate: number }> = {
   360: { width: 640, height: 360, bitrate: 1_500_000 },
   480: { width: 854, height: 480, bitrate: 2_500_000 },
@@ -60,6 +85,129 @@ function formatDuration(totalSeconds: number) {
   return hours
     ? `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
     : `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function messageId() {
+  return typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function normalizeChatText(value: unknown) {
+  if (typeof value !== 'string') return '';
+  return value.replace(/\r\n?/g, '\n').trim().slice(0, CHAT_MESSAGE_LIMIT);
+}
+
+function validChatMessage(value: unknown): value is ChatMessage {
+  if (!value || typeof value !== 'object') return false;
+  const message = value as Partial<ChatMessage>;
+  return (
+    typeof message.id === 'string' && message.id.length <= 100 &&
+    (message.kind === 'message' || message.kind === 'system') &&
+    typeof message.senderId === 'string' && message.senderId.length <= 100 &&
+    typeof message.senderName === 'string' && message.senderName.length <= 80 &&
+    typeof message.text === 'string' && message.text.length <= CHAT_MESSAGE_LIMIT &&
+    typeof message.sentAt === 'number' && Number.isFinite(message.sentAt)
+  );
+}
+
+function parseChatPayload(raw: string): ChatWirePayload | null {
+  if (raw.length > 16_000) return null;
+  try {
+    const payload = JSON.parse(raw) as Partial<ChatWirePayload>;
+    if (payload.type === 'chat-send') {
+      const text = normalizeChatText(payload.text);
+      return text ? { type: 'chat-send', text } : null;
+    }
+    if (payload.type === 'chat-message' && validChatMessage(payload.message)) {
+      return { type: 'chat-message', message: payload.message };
+    }
+    if (payload.type === 'chat-history' && Array.isArray(payload.messages)) {
+      const messages = payload.messages.filter(validChatMessage).slice(-CHAT_HISTORY_LIMIT);
+      return { type: 'chat-history', messages };
+    }
+  } catch {
+    // Mensagens inválidas são ignoradas sem afetar a chamada.
+  }
+  return null;
+}
+
+function sendChatPayload(channel: RTCDataChannel | null, payload: ChatWirePayload) {
+  if (!channel || channel.readyState !== 'open' || channel.bufferedAmount > CHAT_BUFFER_LIMIT) return false;
+  const serialized = JSON.stringify(payload);
+  if (serialized.length > 16_000) return false;
+  channel.send(serialized);
+  return true;
+}
+
+function renderMessageText(text: string) {
+  const parts = text.split(/(https?:\/\/[^\s<>]+)/gi);
+  return parts.map((part, index) => /^https?:\/\//i.test(part)
+    ? <a key={`${part}-${index}`} href={part} target="_blank" rel="noreferrer noopener">{part}</a>
+    : part
+  );
+}
+
+function ChatPanel({ messages, currentSenderId, canSend, placeholder, onSend }: {
+  messages: ChatMessage[];
+  currentSenderId: string;
+  canSend: boolean;
+  placeholder: string;
+  onSend: (text: string) => void;
+}) {
+  const [draft, setDraft] = useState('');
+  const listRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const list = listRef.current;
+    if (list) list.scrollTop = list.scrollHeight;
+  }, [messages.length]);
+
+  const submit = (event?: FormEvent) => {
+    event?.preventDefault();
+    const text = normalizeChatText(draft);
+    if (!text || !canSend) return;
+    onSend(text);
+    setDraft('');
+  };
+
+  const handleKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      submit();
+    }
+  };
+
+  return (
+    <div className="chat-panel">
+      <div className="chat-log" ref={listRef} aria-live="polite" aria-label="Mensagens da chamada">
+        {messages.length ? messages.map(message => message.kind === 'system' ? (
+          <p className="chat-system" key={message.id}>{message.text}</p>
+        ) : (
+          <article className={`chat-message ${message.senderId === currentSenderId ? 'is-own' : ''}`} key={message.id}>
+            <header><strong>{message.senderId === currentSenderId ? 'Você' : message.senderName}</strong><time dateTime={new Date(message.sentAt).toISOString()}>{new Date(message.sentAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time></header>
+            <p>{renderMessageText(message.text)}</p>
+          </article>
+        )) : (
+          <div className="chat-empty"><Icon name="message" /><strong>A conversa começa aqui</strong><span>As mensagens são temporárias e somem ao encerrar a chamada.</span></div>
+        )}
+      </div>
+      <form className="chat-composer" onSubmit={submit}>
+        <textarea
+          aria-label="Escrever mensagem"
+          value={draft}
+          maxLength={CHAT_MESSAGE_LIMIT}
+          rows={1}
+          placeholder={placeholder}
+          disabled={!canSend}
+          onChange={event => setDraft(event.currentTarget.value)}
+          onKeyDown={handleKeyDown}
+        />
+        <button type="submit" disabled={!canSend || !normalizeChatText(draft)} aria-label="Enviar mensagem"><Icon name="send" /></button>
+      </form>
+      <small className="chat-hint">Enter envia · Shift+Enter quebra a linha · {draft.length}/{CHAT_MESSAGE_LIMIT}</small>
+    </div>
+  );
 }
 
 function useSessionDuration(startedAt: number | null) {
@@ -204,11 +352,16 @@ type ModelContext = {
 function Icon({ name }: { name: IconName }) {
   const paths: Record<IconName, ReactNode> = {
     screen: <><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></>,
+    screenOff: <><path d="M8 4h11a2 2 0 0 1 2 2v8M17 17H5a2 2 0 0 1-2-2V6c0-.4.1-.8.3-1.1M8 21h8M12 17v4M3 3l18 18"/></>,
     link: <><path d="M10 13a5 5 0 0 0 7.1.1l2-2A5 5 0 0 0 12 4l-1.1 1.1"/><path d="M14 11a5 5 0 0 0-7.1-.1l-2 2A5 5 0 0 0 12 20l1.1-1.1"/></>,
     shield: <><path d="M12 3 4.5 6v5.5c0 4.7 3.2 7.8 7.5 9.5 4.3-1.7 7.5-4.8 7.5-9.5V6L12 3Z"/><path d="m9.5 12 1.7 1.7 3.7-4"/></>,
     stop: <rect x="6" y="6" width="12" height="12" rx="2"/>,
     copy: <><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></>,
     phone: <><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></>,
+    call: <path d="M7.4 3.5 10 8 7.8 10c1.4 2.8 3.4 4.8 6.2 6.2l2-2.2 4.5 2.6-.8 3.8c-.2.8-.9 1.3-1.7 1.2C9.7 20.6 3.4 14.3 2.4 6c-.1-.8.4-1.5 1.2-1.7l3.8-.8Z"/>,
+    hangup: <><path d="M4.3 15.5c4.9-4.6 10.5-4.6 15.4 0"/><path d="m7.2 13.3-1.4 4.2-3.5-1.2M16.8 13.3l1.4 4.2 3.5-1.2"/></>,
+    message: <><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-5.5 4v-4.5A2.5 2.5 0 0 1 4 14V5.5Z"/><path d="M8 8h8M8 12h5"/></>,
+    send: <><path d="m3 4 18 8-18 8 3-8-3-8Z"/><path d="M6 12h15"/></>,
     expand: <><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></>,
     check: <path d="m5 12 4 4L19 6"/>,
     signal: <><path d="M5 12.5a10 10 0 0 1 14 0"/><path d="M8 16a6 6 0 0 1 8 0"/><path d="M11 19.5a2 2 0 0 1 2 0"/></>,
@@ -231,37 +384,45 @@ function Icon({ name }: { name: IconName }) {
 
 function ScreenLinkMascot() {
   return (
-    <svg className="waiting-mascot" viewBox="0 0 180 160" aria-hidden="true">
-      <ellipse className="mascot-shadow" cx="91" cy="144" rx="40" ry="6" />
+    <svg className="waiting-mascot" viewBox="0 0 180 142" aria-hidden="true">
+      <defs>
+        <radialGradient id="screenlink-mascot-body" cx="0" cy="0" r="1" gradientTransform="translate(71 54) rotate(68) scale(91 112)" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#86dce8" />
+          <stop offset=".5" stopColor="#7ad5e2" />
+          <stop offset=".78" stopColor="#70cedc" />
+          <stop offset="1" stopColor="#62bfd1" />
+        </radialGradient>
+        <linearGradient id="screenlink-mascot-ear" x1="90" y1="46" x2="90" y2="75" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#6bcbd8" />
+          <stop offset="1" stopColor="#50aebf" />
+        </linearGradient>
+        <linearGradient id="screenlink-mascot-antenna" x1="90" y1="10" x2="90" y2="31" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#b5f1f5" />
+          <stop offset=".48" stopColor="#86dce7" />
+          <stop offset="1" stopColor="#62c3d3" />
+        </linearGradient>
+        <linearGradient id="screenlink-mascot-lower" x1="90" y1="94" x2="90" y2="132" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#5ab9cb" stopOpacity="0" />
+          <stop offset="1" stopColor="#43a7ba" stopOpacity=".22" />
+        </linearGradient>
+      </defs>
       <g className="mascot-float">
         <g className="mascot-signal-group">
-          <path className="mascot-signal-arc" d="M78 28c8-7 20-8 29-2" />
-          <circle className="mascot-signal" cx="94" cy="20" r="3.5" />
-          <circle className="mascot-signal-ring" cx="94" cy="20" r="7" />
+          <path className="mascot-signal-arc" d="M90 30V20" />
+          <circle className="mascot-signal" cx="90" cy="15.5" r="4.5" fill="url(#screenlink-mascot-antenna)" />
         </g>
-        <path className="mascot-ear mascot-ear-left" d="M51 51C39 43 25 45 23 57c8-3 13 2 14 11 5-3 10-8 14-17Z" />
-        <path className="mascot-ear mascot-ear-right" d="M130 48c13-7 25-3 27 8-7-2-12 3-13 12-6-4-10-10-14-20Z" />
-        <path className="mascot-arm mascot-hand-left" d="M48 87c-10 2-16 9-17 18m0 0-7-5m7 5 2-9" />
-        <path className="mascot-arm" d="M135 84c9 2 14 8 15 16m0 0 6-5m-6 5-1-8" />
-        <path className="mascot-body" d="M53 38c20-13 57-13 77 3 17 14 18 53 4 72-15 20-64 23-86 6-18-14-18-61 5-81Z" />
-        <path className="mascot-belly" d="M58 101c19 11 48 11 67-2-5 19-16 27-34 28-17 0-28-8-33-26Z" />
-        <path className="mascot-highlight" d="M59 43c13-8 35-10 49-6" />
+        <path className="mascot-ear mascot-ear-left" d="M44 49c-10-8-23-9-31-3-7 5-9 13-7 20 10-3 19 1 26 11 3-10 7-19 12-28Z" fill="url(#screenlink-mascot-ear)" />
+        <path className="mascot-ear mascot-ear-right" d="M136 49c10-8 23-9 31-3 7 5 9 13 7 20-10-3-19 1-26 11-3-10-7-19-12-28Z" fill="url(#screenlink-mascot-ear)" />
+        <path className="mascot-body" d="M42 36c14-9 33-12 48-12 16 0 35 3 48 12 14 10 20 30 17 51-2 19-9 32-25 40-17 8-63 8-80 0-16-8-23-21-25-40-3-21 3-41 17-51Z" fill="url(#screenlink-mascot-body)" />
+        <path className="mascot-lower-shade" d="M42 36c14-9 33-12 48-12 16 0 35 3 48 12 14 10 20 30 17 51-2 19-9 32-25 40-17 8-63 8-80 0-16-8-23-21-25-40-3-21 3-41 17-51Z" fill="url(#screenlink-mascot-lower)" />
+        <path className="mascot-highlight" d="M54 46c15-8 34-10 53-8" />
         <g className="mascot-face">
-          <ellipse cx="74" cy="73" rx="4" ry="5" />
-          <ellipse cx="108" cy="72" rx="4" ry="5" />
-          <path d="M82 87c6 5 14 5 20 0" />
+          <ellipse cx="69" cy="78" rx="6.3" ry="6.7" />
+          <ellipse cx="111" cy="78" rx="6.3" ry="6.7" />
+          <path d="M77.5 93.5c8 8 17 8 25 0" />
         </g>
-        <circle className="mascot-cheek" cx="62" cy="87" r="3.5" />
-        <circle className="mascot-cheek" cx="120" cy="86" r="3.5" />
-        <g className="mascot-mark">
-          <rect x="82" y="106" width="12" height="9" rx="3" />
-          <rect x="96" y="106" width="12" height="9" rx="3" />
-          <path d="M92 110h6" />
-        </g>
-        <path className="mascot-leg" d="m72 123-2 10m41-11 2 10" />
-        <path className="mascot-foot" d="M61 136c4-4 9-5 14-3m49 3c-4-4-9-5-14-3" />
-        <g className="mascot-spark mascot-spark-one"><path d="m147 29 1-9m-5 5 10-1" /></g>
-        <g className="mascot-spark mascot-spark-two"><path d="m31 40-3-6m0 8-7-2" /></g>
+        <circle className="mascot-cheek" cx="56.5" cy="94" r="4.6" />
+        <circle className="mascot-cheek" cx="123.5" cy="94" r="4.6" />
       </g>
     </svg>
   );
@@ -285,9 +446,17 @@ function send(socket: WebSocket | null, payload: object) {
 
 function closePeer(record: PeerRecord | null) {
   if (!record) return;
+  if (record.chatChannel) {
+    record.chatChannel.onopen = null;
+    record.chatChannel.onmessage = null;
+    record.chatChannel.onclose = null;
+    record.chatChannel.close();
+    record.chatChannel = null;
+  }
   record.pc.onicecandidate = null;
   record.pc.onconnectionstatechange = null;
   record.pc.ontrack = null;
+  record.pc.ondatachannel = null;
   record.pc.close();
   if (record.remoteAudio) {
     const stream = record.remoteAudio.srcObject instanceof MediaStream ? record.remoteAudio.srcObject : null;
@@ -306,6 +475,8 @@ function HostApp() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const inviteInputRef = useRef<HTMLInputElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const callOutboundStreamRef = useRef(new MediaStream());
+  const screenOutboundStreamRef = useRef(new MediaStream());
   const socketRef = useRef<WebSocket | null>(null);
   const peersRef = useRef(new Map<string, PeerRecord>());
   const inviteRef = useRef<Invite | null>(null);
@@ -322,9 +493,10 @@ function HostApp() {
   const microphoneSourceStreamRef = useRef<MediaStream | null>(null);
   const microphoneAudioContextRef = useRef<AudioContext | null>(null);
   const microphoneGainRef = useRef<GainNode | null>(null);
+  const microphoneRequestRef = useRef<Promise<MediaStreamTrack | null> | null>(null);
   const videoPausedRef = useRef(false);
   const audioEnabledRef = useRef(true);
-  const microphoneEnabledRef = useRef(false);
+  const microphoneEnabledRef = useRef(true);
   const inputVolumeRef = useRef(100);
   const outputVolumeRef = useRef(100);
   const viewerVolumesRef = useRef<Record<string, number>>({});
@@ -337,8 +509,11 @@ function HostApp() {
   const handleSignalRef = useRef<(message: ServerMessage) => Promise<void>>(async () => undefined);
   const connectHostSignalRef = useRef<() => void>(() => undefined);
   const stopSharingRef = useRef<() => void>(() => {});
+  const chatMessagesRef = useRef<ChatMessage[]>([]);
+  const panelSectionRef = useRef<HostPanel>('stream');
 
-  const [status, setStatus] = useState<HostStatus>('idle');
+  const [status, setStatus] = useState<CallState>('idle');
+  const [screenShareState, setScreenShareState] = useState<ScreenShareState>('idle');
   const [audience, setAudience] = useState<AudienceStatus>('empty');
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [sourceLabel, setSourceLabel] = useState('');
@@ -358,7 +533,7 @@ function HostApp() {
   const [videoPaused, setVideoPaused] = useState(false);
   const [audioEnabled, setAudioEnabled] = useState(true);
   const [audioAvailable, setAudioAvailable] = useState<boolean | null>(null);
-  const [microphoneEnabled, setMicrophoneEnabled] = useState(false);
+  const [microphoneEnabled, setMicrophoneEnabled] = useState(true);
   const [microphoneAvailable, setMicrophoneAvailable] = useState<boolean | null>(null);
   const [panelSection, setPanelSection] = useState<HostPanel>('stream');
   const [inputVolume, setInputVolume] = useState(100);
@@ -368,6 +543,8 @@ function HostApp() {
   const [qrCode, setQrCode] = useState('');
   const [qrOpen, setQrOpen] = useState(false);
   const [sessionStartedAt, setSessionStartedAt] = useState<number | null>(null);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatUnread, setChatUnread] = useState(0);
   const sessionDuration = useSessionDuration(sessionStartedAt);
   useEffect(() => {
     const controller = new AbortController();
@@ -386,6 +563,11 @@ function HostApp() {
   useEffect(() => { videoPausedRef.current = videoPaused; }, [videoPaused]);
   useEffect(() => { automaticQualityRef.current = automaticQuality; }, [automaticQuality]);
   useEffect(() => { maxViewersRef.current = maxViewers; }, [maxViewers]);
+  useEffect(() => { chatMessagesRef.current = chatMessages; }, [chatMessages]);
+  useEffect(() => {
+    panelSectionRef.current = panelSection;
+    if (panelSection === 'chat') setChatUnread(0);
+  }, [panelSection]);
 
   useEffect(() => {
     let active = true;
@@ -411,6 +593,47 @@ function HostApp() {
     window.addEventListener('keydown', closeOnEscape);
     return () => window.removeEventListener('keydown', closeOnEscape);
   }, [qrOpen]);
+
+  const appendChatMessage = useCallback((message: ChatMessage, notify = false) => {
+    const nextMessages = [...chatMessagesRef.current, message].slice(-CHAT_HISTORY_LIMIT);
+    chatMessagesRef.current = nextMessages;
+    setChatMessages(nextMessages);
+    if (notify && panelSectionRef.current !== 'chat') setChatUnread(current => current + 1);
+  }, []);
+
+  const broadcastChatMessage = useCallback((message: ChatMessage) => {
+    for (const peer of peersRef.current.values()) {
+      sendChatPayload(peer.chatChannel, { type: 'chat-message', message });
+    }
+  }, []);
+
+  const publishSystemMessage = useCallback((text: string) => {
+    const message: ChatMessage = {
+      id: messageId(),
+      kind: 'system',
+      senderId: 'system',
+      senderName: 'ScreenLink',
+      text,
+      sentAt: Date.now()
+    };
+    appendChatMessage(message);
+    broadcastChatMessage(message);
+  }, [appendChatMessage, broadcastChatMessage]);
+
+  const sendHostChat = useCallback((text: string) => {
+    const normalized = normalizeChatText(text);
+    if (!normalized || status !== 'connected') return;
+    const message: ChatMessage = {
+      id: messageId(),
+      kind: 'message',
+      senderId: 'host',
+      senderName: 'Apresentador',
+      text: normalized,
+      sentAt: Date.now()
+    };
+    appendChatMessage(message);
+    broadcastChatMessage(message);
+  }, [appendChatMessage, broadcastChatMessage, status]);
 
   const syncAudience = useCallback(() => {
     const peers = [...peersRef.current.values()];
@@ -449,8 +672,12 @@ function HostApp() {
   }, []);
 
   const disposeMicrophonePipeline = useCallback(() => {
+    const outboundTrack = microphoneTrackRef.current;
+    microphoneTrackRef.current = null;
+    if (outboundTrack && !microphoneSourceStreamRef.current?.getTracks().includes(outboundTrack)) outboundTrack.stop();
     stopStream(microphoneSourceStreamRef.current);
     microphoneSourceStreamRef.current = null;
+    for (const track of callOutboundStreamRef.current.getTracks()) callOutboundStreamRef.current.removeTrack(track);
     microphoneGainRef.current = null;
     const context = microphoneAudioContextRef.current;
     microphoneAudioContextRef.current = null;
@@ -490,6 +717,7 @@ function HostApp() {
   }, []);
 
   const broadcastMediaState = useCallback((overrides: Partial<{
+    screenSharing: boolean;
     videoPaused: boolean;
     screenAudioEnabled: boolean;
     microphoneEnabled: boolean;
@@ -498,8 +726,9 @@ function HostApp() {
       send(socketRef.current, {
         type: 'media-state',
         peerId,
+        screenSharing: overrides.screenSharing ?? Boolean(streamRef.current),
         videoPaused: overrides.videoPaused ?? videoPausedRef.current,
-        screenAudioEnabled: overrides.screenAudioEnabled ?? audioEnabledRef.current,
+        screenAudioEnabled: overrides.screenAudioEnabled ?? Boolean(streamRef.current && screenAudioTracksRef.current.length && audioEnabledRef.current),
         microphoneEnabled: overrides.microphoneEnabled ?? microphoneEnabledRef.current
       });
     }
@@ -528,8 +757,7 @@ function HostApp() {
         frameRate: { ideal: settings.fps, max: settings.fps }
       });
       await Promise.all([...peersRef.current.values()].map(async peer => {
-        const sender = peer.pc.getSenders().find(candidate => candidate.track?.kind === 'video');
-        if (sender) await configureVideoSender(sender, profile);
+        if (peer.screenVideoSender.track) await configureVideoSender(peer.screenVideoSender, profile);
       }));
       if (profileRequestRef.current === requestId) setProfileStatus('applied');
     } catch {
@@ -567,23 +795,92 @@ function HostApp() {
     broadcastMediaState({ screenAudioEnabled: nextEnabled });
   }, [broadcastMediaState]);
 
-  const toggleMicrophone = useCallback(() => {
-    const nextEnabled = !microphoneEnabledRef.current;
-    if (!streamRef.current) {
-      microphoneEnabledRef.current = nextEnabled;
-      setMicrophoneEnabled(nextEnabled);
-      return;
-    }
-    const track = microphoneTrackRef.current;
-    if (!track) {
+  const ensureHostMicrophone = useCallback(async () => {
+    const existing = microphoneTrackRef.current;
+    if (existing?.readyState === 'live') return existing;
+    if (!navigator.mediaDevices?.getUserMedia) {
       setMicrophoneAvailable(false);
-      return;
+      return null;
     }
-    track.enabled = nextEnabled;
+    if (microphoneRequestRef.current) return microphoneRequestRef.current;
+
+    const request = (async () => {
+      try {
+        const microphoneStream = await navigator.mediaDevices.getUserMedia({
+          video: false,
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+        });
+        disposeMicrophonePipeline();
+        microphoneSourceStreamRef.current = microphoneStream;
+        const sourceTrack = microphoneStream.getAudioTracks()[0] ?? null;
+        if (!sourceTrack) throw new Error('Microphone track unavailable');
+
+        let outboundTrack = sourceTrack;
+        try {
+          const audioContext = new AudioContext();
+          const source = audioContext.createMediaStreamSource(new MediaStream([sourceTrack]));
+          const gain = audioContext.createGain();
+          const destination = audioContext.createMediaStreamDestination();
+          gain.gain.value = inputVolumeRef.current / 100;
+          source.connect(gain).connect(destination);
+          microphoneAudioContextRef.current = audioContext;
+          microphoneGainRef.current = gain;
+          outboundTrack = destination.stream.getAudioTracks()[0] ?? sourceTrack;
+          void audioContext.resume().catch(() => undefined);
+        } catch {
+          // O áudio bruto continua disponível caso o pipeline de ganho não exista.
+        }
+
+        microphoneTrackRef.current = outboundTrack;
+        callOutboundStreamRef.current.addTrack(outboundTrack);
+        outboundTrack.enabled = microphoneEnabledRef.current;
+        setMicrophoneAvailable(true);
+        outboundTrack.addEventListener('ended', () => {
+          if (microphoneTrackRef.current !== outboundTrack) return;
+          microphoneTrackRef.current = null;
+          microphoneEnabledRef.current = false;
+          setMicrophoneEnabled(false);
+          setMicrophoneAvailable(false);
+          for (const peer of peersRef.current.values()) void peer.callAudioSender.replaceTrack(null).catch(() => undefined);
+          broadcastMediaState({ microphoneEnabled: false });
+        }, { once: true });
+
+        await Promise.all([...peersRef.current.values()].map(peer => peer.callAudioSender.replaceTrack(outboundTrack)));
+        return outboundTrack;
+      } catch {
+        disposeMicrophonePipeline();
+        setMicrophoneAvailable(false);
+        return null;
+      } finally {
+        microphoneRequestRef.current = null;
+      }
+    })();
+    microphoneRequestRef.current = request;
+    return request;
+  }, [broadcastMediaState, disposeMicrophonePipeline]);
+
+  const toggleMicrophone = useCallback(async () => {
+    const nextEnabled = !microphoneEnabledRef.current;
     microphoneEnabledRef.current = nextEnabled;
     setMicrophoneEnabled(nextEnabled);
-    broadcastMediaState({ microphoneEnabled: nextEnabled });
-  }, [broadcastMediaState]);
+
+    if (!nextEnabled) {
+      if (microphoneTrackRef.current) microphoneTrackRef.current.enabled = false;
+      broadcastMediaState({ microphoneEnabled: false });
+      return;
+    }
+
+    const track = await ensureHostMicrophone();
+    if (!track) {
+      microphoneEnabledRef.current = false;
+      setMicrophoneEnabled(false);
+      broadcastMediaState({ microphoneEnabled: false });
+      return;
+    }
+    track.enabled = true;
+    await Promise.all([...peersRef.current.values()].map(peer => peer.callAudioSender.replaceTrack(track).catch(() => undefined)));
+    broadcastMediaState({ microphoneEnabled: true });
+  }, [broadcastMediaState, ensureHostMicrophone]);
 
   const toggleVideoPaused = useCallback(() => {
     const stream = streamRef.current;
@@ -603,10 +900,13 @@ function HostApp() {
     const socket = socketRef.current;
     socketRef.current = null;
     socket?.close(1000, 'Session failed');
-    stopStream(streamRef.current);
-    disposeMicrophonePipeline();
+    const activeScreen = streamRef.current;
     streamRef.current = null;
+    stopStream(activeScreen);
+    disposeMicrophonePipeline();
+    for (const track of screenOutboundStreamRef.current.getTracks()) screenOutboundStreamRef.current.removeTrack(track);
     setLocalStream(null);
+    setScreenShareState('idle');
     setSourceLabel('');
     inviteRef.current = null;
     setShareUrl('');
@@ -619,11 +919,37 @@ function HostApp() {
     setMicrophoneAvailable(null);
     setConnectionQuality('waiting');
     setSessionStartedAt(null);
+    chatMessagesRef.current = [];
+    setChatMessages([]);
+    setChatUnread(0);
     setError(message);
     setStatus('error');
   }, [clearConnectionTimer, clearReconnectTimer, destroyAllPeers, disposeMicrophonePipeline]);
 
-  const stopSharing = useCallback(() => {
+  const stopScreenShare = useCallback(async (announce = true) => {
+    const stream = streamRef.current;
+    if (!stream || stoppingRef.current) return;
+    streamRef.current = null;
+    setLocalStream(null);
+    setScreenShareState('idle');
+    setSourceLabel('');
+    setProfileStatus('idle');
+    screenAudioTracksRef.current = [];
+    for (const track of screenOutboundStreamRef.current.getTracks()) screenOutboundStreamRef.current.removeTrack(track);
+    videoPausedRef.current = false;
+    setVideoPaused(false);
+    setAudioAvailable(null);
+    await Promise.all([...peersRef.current.values()].flatMap(peer => [
+      peer.screenVideoSender.replaceTrack(null).catch(() => undefined),
+      peer.screenAudioSender.replaceTrack(null).catch(() => undefined)
+    ]));
+    stopStream(stream);
+    broadcastMediaState({ screenSharing: false, videoPaused: false, screenAudioEnabled: false });
+    if (announce && inviteRef.current) publishSystemMessage('O compartilhamento de tela foi encerrado.');
+  }, [broadcastMediaState, publishSystemMessage]);
+  stopSharingRef.current = () => { void stopScreenShare(); };
+
+  const endCall = useCallback(() => {
     stoppingRef.current = true;
     clearConnectionTimer();
     clearReconnectTimer();
@@ -632,11 +958,14 @@ function HostApp() {
     socketRef.current = null;
     socket?.close(1000, 'Host ended');
     destroyAllPeers();
-    stopStream(streamRef.current);
-    disposeMicrophonePipeline();
+    const activeScreen = streamRef.current;
     streamRef.current = null;
+    stopStream(activeScreen);
+    disposeMicrophonePipeline();
+    for (const track of screenOutboundStreamRef.current.getTracks()) screenOutboundStreamRef.current.removeTrack(track);
     inviteRef.current = null;
     setLocalStream(null);
+    setScreenShareState('idle');
     setSourceLabel('');
     setShareUrl('');
     setCopied(false);
@@ -650,15 +979,14 @@ function HostApp() {
     setConnectionQuality('waiting');
     setConnectionMetrics({ bitrateKbps: 0, availableKbps: 0, rttMs: 0, packetLoss: 0 });
     setSessionStartedAt(null);
+    chatMessagesRef.current = [];
+    setChatMessages([]);
+    setChatUnread(0);
     setError('');
     setStatus('idle');
   }, [clearConnectionTimer, clearReconnectTimer, destroyAllPeers, disposeMicrophonePipeline]);
-  stopSharingRef.current = stopSharing;
 
   const createPeerForViewer = useCallback(async (peerId: string, force = false) => {
-    const stream = streamRef.current;
-    if (!stream) return;
-
     const existing = peersRef.current.get(peerId);
     if (existing && !force && existing.pc.connectionState !== 'failed' && existing.pc.connectionState !== 'closed') {
       const pendingOffer = existing.pc.localDescription;
@@ -676,60 +1004,114 @@ function HostApp() {
       bundlePolicy: 'max-bundle',
       iceCandidatePoolSize: 4
     });
-    if (!viewerLabelsRef.current.has(peerId)) {
-      viewerLabelsRef.current.set(peerId, nextViewerLabelRef.current++);
-    }
+    if (!viewerLabelsRef.current.has(peerId)) viewerLabelsRef.current.set(peerId, nextViewerLabelRef.current++);
     if (viewerVolumesRef.current[peerId] === undefined) {
       viewerVolumesRef.current = { ...viewerVolumesRef.current, [peerId]: 100 };
       setViewerVolumes(viewerVolumesRef.current);
     }
-    const record: PeerRecord = { id: peerId, pc, queued: [], remoteAudio: null };
+
+    const microphoneTrack = microphoneTrackRef.current?.readyState === 'live' ? microphoneTrackRef.current : null;
+    const screenVideoTrack = streamRef.current?.getVideoTracks()[0] ?? null;
+    const screenAudioTrack = streamRef.current?.getAudioTracks()[0] ?? null;
+    const callAudioTransceiver = pc.addTransceiver(microphoneTrack ?? 'audio', {
+      direction: 'sendrecv',
+      streams: [callOutboundStreamRef.current]
+    });
+    const screenVideoTransceiver = pc.addTransceiver(screenVideoTrack ?? 'video', {
+      direction: 'sendonly',
+      streams: [screenOutboundStreamRef.current]
+    });
+    const screenAudioTransceiver = pc.addTransceiver(screenAudioTrack ?? 'audio', {
+      direction: 'sendonly',
+      streams: [screenOutboundStreamRef.current]
+    });
+    const chatChannel = pc.createDataChannel('chat', { ordered: true });
+    chatChannel.bufferedAmountLowThreshold = 64_000;
+
+    const record: PeerRecord = {
+      id: peerId,
+      pc,
+      queued: [],
+      remoteAudio: null,
+      callAudioSender: callAudioTransceiver.sender,
+      screenVideoSender: screenVideoTransceiver.sender,
+      screenAudioSender: screenAudioTransceiver.sender,
+      chatChannel
+    };
     peersRef.current.set(peerId, record);
     syncAudience();
 
-    for (const track of stream.getTracks()) {
-      const sender = pc.addTrack(track, stream);
-      if (track.kind === 'video') {
-        track.contentHint = videoProfileRef.current.fps >= 45 ? 'motion' : 'detail';
-        await configureVideoSender(sender, videoProfileRef.current).catch(() => undefined);
-      }
-    }
-
-    pc.onicecandidate = event => {
-      if (event.candidate) {
-        send(socketRef.current, { type: 'ice-candidate', peerId, candidate: event.candidate.toJSON() });
-      }
-    };
-    pc.ontrack = event => {
-      if (event.track.kind !== 'audio') return;
+    const attachViewerAudio = (track: MediaStreamTrack) => {
+      const currentStream = record.remoteAudio?.srcObject instanceof MediaStream ? record.remoteAudio.srcObject : null;
+      if (currentStream?.getTrackById(track.id)) return;
       if (record.remoteAudio) {
-        const previousStream = record.remoteAudio.srcObject instanceof MediaStream ? record.remoteAudio.srcObject : null;
-        previousStream?.getTracks().forEach(track => track.stop());
+        currentStream?.getTracks().forEach(previousTrack => previousTrack.stop());
         record.remoteAudio.srcObject = null;
         record.remoteAudio.remove();
       }
       const audio = document.createElement('audio');
       audio.autoplay = true;
-      audio.srcObject = new MediaStream([event.track]);
+      audio.srcObject = new MediaStream([track]);
       audio.dataset.screenlinkViewer = peerId;
       audio.style.display = 'none';
       document.body.append(audio);
       record.remoteAudio = audio;
       applyViewerVolume(peerId);
-      syncAudience();
-      event.track.addEventListener('ended', () => {
+      const syncRemoteVoice = () => syncAudience();
+      track.addEventListener('mute', syncRemoteVoice);
+      track.addEventListener('unmute', syncRemoteVoice);
+      track.addEventListener('ended', () => {
         if (record.remoteAudio !== audio) return;
         audio.srcObject = null;
         audio.remove();
         record.remoteAudio = null;
         syncAudience();
       }, { once: true });
+      syncAudience();
       void audio.play().catch(() => undefined);
     };
+    attachViewerAudio(callAudioTransceiver.receiver.track);
+
+    if (screenVideoTrack) {
+      screenVideoTrack.contentHint = videoProfileRef.current.fps >= 45 ? 'motion' : 'detail';
+      await configureVideoSender(screenVideoTransceiver.sender, videoProfileRef.current).catch(() => undefined);
+    }
+
+    chatChannel.onopen = () => {
+      const history = [...chatMessagesRef.current];
+      while (history.length > 1 && JSON.stringify({ type: 'chat-history', messages: history }).length > 15_000) history.shift();
+      sendChatPayload(chatChannel, { type: 'chat-history', messages: history });
+      syncAudience();
+    };
+    chatChannel.onmessage = event => {
+      if (typeof event.data !== 'string') return;
+      const payload = parseChatPayload(event.data);
+      if (payload?.type !== 'chat-send') return;
+      const viewerNumber = viewerLabelsRef.current.get(peerId) ?? 1;
+      const message: ChatMessage = {
+        id: messageId(),
+        kind: 'message',
+        senderId: peerId,
+        senderName: `Espectador ${viewerNumber}`,
+        text: payload.text,
+        sentAt: Date.now()
+      };
+      appendChatMessage(message, true);
+      broadcastChatMessage(message);
+    };
+    chatChannel.onclose = () => {
+      if (record.chatChannel === chatChannel) record.chatChannel = null;
+    };
+
+    pc.onicecandidate = event => {
+      if (event.candidate) send(socketRef.current, { type: 'ice-candidate', peerId, candidate: event.candidate.toJSON() });
+    };
+    pc.ontrack = event => {
+      if (event.track.kind !== 'audio') return;
+      attachViewerAudio(event.track);
+    };
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'connected') {
-        setConnectionQuality('good');
-      }
+      if (pc.connectionState === 'connected') setConnectionQuality('good');
       syncAudience();
       if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
         if (pc.connectionState === 'failed') setConnectionQuality('blocked');
@@ -741,7 +1123,7 @@ function HostApp() {
     await pc.setLocalDescription(offer);
     send(socketRef.current, { type: 'offer', peerId, sdp: offer });
     broadcastMediaState();
-  }, [applyViewerVolume, broadcastMediaState, destroyPeer, syncAudience]);
+  }, [appendChatMessage, applyViewerVolume, broadcastChatMessage, broadcastMediaState, destroyPeer, syncAudience]);
 
   const handleSignal = useCallback(async (message: ServerMessage) => {
     if (message.type === 'room-created') {
@@ -768,20 +1150,27 @@ function HostApp() {
           await createPeerForViewer(peerId, Boolean(peer));
         }
       }
-      setStatus('live');
+      setStatus('connected');
       setError('');
       setSessionStartedAt(current => current ?? Date.now());
       syncAudience();
       return;
     }
     if (message.type === 'viewer-joined') {
+      const wasKnown = viewerLabelsRef.current.has(message.peerId);
       const peer = peersRef.current.get(message.peerId);
       const shouldRebuild = Boolean(peer && (peer.pc.connectionState === 'failed' || peer.pc.connectionState === 'closed' || peer.pc.connectionState === 'disconnected'));
       await createPeerForViewer(message.peerId, shouldRebuild);
+      if (!message.resumed && !wasKnown) {
+        const viewerNumber = viewerLabelsRef.current.get(message.peerId) ?? 1;
+        publishSystemMessage(`Espectador ${viewerNumber} entrou na chamada.`);
+      }
       return;
     }
     if (message.type === 'viewer-left') {
+      const viewerNumber = viewerLabelsRef.current.get(message.peerId);
       destroyPeer(message.peerId);
+      if (viewerNumber) publishSystemMessage(`Espectador ${viewerNumber} saiu da chamada.`);
       return;
     }
     if (message.type === 'offer') {
@@ -822,12 +1211,12 @@ function HostApp() {
       }
       failSession(message.message);
     }
-  }, [clearConnectionTimer, clearReconnectTimer, createPeerForViewer, destroyPeer, failSession, syncAudience]);
+  }, [clearConnectionTimer, clearReconnectTimer, createPeerForViewer, destroyPeer, failSession, publishSystemMessage, syncAudience]);
   handleSignalRef.current = handleSignal;
 
   const connectHostSignal = useCallback(() => {
     const invite = inviteRef.current;
-    if (!invite || !streamRef.current || stoppingRef.current) return;
+    if (!invite || stoppingRef.current) return;
 
     clearConnectionTimer();
     const previousSocket = socketRef.current;
@@ -839,7 +1228,7 @@ function HostApp() {
     const socket = new WebSocket(signalUrl());
     socketRef.current = socket;
     setStatus(reconnectAttemptRef.current ? 'reconnecting' : 'starting');
-    if (reconnectAttemptRef.current) setError('Reconectando ao serviço sem interromper sua tela…');
+    setError('');
 
     connectionTimerRef.current = window.setTimeout(() => {
       if (socketRef.current === socket && socket.readyState !== WebSocket.OPEN) {
@@ -875,17 +1264,43 @@ function HostApp() {
   }, [clearConnectionTimer, clearReconnectTimer]);
   connectHostSignalRef.current = connectHostSignal;
 
-  const startSharing = useCallback(async () => {
+  const startCall = useCallback(async () => {
+    if (status === 'starting' || status === 'reconnecting' || status === 'connected') return;
     setError('');
     setCopied(false);
+    stoppingRef.current = false;
+    setStatus('starting');
+
+    if (microphoneEnabledRef.current) {
+      const microphone = await ensureHostMicrophone();
+      if (!microphone) {
+        microphoneEnabledRef.current = false;
+        setMicrophoneEnabled(false);
+      }
+    }
+
+    const invite = createPrivateRoom();
+    inviteRef.current = invite;
+    setShareUrl(inviteUrl(invite, viewerOriginRef.current));
+    reconnectAttemptRef.current = 0;
+    connectHostSignalRef.current();
+  }, [ensureHostMicrophone, status]);
+
+  const startScreenShare = useCallback(async () => {
+    if (screenShareState === 'selecting') return;
+    setError('');
     if (!navigator.mediaDevices?.getDisplayMedia) {
       setError('Use Chrome ou Edge no computador para compartilhar a tela.');
-      setStatus('error');
+      return;
+    }
+    if (!inviteRef.current) {
+      setError('Inicie a chamada antes de compartilhar uma tela.');
       return;
     }
 
-    stoppingRef.current = false;
-    setStatus('starting');
+    const previousStream = streamRef.current;
+    let selectedStream: MediaStream | null = null;
+    setScreenShareState('selecting');
     try {
       const selectedProfile = videoProfileRef.current;
       const selectedSettings = videoSettings(selectedProfile);
@@ -897,68 +1312,60 @@ function HostApp() {
         },
         audio: audioEnabledRef.current
       });
-      stream.getVideoTracks()[0]!.contentHint = selectedProfile.fps >= 45 ? 'motion' : 'detail';
-      const capturedAudio = stream.getAudioTracks();
-      screenAudioTracksRef.current = capturedAudio;
-      setAudioAvailable(capturedAudio.length > 0);
-      for (const track of capturedAudio) track.enabled = audioEnabledRef.current;
+      selectedStream = stream;
+      const videoTrack = stream.getVideoTracks()[0] ?? null;
+      if (!videoTrack) throw new Error('Screen video track unavailable');
+      videoTrack.contentHint = selectedProfile.fps >= 45 ? 'motion' : 'detail';
+      const screenAudioTracks = stream.getAudioTracks();
+      const screenAudioTrack = screenAudioTracks[0] ?? null;
+      for (const track of screenAudioTracks) track.enabled = audioEnabledRef.current;
 
-      if (microphoneEnabledRef.current && navigator.mediaDevices?.getUserMedia) {
-        try {
-          const microphoneStream = await navigator.mediaDevices.getUserMedia({
-            video: false,
-            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-          });
-          microphoneSourceStreamRef.current = microphoneStream;
-          const sourceTrack = microphoneStream.getAudioTracks()[0] ?? null;
-          let microphoneTrack = sourceTrack;
-          if (sourceTrack) {
-            const audioContext = new AudioContext();
-            const source = audioContext.createMediaStreamSource(new MediaStream([sourceTrack]));
-            const gain = audioContext.createGain();
-            const destination = audioContext.createMediaStreamDestination();
-            gain.gain.value = inputVolumeRef.current / 100;
-            source.connect(gain).connect(destination);
-            microphoneAudioContextRef.current = audioContext;
-            microphoneGainRef.current = gain;
-            microphoneTrack = destination.stream.getAudioTracks()[0] ?? sourceTrack;
-            void audioContext.resume().catch(() => undefined);
-          }
-          microphoneTrackRef.current = microphoneTrack;
-          setMicrophoneAvailable(Boolean(microphoneTrack));
-          if (microphoneTrack) stream.addTrack(microphoneTrack);
-        } catch {
-          disposeMicrophonePipeline();
-          microphoneTrackRef.current = null;
-          microphoneEnabledRef.current = false;
-          setMicrophoneEnabled(false);
-          setMicrophoneAvailable(false);
-        }
-      } else {
-        microphoneTrackRef.current = null;
-        setMicrophoneAvailable(null);
-      }
+      const outboundStream = screenOutboundStreamRef.current;
+      for (const track of outboundStream.getTracks()) outboundStream.removeTrack(track);
+      outboundStream.addTrack(videoTrack);
+      if (screenAudioTrack) outboundStream.addTrack(screenAudioTrack);
+
+      await Promise.all([...peersRef.current.values()].map(async peer => {
+        await peer.screenVideoSender.replaceTrack(videoTrack);
+        await peer.screenAudioSender.replaceTrack(screenAudioTrack);
+        await configureVideoSender(peer.screenVideoSender, selectedProfile).catch(() => undefined);
+      }));
 
       streamRef.current = stream;
+      screenAudioTracksRef.current = screenAudioTracks;
       setLocalStream(stream);
-      setSourceLabel(stream.getVideoTracks()[0]?.label || 'Tela ou janela selecionada');
+      setSourceLabel(videoTrack.label || 'Tela ou janela selecionada');
+      setAudioAvailable(Boolean(screenAudioTrack));
       videoPausedRef.current = false;
       setVideoPaused(false);
-      stream.getVideoTracks()[0]?.addEventListener('ended', () => stopSharingRef.current(), { once: true });
-
-      const invite = createPrivateRoom();
-      inviteRef.current = invite;
-      setShareUrl(inviteUrl(invite, viewerOriginRef.current));
-      reconnectAttemptRef.current = 0;
-      connectHostSignalRef.current();
+      setScreenShareState('sharing');
+      videoTrack.addEventListener('ended', () => {
+        if (streamRef.current?.getVideoTracks()[0] === videoTrack) stopSharingRef.current();
+      }, { once: true });
+      if (previousStream && previousStream !== stream) stopStream(previousStream);
+      broadcastMediaState({
+        screenSharing: true,
+        videoPaused: false,
+        screenAudioEnabled: Boolean(screenAudioTrack && audioEnabledRef.current)
+      });
+      publishSystemMessage(previousStream ? 'A tela compartilhada foi trocada.' : 'O compartilhamento de tela começou.');
     } catch (reason) {
-      if ((reason as DOMException)?.name === 'NotAllowedError') {
-        setStatus('idle');
-      } else {
-        failSession('Não foi possível iniciar o compartilhamento. Tente novamente.');
+      if (selectedStream && selectedStream !== streamRef.current) stopStream(selectedStream);
+      const outboundStream = screenOutboundStreamRef.current;
+      for (const track of outboundStream.getTracks()) outboundStream.removeTrack(track);
+      for (const track of previousStream?.getTracks() ?? []) outboundStream.addTrack(track);
+      const previousVideoTrack = previousStream?.getVideoTracks()[0] ?? null;
+      const previousAudioTrack = previousStream?.getAudioTracks()[0] ?? null;
+      await Promise.all([...peersRef.current.values()].flatMap(peer => [
+        peer.screenVideoSender.replaceTrack(previousVideoTrack).catch(() => undefined),
+        peer.screenAudioSender.replaceTrack(previousAudioTrack).catch(() => undefined)
+      ]));
+      setScreenShareState(previousStream ? 'sharing' : 'idle');
+      if ((reason as DOMException)?.name !== 'NotAllowedError') {
+        setError('Não foi possível compartilhar essa tela. Tente outra fonte ou um perfil menor.');
       }
     }
-  }, [disposeMicrophonePipeline, failSession]);
+  }, [broadcastMediaState, publishSystemMessage, screenShareState]);
 
   useEffect(() => {
     if (videoRef.current) videoRef.current.srcObject = localStream;
@@ -977,7 +1384,7 @@ function HostApp() {
   }, []);
 
   useEffect(() => {
-    if (!localStream) {
+    if (!shareUrl) {
       previousStatsRef.current = null;
       return;
     }
@@ -1023,7 +1430,7 @@ function HostApp() {
         setConnectionMetrics(metrics);
         setConnectionQuality(classifyConnection(metrics));
 
-        if (automaticQualityRef.current && !adapting) {
+        if (streamRef.current && automaticQualityRef.current && !adapting) {
           const target = automaticProfile(metrics);
           const current = videoProfileRef.current;
           if (target.resolution !== current.resolution || target.fps !== current.fps) {
@@ -1043,11 +1450,11 @@ function HostApp() {
       window.clearInterval(timer);
       previousStatsRef.current = null;
     };
-  }, [applyVideoProfile, localStream]);
+  }, [applyVideoProfile, shareUrl]);
 
   useEffect(() => {
     const recoverSignaling = () => {
-      if (!streamRef.current || stoppingRef.current) return;
+      if (!inviteRef.current || stoppingRef.current) return;
       const socket = socketRef.current;
       if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) return;
       clearReconnectTimer();
@@ -1096,7 +1503,7 @@ function HostApp() {
       description: 'Read whether this computer is sharing and whether a viewer is connected.',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       annotations: { readOnlyHint: true, untrustedContentHint: false },
-      execute: () => ({ sharing: status === 'live', viewer: audience })
+      execute: () => ({ call: status === 'connected', sharing: Boolean(localStream), viewer: audience })
     });
     safeRegister({
       name: 'stop_screen_share',
@@ -1105,13 +1512,13 @@ function HostApp() {
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       annotations: { readOnlyHint: false, untrustedContentHint: false },
       execute: () => {
-        if (status !== 'live') throw new Error('No ScreenLink transmission is active.');
-        stopSharing();
+        if (!localStream) throw new Error('No ScreenLink screen share is active.');
+        void stopScreenShare();
         return { sharing: false };
       }
     });
     return () => lifecycle.abort();
-  }, [audience, status, stopSharing]);
+  }, [audience, localStream, status, stopScreenShare]);
 
   async function copyInvite() {
     if (!shareUrl) return;
@@ -1139,11 +1546,11 @@ function HostApp() {
   }
 
   const hostLabel = status === 'starting'
-    ? 'Preparando'
+    ? 'Acordando servidor'
     : status === 'reconnecting'
       ? 'Reconectando'
-      : status === 'live'
-        ? videoPaused ? 'Pausado' : 'Sessão ativa'
+      : status === 'connected'
+        ? 'Chamada ativa'
         : status === 'error' ? 'Atenção' : 'Pronto';
   const audienceCopy = connectedViewerCount > 0
     ? `${connectedViewerCount} espectador${connectedViewerCount === 1 ? '' : 'es'} conectado${connectedViewerCount === 1 ? '' : 's'} · limite ${maxViewers}`
@@ -1163,33 +1570,36 @@ function HostApp() {
     ? `${(connectionMetrics.bitrateKbps / 1_000).toFixed(1)} Mbps · ${connectionMetrics.rttMs || '—'} ms`
     : 'WebRTC P2P direto';
   const screenAudioCopy = !localStream
-    ? audioEnabled ? 'Solicitar ao escolher a tela' : 'Começar sem som do sistema'
+    ? 'Disponível ao compartilhar uma tela'
     : audioAvailable
       ? audioEnabled ? 'Som da tela sendo enviado' : 'Som da tela silenciado'
       : 'Fonte selecionada sem áudio';
-  const microphoneCopy = !localStream
-    ? microphoneEnabled ? 'Solicitar antes de transmitir' : 'Desativado por padrão'
+  const microphoneCopy = microphoneAvailable === null
+    ? microphoneEnabled ? 'Será solicitado ao iniciar a chamada' : 'Desativado'
     : microphoneAvailable
       ? microphoneEnabled ? 'Sua voz está sendo enviada' : 'Microfone silenciado'
-      : 'Permissão não concedida';
+      : 'Permissão não concedida — clique para tentar novamente';
   const viewerMixer = viewerIds.map((peerId, index) => {
     const peer = peersRef.current.get(peerId);
+    const remoteStream = peer?.remoteAudio?.srcObject instanceof MediaStream ? peer.remoteAudio.srcObject : null;
     return {
       id: peerId,
       label: `Espectador ${viewerLabelsRef.current.get(peerId) ?? index + 1}`,
       connected: peer?.pc.connectionState === 'connected',
-      hasAudio: Boolean(peer?.remoteAudio),
+      hasAudio: Boolean(remoteStream?.getAudioTracks().some(track => track.readyState === 'live' && !track.muted)),
       volume: viewerVolumes[peerId] ?? 100
     };
   });
   const viewerAudioCount = viewerMixer.filter(viewer => viewer.hasAudio).length;
+  const callActive = Boolean(shareUrl);
+  const canChat = [...peersRef.current.values()].some(peer => peer.chatChannel?.readyState === 'open');
 
   return (
     <div className="app">
       <Header
         status={hostLabel}
-        live={status === 'live'}
-        meta={localStream ? `${sessionDuration} · ${connectedViewerCount}/${maxViewers} assistindo` : 'Sessão privada · P2P'}
+        live={status === 'connected'}
+        meta={callActive ? `${sessionDuration} · ${connectedViewerCount}/${maxViewers} na chamada` : 'Sessão privada · P2P'}
       />
       <main className="host-main">
         <section className={`share-stage ${localStream ? 'is-live' : ''} ${videoPaused ? 'is-paused' : ''}`}>
@@ -1197,13 +1607,24 @@ function HostApp() {
           {!localStream && (
             <div className="stage-empty">
               <ScreenLinkMascot />
-              <span className="eyebrow">Nenhuma fonte selecionada</span>
-              <h1>Escolha uma tela ou janela</h1>
-              <p>Você confere a prévia aqui antes de enviar o link aos espectadores.</p>
-              <button className="primary-action" type="button" onClick={startSharing} disabled={status === 'starting'}>
-                <Icon name="screen" /> {status === 'starting' ? 'Abrindo seletor…' : 'Escolher tela'}
-              </button>
-              <small className="stage-note"><Icon name="shield" /> Transmissão direta, privada e sem gravação.</small>
+              <span className="eyebrow">
+                {status === 'starting' ? 'Preparando a sala' : status === 'reconnecting' ? 'Recuperando a conexão' : callActive ? 'Chamada em andamento' : 'Voz, tela e chat P2P'}
+              </span>
+              <h1>{status === 'starting' ? 'Acordando servidor…' : status === 'reconnecting' ? 'Reconectando chamada…' : callActive ? 'Nenhuma tela compartilhada' : 'Inicie uma chamada'}</h1>
+              <p>{callActive
+                ? `${connectedViewerCount ? `${connectedViewerCount} pessoa${connectedViewerCount === 1 ? '' : 's'} conectada${connectedViewerCount === 1 ? '' : 's'}` : 'Aguardando alguém entrar'} · a conversa continua sem vídeo.`
+                : 'Crie a sala primeiro. Depois, compartilhe, troque ou pare a tela sem derrubar a conversa.'}</p>
+              {!callActive && status !== 'starting' && status !== 'reconnecting' && (
+                <button className="primary-action" type="button" onClick={startCall}>
+                  <Icon name="call" /> Iniciar chamada
+                </button>
+              )}
+              {callActive && status === 'connected' && (
+                <button className="primary-action" type="button" onClick={startScreenShare} disabled={screenShareState === 'selecting'}>
+                  <Icon name="screen" /> {screenShareState === 'selecting' ? 'Abrindo seletor…' : 'Compartilhar tela'}
+                </button>
+              )}
+              <small className="stage-note"><Icon name="shield" /> A chamada segue ativa quando a tela para.</small>
               {error && <p className="error-message" role="alert">{error}</p>}
             </div>
           )}
@@ -1211,20 +1632,33 @@ function HostApp() {
             <>
               <div className={`live-badge ${videoPaused ? 'paused' : ''}`}>{videoPaused ? 'Transmissão pausada' : `${resolution}p · até ${fps} FPS`} · {sessionDuration}</div>
               <div className="source-live-chip"><Icon name="screen" /><span><strong>{sourceLabel}</strong></span></div>
-              <div className="host-call-dock" aria-label="Controles da transmissão">
+            </>
+          )}
+          {callActive && (
+            <div className="host-call-dock" aria-label="Controles da chamada">
+              {localStream && (
                 <button type="button" onClick={toggleVideoPaused} aria-label={videoPaused ? 'Retomar transmissão' : 'Pausar transmissão'} aria-pressed={videoPaused} data-label={videoPaused ? 'Retomar' : 'Pausar'}>
                   <Icon name={videoPaused ? 'play' : 'pause'} />
                 </button>
-                <button className={audioEnabled && audioAvailable !== false ? 'is-on' : ''} type="button" onClick={toggleScreenAudio} aria-label={audioEnabled ? 'Silenciar áudio da tela' : 'Ativar áudio da tela'} aria-pressed={audioEnabled && audioAvailable !== false} data-label="Áudio" disabled={audioAvailable === false}>
-                  <Icon name={audioEnabled && audioAvailable !== false ? 'volume' : 'volumeOff'} />
-                </button>
-                <button className={microphoneEnabled && microphoneAvailable !== false ? 'is-on' : ''} type="button" onClick={toggleMicrophone} aria-label={microphoneEnabled ? 'Silenciar microfone' : 'Ativar microfone'} aria-pressed={microphoneEnabled && microphoneAvailable !== false} data-label="Microfone" disabled={microphoneAvailable !== true}>
-                  <Icon name={microphoneEnabled && microphoneAvailable !== false ? 'microphone' : 'microphoneOff'} />
-                </button>
-                <span />
-                <button className="hangup" type="button" onClick={stopSharing} aria-label="Encerrar compartilhamento" data-label="Encerrar"><Icon name="stop" /></button>
-              </div>
-            </>
+              )}
+              <button className={audioEnabled && audioAvailable ? 'is-on' : ''} type="button" onClick={toggleScreenAudio} aria-label={audioEnabled ? 'Silenciar áudio da tela' : 'Ativar áudio da tela'} aria-pressed={Boolean(localStream && audioEnabled && audioAvailable)} data-label="Som da tela" disabled={!localStream || audioAvailable === false}>
+                <Icon name={localStream && audioEnabled && audioAvailable ? 'volume' : 'volumeOff'} />
+              </button>
+              <button className={microphoneEnabled && microphoneAvailable ? 'is-on' : ''} type="button" onClick={toggleMicrophone} aria-label={microphoneEnabled ? 'Silenciar microfone' : 'Ativar microfone'} aria-pressed={microphoneEnabled && microphoneAvailable === true} data-label="Microfone">
+                <Icon name={microphoneEnabled && microphoneAvailable ? 'microphone' : 'microphoneOff'} />
+              </button>
+              <button type="button" onClick={startScreenShare} aria-label={localStream ? 'Trocar tela compartilhada' : 'Compartilhar tela'} data-label={localStream ? 'Trocar tela' : 'Compartilhar'} disabled={status !== 'connected' || screenShareState === 'selecting'}>
+                <Icon name="screen" />
+              </button>
+              {localStream && (
+                <button type="button" onClick={() => void stopScreenShare()} aria-label="Parar compartilhamento de tela" data-label="Parar tela"><Icon name="screenOff" /></button>
+              )}
+              <button className={panelSection === 'chat' ? 'is-on' : ''} type="button" onClick={() => setPanelSection('chat')} aria-label="Abrir chat" data-label="Chat">
+                <Icon name="message" />{chatUnread > 0 && <b className="dock-unread">{Math.min(chatUnread, 99)}</b>}
+              </button>
+              <span />
+              <button className="hangup" type="button" onClick={endCall} aria-label="Encerrar chamada" data-label="Encerrar"><Icon name="hangup" /></button>
+            </div>
           )}
         </section>
 
@@ -1235,18 +1669,23 @@ function HostApp() {
           </header>
 
           <nav className="panel-tabs" role="tablist" aria-label="Seções dos controles">
-            <button type="button" role="tab" aria-selected={panelSection === 'stream'} aria-controls="stream-panel" className={panelSection === 'stream' ? 'is-active' : ''} onClick={() => setPanelSection('stream')}>Transmissão</button>
+            <button type="button" role="tab" aria-selected={panelSection === 'stream'} aria-controls="stream-panel" className={panelSection === 'stream' ? 'is-active' : ''} onClick={() => setPanelSection('stream')}>Chamada</button>
             <button type="button" role="tab" aria-selected={panelSection === 'audio'} aria-controls="audio-panel" className={panelSection === 'audio' ? 'is-active' : ''} onClick={() => setPanelSection('audio')}>Áudio <span>{viewerAudioCount}</span></button>
+            <button type="button" role="tab" aria-selected={panelSection === 'chat'} aria-controls="chat-panel" className={panelSection === 'chat' ? 'is-active' : ''} onClick={() => setPanelSection('chat')}>Chat <span>{chatUnread || ''}</span></button>
           </nav>
 
           <div className="panel-view">
             {panelSection === 'stream' && (
               <div id="stream-panel" role="tabpanel" className="panel-page">
                 <section className="panel-section source-section" aria-labelledby="source-title">
-                  <div className="section-heading"><h3 id="source-title">Fonte</h3><small>{localStream ? 'ATIVA' : 'NÃO SELECIONADA'}</small></div>
+                  <div className="section-heading"><h3 id="source-title">Compartilhamento</h3><small>{localStream ? 'ATIVO' : 'OPCIONAL'}</small></div>
                   <div className="source-row">
-                    <Icon name="screen" />
-                    <span><strong>{localStream ? sourceLabel : 'Tela, janela ou aba'}</strong><small>{localStream ? 'Prévia visível neste computador' : 'Escolhida ao iniciar'}</small></span>
+                    <Icon name={localStream ? 'screen' : 'screenOff'} />
+                    <span><strong>{localStream ? sourceLabel : 'Nenhuma tela compartilhada'}</strong><small>{localStream ? 'A chamada permanece ativa ao parar' : 'A chamada continua normalmente'}</small></span>
+                  </div>
+                  <div className="source-actions">
+                    <button type="button" onClick={startScreenShare} disabled={status !== 'connected' || screenShareState === 'selecting'}><Icon name="screen" />{localStream ? 'Trocar tela' : 'Compartilhar tela'}</button>
+                    {localStream && <button type="button" onClick={() => void stopScreenShare()}><Icon name="screenOff" />Parar</button>}
                   </div>
                 </section>
 
@@ -1262,13 +1701,13 @@ function HostApp() {
                   <div className="quality-controls">
                     <SegmentedControl label="Resolução" suffix="resolução" options={RESOLUTIONS} value={resolution} disabled={profileStatus === 'applying' || automaticQuality} onChange={nextResolution => selectManualProfile({ resolution: nextResolution, fps })} />
                     <SegmentedControl label="Fluidez" suffix="FPS" options={FRAME_RATES} value={fps} disabled={profileStatus === 'applying' || automaticQuality} onChange={nextFps => selectManualProfile({ resolution, fps: nextFps })} />
-                    <SegmentedControl label="Espectadores" suffix="máximo" options={VIEWER_LIMITS} value={maxViewers} disabled={Boolean(localStream)} onChange={setMaxViewers} />
+                    <SegmentedControl label="Espectadores" suffix="máximo" options={VIEWER_LIMITS} value={maxViewers} disabled={callActive} onChange={setMaxViewers} />
                   </div>
                   <p className={`profile-summary ${profileStatus}`} aria-live="polite"><i />{profileStatus === 'applying' ? 'Aplicando…' : profileStatus === 'error' ? 'Modo compatível mantido' : 'Bitrate adaptativo ativo'}</p>
                 </section>
 
                 <section className="panel-section invite-section" aria-labelledby="invite-title">
-                  <div className="section-heading"><h3 id="invite-title">Convite</h3><small>{shareUrl ? audienceCopy : 'APÓS INICIAR'}</small></div>
+                  <div className="section-heading"><h3 id="invite-title">Convite da chamada</h3><small>{shareUrl ? audienceCopy : 'APÓS INICIAR'}</small></div>
                   {shareUrl ? (
                     <>
                       <div className="invite-row">
@@ -1282,7 +1721,7 @@ function HostApp() {
                       <div className={`connection-row ${connectionQuality}`}><Icon name="signal" /><span><strong>{qualityCopy}</strong><small>{audience === 'connected' ? metricCopy : `P2P + STUN${turnAvailable ? '/TURN' : ''}`}</small></span></div>
                     </>
                   ) : (
-                    <p className="empty-row"><Icon name="link" /> O link e o QR Code aparecem aqui.</p>
+                    <p className="empty-row"><Icon name="link" /> Inicie a chamada para criar o convite.</p>
                   )}
                 </section>
               </div>
@@ -1292,9 +1731,9 @@ function HostApp() {
               <div id="audio-panel" role="tabpanel" className="panel-page audio-page">
                 <section className="panel-section" aria-labelledby="send-audio-title">
                   <div className="section-heading"><h3 id="send-audio-title">Áudio enviado</h3><small>PARA TODOS</small></div>
-                  <ToggleRow icon={audioEnabled && audioAvailable !== false ? 'volume' : 'volumeOff'} label="Áudio da tela" description={screenAudioCopy} checked={audioEnabled && audioAvailable !== false} disabled={Boolean(localStream && audioAvailable === false)} onClick={toggleScreenAudio} />
-                  <ToggleRow icon={microphoneEnabled && microphoneAvailable !== false ? 'microphone' : 'microphoneOff'} label="Microfone" description={microphoneCopy} checked={microphoneEnabled && microphoneAvailable !== false} disabled={Boolean(localStream && microphoneAvailable !== true)} onClick={toggleMicrophone} />
-                  <VolumeControl id="input-volume" label="Volume de entrada" description="Ganho do seu microfone" value={inputVolume} onChange={changeInputVolume} />
+                  <ToggleRow icon={localStream && audioEnabled && audioAvailable ? 'volume' : 'volumeOff'} label="Áudio da tela" description={screenAudioCopy} checked={Boolean(localStream && audioEnabled && audioAvailable)} disabled={!localStream || audioAvailable === false} onClick={toggleScreenAudio} />
+                  <ToggleRow icon={microphoneEnabled && microphoneAvailable ? 'microphone' : 'microphoneOff'} label="Microfone" description={microphoneCopy} checked={microphoneEnabled && microphoneAvailable === true} onClick={toggleMicrophone} />
+                  <VolumeControl id="input-volume" label="Volume de entrada" description="Ganho do seu microfone" value={inputVolume} disabled={microphoneAvailable === false} onChange={changeInputVolume} />
                 </section>
 
                 <section className="panel-section mixer-section" aria-labelledby="mixer-title">
@@ -1316,9 +1755,21 @@ function HostApp() {
                 </section>
               </div>
             )}
+
+            {panelSection === 'chat' && (
+              <div id="chat-panel" role="tabpanel" className="panel-page chat-page">
+                <ChatPanel
+                  messages={chatMessages}
+                  currentSenderId="host"
+                  canSend={canChat}
+                  placeholder={canChat ? 'Escrever mensagem…' : 'Aguardando alguém entrar…'}
+                  onSend={sendHostChat}
+                />
+              </div>
+            )}
           </div>
 
-          <footer className="panel-footer"><Icon name="shield" /><span>Conexão privada · nada é gravado</span></footer>
+          <footer className="panel-footer"><Icon name="shield" /><span>Voz, tela e chat P2P · nada é gravado</span></footer>
         </aside>
       </main>
       {qrOpen && qrCode && (
@@ -1348,6 +1799,10 @@ function ViewerApp({ invite }: { invite: Invite }) {
   const viewerMicrophoneSenderRef = useRef<RTCRtpSender | null>(null);
   const ensureViewerMicrophoneRef = useRef<() => Promise<void>>(async () => undefined);
   const viewerMicrophoneEnabledRef = useRef(false);
+  const viewerChatChannelRef = useRef<RTCDataChannel | null>(null);
+  const viewerChatMessagesRef = useRef<ChatMessage[]>([]);
+  const viewerChatOpenRef = useRef(false);
+  const leaveViewerRef = useRef<() => void>(() => {});
   const [status, setStatus] = useState<ViewerStatus>('connecting');
   const [message, setMessage] = useState('Conectando ao computador…');
   const [hasAudio, setHasAudio] = useState(false);
@@ -1356,6 +1811,7 @@ function ViewerApp({ invite }: { invite: Invite }) {
   const [viewerQuality, setViewerQuality] = useState<ConnectionQuality>('waiting');
   const [viewerMetrics, setViewerMetrics] = useState<ConnectionMetrics>({ bitrateKbps: 0, availableKbps: 0, rttMs: 0, packetLoss: 0 });
   const [remotePaused, setRemotePaused] = useState(false);
+  const [screenSharing, setScreenSharing] = useState(false);
   const [screenAudioActive, setScreenAudioActive] = useState(false);
   const [microphoneActive, setMicrophoneActive] = useState(false);
   const [viewerMicrophoneEnabled, setViewerMicrophoneEnabled] = useState(false);
@@ -1365,7 +1821,37 @@ function ViewerApp({ invite }: { invite: Invite }) {
   const [keepAwake, setKeepAwake] = useState(true);
   const [wakeActive, setWakeActive] = useState(false);
   const [viewerStartedAt, setViewerStartedAt] = useState<number | null>(null);
+  const [viewerChatMessages, setViewerChatMessages] = useState<ChatMessage[]>([]);
+  const [viewerChatUnread, setViewerChatUnread] = useState(0);
+  const [viewerChatOpen, setViewerChatOpen] = useState(false);
+  const [viewerChatReady, setViewerChatReady] = useState(false);
   const viewerDuration = useSessionDuration(viewerStartedAt);
+
+  useEffect(() => { viewerChatMessagesRef.current = viewerChatMessages; }, [viewerChatMessages]);
+  useEffect(() => {
+    viewerChatOpenRef.current = viewerChatOpen;
+    if (viewerChatOpen) setViewerChatUnread(0);
+  }, [viewerChatOpen]);
+  useEffect(() => { setHasAudio(screenAudioActive || microphoneActive); }, [microphoneActive, screenAudioActive]);
+
+  const receiveViewerChat = useCallback((incoming: ChatMessage[], notify: boolean) => {
+    const messagesById = new Map(viewerChatMessagesRef.current.map(message => [message.id, message]));
+    for (const message of incoming) messagesById.set(message.id, message);
+    const nextMessages = [...messagesById.values()].sort((a, b) => a.sentAt - b.sentAt).slice(-CHAT_HISTORY_LIMIT);
+    viewerChatMessagesRef.current = nextMessages;
+    setViewerChatMessages(nextMessages);
+    if (notify && !viewerChatOpenRef.current) {
+      const ownId = viewerPeerIdRef.current;
+      const unread = incoming.filter(message => message.kind === 'message' && message.senderId !== ownId).length;
+      if (unread) setViewerChatUnread(current => current + unread);
+    }
+  }, []);
+
+  const sendViewerChat = useCallback((text: string) => {
+    const normalized = normalizeChatText(text);
+    if (!normalized) return;
+    sendChatPayload(viewerChatChannelRef.current, { type: 'chat-send', text: normalized });
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -1379,10 +1865,9 @@ function ViewerApp({ invite }: { invite: Invite }) {
     let peer: RTCPeerConnection | null = null;
     let remoteStream: MediaStream | null = null;
     let peerId = '';
-    let initialNegotiationComplete = false;
-    let microphoneRenegotiationPending = false;
     let queuedCandidates: RTCIceCandidateInit[] = [];
     let previousBytes: { bytes: number; at: number } | null = null;
+    let signalChain = Promise.resolve();
 
     function clearPeerTimers() {
       if (peerTimer !== null) window.clearTimeout(peerTimer);
@@ -1393,17 +1878,25 @@ function ViewerApp({ invite }: { invite: Invite }) {
 
     function destroyViewerPeer() {
       clearPeerTimers();
+      const chatChannel = viewerChatChannelRef.current;
+      viewerChatChannelRef.current = null;
+      if (chatChannel) {
+        chatChannel.onopen = null;
+        chatChannel.onmessage = null;
+        chatChannel.onclose = null;
+        chatChannel.close();
+      }
+      setViewerChatReady(false);
       if (peer) {
         peer.ontrack = null;
         peer.onicecandidate = null;
         peer.onconnectionstatechange = null;
+        peer.ondatachannel = null;
         peer.close();
       }
       peer = null;
       viewerPeerRef.current = null;
       viewerMicrophoneSenderRef.current = null;
-      initialNegotiationComplete = false;
-      microphoneRenegotiationPending = false;
       remoteStream = null;
       queuedCandidates = [];
       if (videoRef.current) videoRef.current.srcObject = null;
@@ -1413,35 +1906,17 @@ function ViewerApp({ invite }: { invite: Invite }) {
       setViewerQuality('waiting');
       setViewerMetrics({ bitrateKbps: 0, availableKbps: 0, rttMs: 0, packetLoss: 0 });
       setRemotePaused(false);
+      setScreenSharing(false);
       setScreenAudioActive(false);
       setMicrophoneActive(false);
       previousBytes = null;
     }
 
     async function ensureViewerMicrophone() {
-      const currentPeer = peer;
       const track = viewerMicrophoneTrackRef.current;
-      const microphoneStream = viewerMicrophoneStreamRef.current;
-      if (
-        disposed ||
-        !currentPeer ||
-        !track ||
-        !microphoneStream ||
-        !viewerMicrophoneEnabledRef.current ||
-        !initialNegotiationComplete ||
-        activeSocket?.readyState !== WebSocket.OPEN ||
-        currentPeer.signalingState !== 'stable'
-      ) return;
-
-      if (!viewerMicrophoneSenderRef.current) {
-        viewerMicrophoneSenderRef.current = currentPeer.addTrack(track, microphoneStream);
-        microphoneRenegotiationPending = true;
-      }
-      if (!microphoneRenegotiationPending) return;
-      const offer = await currentPeer.createOffer();
-      await currentPeer.setLocalDescription(offer);
-      microphoneRenegotiationPending = false;
-      send(activeSocket, { type: 'offer', peerId, sdp: offer });
+      const sender = viewerMicrophoneSenderRef.current;
+      if (disposed || !sender || !track || !viewerMicrophoneEnabledRef.current) return;
+      await sender.replaceTrack(track);
     }
     ensureViewerMicrophoneRef.current = ensureViewerMicrophone;
 
@@ -1516,6 +1991,28 @@ function ViewerApp({ invite }: { invite: Invite }) {
       statsTimer = window.setInterval(() => void sample(), 2_000);
     }
 
+    function attachRemoteTrack(currentPeer: RTCPeerConnection, track: MediaStreamTrack) {
+      if (remoteStream?.getTrackById(track.id)) return;
+      const isFirstTrack = remoteStream === null;
+      remoteStream ??= new MediaStream();
+      remoteStream.addTrack(track);
+      if (videoRef.current) {
+        videoRef.current.srcObject = remoteStream;
+        if (isFirstTrack) {
+          videoRef.current.muted = true;
+          setViewerMuted(true);
+        }
+        void videoRef.current.play().catch(() => undefined);
+      }
+      if (track.kind === 'video') {
+        track.addEventListener('unmute', () => {
+          setScreenSharing(true);
+          startViewerStats(currentPeer);
+        });
+        track.addEventListener('mute', () => setScreenSharing(false));
+      }
+    }
+
     function connect() {
       if (disposed || terminal) return;
       if (activeSocket?.readyState === WebSocket.OPEN || activeSocket?.readyState === WebSocket.CONNECTING) return;
@@ -1524,7 +2021,7 @@ function ViewerApp({ invite }: { invite: Invite }) {
       viewerSocketRef.current = socket;
       if (peer?.connectionState !== 'connected') {
         setStatus('connecting');
-        setMessage(attempt ? 'Reconectando ao computador…' : 'Conectando ao computador…');
+        setMessage(attempt ? 'Reconectando ao computador…' : 'Acordando servidor e procurando a chamada…');
       }
 
       socket.onopen = () => {
@@ -1545,11 +2042,13 @@ function ViewerApp({ invite }: { invite: Invite }) {
           failPermanently('O servidor enviou uma resposta inválida.');
           return;
         }
-        void handleMessage(serverMessage, socket).catch(() => {
-          destroyViewerPeer();
-          socket.close(4002, 'WebRTC failed');
-          retry('O vídeo não conectou. Tentando novamente…', true);
-        });
+        signalChain = signalChain
+          .then(() => handleMessage(serverMessage, socket))
+          .catch(() => {
+            destroyViewerPeer();
+            socket.close(4002, 'WebRTC failed');
+            retry('A chamada não conectou. Tentando novamente…', true);
+          });
       };
     }
 
@@ -1562,14 +2061,9 @@ function ViewerApp({ invite }: { invite: Invite }) {
         viewerPeerIdRef.current = peerId;
         sessionStorage.setItem(`screenlink-peer:${invite.roomId}`, peerId);
         if (serverMessage.resumed && samePeer && currentExistingPeer) {
-          const pendingOffer = currentExistingPeer.localDescription;
-          if (currentExistingPeer.signalingState === 'have-local-offer' && pendingOffer?.type === 'offer') {
-            send(socket, { type: 'offer', peerId, sdp: pendingOffer });
-          } else {
-            void ensureViewerMicrophoneRef.current().catch(() => undefined);
-          }
-          if (currentExistingPeer.connectionState === 'connected' && videoRef.current?.srcObject) {
-            setStatus('live');
+          void ensureViewerMicrophoneRef.current().catch(() => undefined);
+          if (currentExistingPeer.connectionState === 'connected') {
+            setStatus('connected');
             setMessage('');
           }
           return;
@@ -1577,8 +2071,8 @@ function ViewerApp({ invite }: { invite: Invite }) {
         destroyViewerPeer();
         peerId = serverMessage.peerId;
         viewerPeerIdRef.current = peerId;
-        setStatus('waiting');
-        setMessage('Conectado. Aguardando o vídeo…');
+        setStatus('connecting');
+        setMessage('Entrando na chamada…');
         peer = new RTCPeerConnection({
           iceServers: serverMessage.iceServers as RTCIceServer[],
           bundlePolicy: 'max-bundle',
@@ -1586,47 +2080,37 @@ function ViewerApp({ invite }: { invite: Invite }) {
         });
         const currentPeer = peer;
         viewerPeerRef.current = currentPeer;
+        currentPeer.ondatachannel = event => {
+          if (event.channel.label !== 'chat') return;
+          const channel = event.channel;
+          viewerChatChannelRef.current = channel;
+          channel.bufferedAmountLowThreshold = 64_000;
+          const markReady = () => setViewerChatReady(true);
+          channel.onopen = markReady;
+          if (channel.readyState === 'open') markReady();
+          channel.onmessage = chatEvent => {
+            if (typeof chatEvent.data !== 'string') return;
+            const payload = parseChatPayload(chatEvent.data);
+            if (payload?.type === 'chat-history') receiveViewerChat(payload.messages, false);
+            if (payload?.type === 'chat-message') receiveViewerChat([payload.message], true);
+          };
+          channel.onclose = () => {
+            if (viewerChatChannelRef.current === channel) viewerChatChannelRef.current = null;
+            setViewerChatReady(false);
+          };
+        };
         currentPeer.onicecandidate = event => {
           if (event.candidate) send(socket, { type: 'ice-candidate', peerId, candidate: event.candidate.toJSON() });
         };
-        currentPeer.ontrack = event => {
-          const isFirstTrack = remoteStream === null;
-          if (event.streams[0]) remoteStream = event.streams[0];
-          else {
-            remoteStream ??= new MediaStream();
-            remoteStream.addTrack(event.track);
-          }
-          const stream = remoteStream;
-          const syncAudioAvailability = () => setHasAudio(stream.getAudioTracks().some(track => track.readyState === 'live'));
-          syncAudioAvailability();
-          stream.addEventListener('removetrack', syncAudioAvailability);
-          if (event.track.kind === 'audio') {
-            event.track.addEventListener('ended', syncAudioAvailability, { once: true });
-          }
-          if (videoRef.current) {
-            videoRef.current.srcObject = stream;
-            if (isFirstTrack) {
-              videoRef.current.muted = true;
-              setViewerMuted(true);
-            }
-            void videoRef.current.play().catch(() => undefined);
-          }
-          if (event.track.kind === 'video') {
-            setStatus('live');
-            setMessage('');
-            setViewerStartedAt(current => current ?? Date.now());
-            startViewerStats(currentPeer);
-          }
-        };
+        currentPeer.ontrack = event => attachRemoteTrack(currentPeer, event.track);
         currentPeer.onconnectionstatechange = () => {
           if (currentPeer.connectionState === 'connected') {
             if (peerTimer !== null) window.clearTimeout(peerTimer);
             peerTimer = null;
             peerFailures = 0;
-            if (videoRef.current?.srcObject) {
-              setStatus('live');
-              setMessage('');
-            }
+            setStatus('connected');
+            setMessage('');
+            setViewerStartedAt(current => current ?? Date.now());
             startViewerStats(currentPeer);
             void ensureViewerMicrophoneRef.current().catch(() => undefined);
           }
@@ -1652,7 +2136,7 @@ function ViewerApp({ invite }: { invite: Invite }) {
         };
         peerTimer = window.setTimeout(() => {
           peerFailures += 1;
-          if (peerFailures >= 3) failPermanently('O computador foi encontrado, mas a rede bloqueou o vídeo direto.');
+          if (peerFailures >= 3) failPermanently('O computador foi encontrado, mas a rede bloqueou a chamada direta.');
           else {
             destroyViewerPeer();
             socket.close(4002, 'WebRTC timeout');
@@ -1662,17 +2146,30 @@ function ViewerApp({ invite }: { invite: Invite }) {
       }
       if (serverMessage.type === 'offer') {
         if (!peer || serverMessage.peerId !== peerId) return;
-        if (peer.signalingState === 'have-local-offer') {
-          await peer.setLocalDescription({ type: 'rollback' });
-          microphoneRenegotiationPending = Boolean(viewerMicrophoneSenderRef.current);
-        }
+        if (peer.signalingState === 'have-local-offer') await peer.setLocalDescription({ type: 'rollback' });
         await peer.setRemoteDescription(serverMessage.sdp);
+        const transceivers = peer.getTransceivers();
+        const audioTransceivers = transceivers.filter(transceiver => transceiver.receiver.track.kind === 'audio');
+        const callAudioTransceiver = audioTransceivers[0];
+        const screenAudioTransceiver = audioTransceivers[1];
+        const screenVideoTransceiver = transceivers.find(transceiver => transceiver.receiver.track.kind === 'video');
+        if (!callAudioTransceiver || !screenAudioTransceiver || !screenVideoTransceiver) throw new Error('Expected media transceivers were not negotiated');
+        callAudioTransceiver.direction = 'sendrecv';
+        screenAudioTransceiver.direction = 'recvonly';
+        screenVideoTransceiver.direction = 'recvonly';
+        viewerMicrophoneSenderRef.current = callAudioTransceiver.sender;
+        attachRemoteTrack(peer, callAudioTransceiver.receiver.track);
+        attachRemoteTrack(peer, screenVideoTransceiver.receiver.track);
+        attachRemoteTrack(peer, screenAudioTransceiver.receiver.track);
+        const microphoneTrack = viewerMicrophoneTrackRef.current;
+        if (microphoneTrack) {
+          microphoneTrack.enabled = viewerMicrophoneEnabledRef.current;
+          await callAudioTransceiver.sender.replaceTrack(microphoneTrack);
+        }
         for (const candidate of queuedCandidates.splice(0)) await peer.addIceCandidate(candidate).catch(() => undefined);
         const answer = await peer.createAnswer();
         await peer.setLocalDescription(answer);
         send(socket, { type: 'answer', peerId, sdp: answer });
-        initialNegotiationComplete = true;
-        window.setTimeout(() => void ensureViewerMicrophoneRef.current().catch(() => undefined), 0);
         return;
       }
       if (serverMessage.type === 'answer') {
@@ -1688,16 +2185,22 @@ function ViewerApp({ invite }: { invite: Invite }) {
       }
       if (serverMessage.type === 'media-state') {
         if (serverMessage.peerId !== peerId) return;
+        setScreenSharing(serverMessage.screenSharing);
         setRemotePaused(serverMessage.videoPaused);
         setScreenAudioActive(serverMessage.screenAudioEnabled);
         setMicrophoneActive(serverMessage.microphoneEnabled);
+        if (!serverMessage.screenSharing) setStreamDetails('');
         return;
       }
       if (serverMessage.type === 'host-ended') {
         terminal = true;
         destroyViewerPeer();
+        viewerChatMessagesRef.current = [];
+        setViewerChatMessages([]);
+        setViewerChatUnread(0);
+        setViewerChatOpen(false);
         setStatus('ended');
-        setMessage('O compartilhamento foi encerrado no computador.');
+        setMessage('A chamada foi encerrada no computador.');
         socket.close(1000, 'Host ended');
         return;
       }
@@ -1714,6 +2217,20 @@ function ViewerApp({ invite }: { invite: Invite }) {
         }
       }
     }
+
+    leaveViewerRef.current = () => {
+      if (terminal) return;
+      terminal = true;
+      send(activeSocket, { type: 'leave-room' });
+      activeSocket?.close(1000, 'Viewer left');
+      destroyViewerPeer();
+      viewerChatMessagesRef.current = [];
+      setViewerChatMessages([]);
+      setViewerChatUnread(0);
+      setViewerChatOpen(false);
+      setStatus('ended');
+      setMessage('Você saiu da chamada.');
+    };
 
     const recoverAfterBackground = () => {
       if (disposed || terminal) return;
@@ -1750,9 +2267,10 @@ function ViewerApp({ invite }: { invite: Invite }) {
       viewerMicrophoneTrackRef.current = null;
       viewerMicrophoneSenderRef.current = null;
       ensureViewerMicrophoneRef.current = async () => undefined;
+      leaveViewerRef.current = () => {};
       sessionStorage.removeItem(`screenlink-peer:${invite.roomId}`);
     };
-  }, [invite.roomId, invite.token]);
+  }, [invite.roomId, invite.token, receiveViewerChat]);
 
   useEffect(() => {
     const wakeNavigator = navigator as WakeLockNavigator;
@@ -1766,7 +2284,7 @@ function ViewerApp({ invite }: { invite: Invite }) {
     };
 
     const acquire = async () => {
-      if (disposed || status !== 'live' || !keepAwake || document.visibilityState !== 'visible' || !wakeNavigator.wakeLock) return;
+      if (disposed || status !== 'connected' || !keepAwake || document.visibilityState !== 'visible' || !wakeNavigator.wakeLock) return;
       try {
         const lock = await wakeNavigator.wakeLock.request('screen');
         if (disposed) {
@@ -1797,8 +2315,15 @@ function ViewerApp({ invite }: { invite: Invite }) {
     };
   }, [keepAwake, status]);
 
-  const label = status === 'live' ? 'Sessão ativa' : status === 'ended' ? 'Encerrado' : status === 'error' ? 'Atenção' : 'Conectando';
-  const title = status === 'ended' ? 'Transmissão encerrada' : status === 'error' ? 'Não foi possível assistir' : 'Preparando a transmissão';
+  const callConnected = status === 'connected';
+  const label = callConnected ? 'Chamada ativa' : status === 'ended' ? 'Encerrado' : status === 'error' ? 'Atenção' : 'Conectando';
+  const title = status === 'ended'
+    ? 'Chamada encerrada'
+    : status === 'error'
+      ? 'Não foi possível entrar'
+      : callConnected
+        ? 'Chamada em andamento'
+        : 'Entrando na chamada';
 
   async function openFullscreen() {
     await stageRef.current?.requestFullscreen?.();
@@ -1865,7 +2390,6 @@ function ViewerApp({ invite }: { invite: Invite }) {
         stopStream(viewerMicrophoneStreamRef.current);
         viewerMicrophoneStreamRef.current = stream;
         viewerMicrophoneTrackRef.current = track;
-        viewerMicrophoneSenderRef.current = null;
         track.addEventListener('mute', () => {
           if (viewerMicrophoneTrackRef.current === track && viewerMicrophoneEnabledRef.current) {
             setViewerMicrophoneMessage('O sistema suspendeu temporariamente o microfone.');
@@ -1879,7 +2403,7 @@ function ViewerApp({ invite }: { invite: Invite }) {
         track.addEventListener('ended', () => {
           if (viewerMicrophoneTrackRef.current !== track) return;
           viewerMicrophoneTrackRef.current = null;
-          viewerMicrophoneSenderRef.current = null;
+          void viewerMicrophoneSenderRef.current?.replaceTrack(null).catch(() => undefined);
           viewerMicrophoneEnabledRef.current = false;
           setViewerMicrophoneEnabled(false);
           setViewerMicrophoneAvailable(false);
@@ -1915,7 +2439,7 @@ function ViewerApp({ invite }: { invite: Invite }) {
   }
 
   const liveDescription = [
-    streamDetails || 'Conexão P2P direta',
+    screenSharing ? streamDetails || 'Tela compartilhada' : 'Chamada P2P direta',
     hasAudio
       ? viewerMuted
         ? 'áudio disponível'
@@ -1936,9 +2460,9 @@ function ViewerApp({ invite }: { invite: Invite }) {
 
   return (
     <div className="app viewer-mode">
-      <Header status={label} live={status === 'live'} />
+      <Header status={label} live={callConnected} meta={callConnected ? `${viewerDuration} · chamada privada` : undefined} />
       <main className="viewer-main">
-        <section ref={stageRef} className={`viewer-stage ${status === 'live' ? 'has-video' : ''} ${remotePaused ? 'is-paused' : ''}`} aria-live="polite">
+        <section ref={stageRef} className={`viewer-stage ${callConnected && screenSharing ? 'has-video' : ''} ${remotePaused && screenSharing ? 'is-paused' : ''} ${viewerChatOpen ? 'chat-is-open' : ''}`} aria-live="polite">
           <video
             ref={videoRef}
             className="viewer-video"
@@ -1949,9 +2473,9 @@ function ViewerApp({ invite }: { invite: Invite }) {
             onLoadedMetadata={updateStreamDetails}
             onDoubleClick={cycleZoom}
           />
-          {status !== 'live' && (
+          {(!callConnected || !screenSharing) && (
             <div className="viewer-empty">
-              {status === 'connecting' || status === 'waiting' ? (
+              {status === 'connecting' || callConnected ? (
                 <ScreenLinkMascot />
               ) : (
                 <div className={`connection-visual ${status}`} aria-hidden="true">
@@ -1961,41 +2485,58 @@ function ViewerApp({ invite }: { invite: Invite }) {
                 </div>
               )}
               <h1>{title}</h1>
-              <p>{message}</p>
+              <p>{callConnected ? 'Aguardando o apresentador compartilhar uma tela. A voz e o chat continuam disponíveis.' : message}</p>
               {status === 'error' && <button className="retry-action" type="button" onClick={() => window.location.reload()}>Tentar novamente</button>}
             </div>
           )}
-          {status === 'live' && hasAudio && viewerMuted && (
+          {callConnected && hasAudio && viewerMuted && (
             <button className="sound-prompt" type="button" onClick={toggleViewerAudio}>
               <Icon name="volume" /> Ouvir áudio
             </button>
           )}
-          {status === 'live' && remotePaused && (
+          {callConnected && screenSharing && remotePaused && (
             <div className="paused-overlay"><Icon name="pause" /><strong>Transmissão pausada</strong><span>O apresentador retomará em instantes.</span></div>
           )}
-          {status === 'live' && (
+          {callConnected && (
             <div className={`viewer-live-info ${viewerQuality}`}>
               <span><strong>{viewerQualityLabel} · {viewerDuration}</strong><small>{liveDescription}{viewerMetrics.rttMs ? ` · ${viewerMetrics.rttMs} ms` : ''}</small></span>
             </div>
           )}
+          {viewerChatOpen && (
+            <aside className="viewer-chat" aria-label="Chat da chamada">
+              <header><span><Icon name="message" /><strong>Chat</strong></span><button type="button" onClick={() => setViewerChatOpen(false)} aria-label="Fechar chat">×</button></header>
+              <ChatPanel
+                messages={viewerChatMessages}
+                currentSenderId={viewerPeerIdRef.current}
+                canSend={callConnected && viewerChatReady}
+                placeholder={viewerChatReady ? 'Escrever mensagem…' : 'Conectando chat…'}
+                onSend={sendViewerChat}
+              />
+            </aside>
+          )}
           <div className="viewer-bar" aria-label="Controles do espectador">
             <div className="viewer-actions">
-              <button className={!viewerMuted && hasAudio ? 'is-on' : ''} type="button" onClick={toggleViewerAudio} aria-label={viewerMuted ? 'Ouvir áudio' : 'Silenciar áudio'} aria-pressed={!viewerMuted && hasAudio} data-label="Áudio" disabled={status !== 'live' || !hasAudio}>
+              <button className={!viewerMuted && hasAudio ? 'is-on' : ''} type="button" onClick={toggleViewerAudio} aria-label={viewerMuted ? 'Ouvir áudio' : 'Silenciar áudio'} aria-pressed={!viewerMuted && hasAudio} data-label="Áudio" disabled={!callConnected || !hasAudio}>
                 <Icon name={!hasAudio || viewerMuted ? 'volumeOff' : 'volume'} />
               </button>
-              <button className={viewerMicrophoneEnabled ? 'is-on' : ''} type="button" onClick={toggleViewerMicrophone} aria-label={viewerMicrophoneEnabled ? 'Silenciar seu microfone' : 'Ativar seu microfone'} aria-pressed={viewerMicrophoneEnabled} data-label="Falar" disabled={status !== 'live'} title={viewerMicrophoneMessage || undefined}>
+              <button className={viewerMicrophoneEnabled ? 'is-on' : ''} type="button" onClick={toggleViewerMicrophone} aria-label={viewerMicrophoneEnabled ? 'Silenciar seu microfone' : 'Ativar seu microfone'} aria-pressed={viewerMicrophoneEnabled} data-label="Falar" disabled={!callConnected} title={viewerMicrophoneMessage || undefined}>
                 <Icon name={viewerMicrophoneEnabled ? 'microphone' : 'microphoneOff'} />
               </button>
-              <button className={wakeActive ? 'is-on' : ''} type="button" onClick={() => setKeepAwake(current => !current)} aria-label={keepAwake ? 'Permitir que a tela adormeça' : 'Manter tela ativa'} aria-pressed={keepAwake} data-label="Tela ativa" disabled={status !== 'live' || !wakeLockSupported}>
+              <button className={viewerChatOpen ? 'is-on' : ''} type="button" onClick={() => setViewerChatOpen(current => !current)} aria-label={viewerChatOpen ? 'Fechar chat' : 'Abrir chat'} aria-pressed={viewerChatOpen} data-label="Chat" disabled={!callConnected}>
+                <Icon name="message" />{viewerChatUnread > 0 && <b className="dock-unread">{Math.min(viewerChatUnread, 99)}</b>}
+              </button>
+              <button className={wakeActive ? 'is-on' : ''} type="button" onClick={() => setKeepAwake(current => !current)} aria-label={keepAwake ? 'Permitir que a tela adormeça' : 'Manter tela ativa'} aria-pressed={keepAwake} data-label="Tela ativa" disabled={!callConnected || !wakeLockSupported}>
                 <Icon name="wake" />
               </button>
-              <button className={zoom > 1 ? 'is-on' : ''} type="button" onClick={cycleZoom} aria-label={`Alterar zoom, atual ${Math.round(zoom * 100)}%`} aria-pressed={zoom > 1} data-label={`${Math.round(zoom * 100)}%`} disabled={status !== 'live'}>
+              <button className={zoom > 1 ? 'is-on' : ''} type="button" onClick={cycleZoom} aria-label={`Alterar zoom, atual ${Math.round(zoom * 100)}%`} aria-pressed={zoom > 1} data-label={`${Math.round(zoom * 100)}%`} disabled={!callConnected || !screenSharing}>
                 <Icon name="zoom" />
               </button>
-              <button type="button" onClick={togglePictureInPicture} aria-label="Abrir picture-in-picture" data-label="Mini player" disabled={status !== 'live' || !pictureInPictureSupported}>
+              <button type="button" onClick={togglePictureInPicture} aria-label="Abrir picture-in-picture" data-label="Mini player" disabled={!callConnected || !screenSharing || !pictureInPictureSupported}>
                 <Icon name="pip" />
               </button>
-              <button type="button" onClick={openFullscreen} aria-label="Abrir em tela cheia" data-label="Tela cheia" disabled={status !== 'live'}><Icon name="expand" /></button>
+              <button type="button" onClick={openFullscreen} aria-label="Abrir em tela cheia" data-label="Tela cheia" disabled={!callConnected || !screenSharing}><Icon name="expand" /></button>
+              <span className="viewer-action-divider" />
+              <button className="hangup" type="button" onClick={() => leaveViewerRef.current()} aria-label="Sair da chamada" data-label="Sair" disabled={status === 'ended' || status === 'error'}><Icon name="hangup" /></button>
             </div>
           </div>
         </section>

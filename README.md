@@ -1,17 +1,17 @@
 # ScreenLink
 
-Compartilhamento de tela e áudio em tempo real entre um computador e celulares ou outros computadores. O transmissor e os espectadores usam o mesmo endereço; não é necessário instalar um aplicativo.
+Chamada de voz, compartilhamento de tela e chat temporário em tempo real entre um computador e celulares ou outros computadores. O host e os espectadores usam o mesmo endereço; não é necessário instalar um aplicativo.
 
 ## Experiência do MVP
 
 1. Abra o ScreenLink no Chrome ou Edge do computador.
-2. Clique em **Compartilhar minha tela** e escolha uma tela ou janela.
-3. Copie o link privado exibido.
-4. Abra o link em até oito celulares ou computadores, conforme o limite escolhido pelo apresentador.
-5. O espectador pode ativar o próprio microfone para conversar com o apresentador.
-6. Clique em **Encerrar compartilhamento** quando terminar.
+2. Clique em **Iniciar chamada**. A sala e o convite são criados antes de qualquer captura de tela.
+3. Copie o link privado e abra-o em até oito celulares ou computadores, conforme o limite escolhido pelo host.
+4. Converse por voz ou pelo chat P2P temporário.
+5. Clique em **Compartilhar tela** quando quiser; é possível trocar ou parar a tela sem encerrar a chamada.
+6. Clique em **Encerrar chamada** quando terminar.
 
-Cada sala permite escolher de 1 a 8 espectadores. A transmissão oferece até 1080p/60 FPS, áudio da tela, microfone do apresentador e microfone dos espectadores, sempre sujeita à capacidade real de CPU e rede.
+Cada sala permite escolher de 1 a 8 espectadores. O compartilhamento oferece até 1080p/60 FPS, áudio da tela, microfone bidirecional e chat efêmero, sempre sujeitos à capacidade real de CPU e rede.
 
 ## Arquitetura
 
@@ -21,11 +21,17 @@ Existe apenas um serviço Node.js:
 - mantém a sala privada temporária;
 - encaminha somente as mensagens necessárias para formar a conexão WebRTC.
 
-O vídeo e o áudio viajam diretamente entre os dispositivos por WebRTC P2P. O STUN
+O vídeo, o áudio e as mensagens viajam diretamente entre os dispositivos por WebRTC P2P. O STUN
 ajuda os navegadores a descobrir esse caminho, e o próprio WebRTC adapta bitrate,
 resolução e quadros conforme a rede. Um servidor TURN pode ser configurado como
 fallback para redes que bloqueiam P2P; ele não é usado quando existe um caminho
 direto melhor. O ScreenLink não grava o conteúdo.
+
+Cada conexão pré-negocia três trilhas independentes — voz, vídeo da tela e áudio da
+tela — além de um RTCDataChannel para o chat. A captura de tela usa replaceTrack(),
+por isso iniciar, trocar ou parar a tela normalmente não exige recriar a conexão.
+As mensagens existem apenas na memória durante a chamada; com vários espectadores,
+o host distribui cada mensagem pelos canais P2P já abertos.
 
 Com vários espectadores, o computador cria uma conexão P2P por pessoa. Isso preserva baixa latência em grupos pequenos, mas multiplica o upload e o trabalho de codificação; para audiências maiores, uma arquitetura SFU é mais eficiente.
 

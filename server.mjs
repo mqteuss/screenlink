@@ -490,6 +490,7 @@ websocketServer.on('connection', socket => {
       if (
         client.role !== 'host' ||
         !room.viewers.has(message.peerId) ||
+        typeof message.screenSharing !== 'boolean' ||
         typeof message.videoPaused !== 'boolean' ||
         typeof message.screenAudioEnabled !== 'boolean' ||
         typeof message.microphoneEnabled !== 'boolean'
@@ -500,6 +501,7 @@ websocketServer.on('connection', socket => {
       relayToViewer(room, message.peerId, {
         type: 'media-state',
         peerId: message.peerId,
+        screenSharing: message.screenSharing,
         videoPaused: message.videoPaused,
         screenAudioEnabled: message.screenAudioEnabled,
         microphoneEnabled: message.microphoneEnabled
