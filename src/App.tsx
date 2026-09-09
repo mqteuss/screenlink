@@ -339,6 +339,7 @@ function ChatPanel({ messages, currentSenderId, canSend, placeholder, displayNam
       <form className="chat-composer" onSubmit={submit}>
         <textarea
           aria-label="Escrever mensagem"
+          title="Enter envia · Shift+Enter quebra a linha"
           value={draft}
           maxLength={CHAT_MESSAGE_LIMIT}
           rows={1}
@@ -349,7 +350,6 @@ function ChatPanel({ messages, currentSenderId, canSend, placeholder, displayNam
         />
         <button type="submit" disabled={!canSend || !normalizeChatText(draft)} aria-label="Enviar mensagem"><Icon name="send" /></button>
       </form>
-      <small className="chat-hint">Enter envia · Shift+Enter quebra a linha · {draft.length}/{CHAT_MESSAGE_LIMIT}</small>
     </div>
   );
 }
@@ -493,8 +493,28 @@ function DevicePicker({ id, label, icon, value, devices, onChange }: {
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
-  const closePicker = useCallback(() => setOpen(false), []);
+  const closeTimerRef = useRef<number | null>(null);
+  const cancelScheduledClose = useCallback(() => {
+    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = null;
+  }, []);
+  const closePicker = useCallback(() => {
+    cancelScheduledClose();
+    setOpen(false);
+  }, [cancelScheduledClose]);
+  const openPicker = useCallback(() => {
+    cancelScheduledClose();
+    setOpen(true);
+  }, [cancelScheduledClose]);
+  const schedulePickerClose = useCallback(() => {
+    cancelScheduledClose();
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null;
+      setOpen(false);
+    }, 180);
+  }, [cancelScheduledClose]);
   useDismissOnOutside(rootRef, open, closePicker);
+  useEffect(() => cancelScheduledClose, [cancelScheduledClose]);
   const selectedLabel = devices.find(device => device.deviceId === value)?.label || 'Padrão do sistema';
   const options = [{ deviceId: '', label: 'Padrão do sistema' }, ...devices
     .filter(device => device.deviceId)
@@ -509,19 +529,19 @@ function DevicePicker({ id, label, icon, value, devices, onChange }: {
     <div
       className={`device-picker ${open ? 'is-open' : ''}`}
       ref={rootRef}
-      onPointerEnter={() => setOpen(true)}
-      onPointerLeave={() => setOpen(false)}
-      onFocusCapture={() => setOpen(true)}
+      onPointerEnter={openPicker}
+      onPointerLeave={schedulePickerClose}
+      onFocusCapture={openPicker}
       onBlurCapture={closeWhenFocusLeaves}
     >
-      <button className="device-select" id={id} type="button" aria-haspopup="listbox" aria-expanded={open} aria-controls={`${id}-options`} onClick={() => setOpen(true)}>
+      <button className="device-select" id={id} type="button" aria-haspopup="listbox" aria-expanded={open} aria-controls={`${id}-options`} onClick={openPicker}>
         <Icon name={icon} />
         <span><strong>{label}</strong><small>{selectedLabel}</small></span>
         <Icon name="chevron" />
       </button>
       {open && (
         <div className="device-options" id={`${id}-options`} role="listbox" aria-label={label}>
-          <header><strong>{label}</strong><small>ESCOLHA UM DISPOSITIVO</small></header>
+          <header><strong>{label}</strong></header>
           <div className="device-options-list">
             {options.map((option, index) => (
               <button
@@ -649,14 +669,11 @@ function ScreenLinkMascot() {
   );
 }
 
-function Header({ status, live = false, meta }: { status: string; live?: boolean; meta?: string }) {
+function Header({ status, live = false }: { status: string; live?: boolean }) {
   return (
     <header className="topbar">
       <div className="brand"><span className="brand-mark"><span /></span><strong>ScreenLink</strong></div>
-      <div className="topbar-session">
-        {meta && <span className="topbar-meta">{meta}</span>}
-        {!live && <div className="status-pill"><i />{status}</div>}
-      </div>
+      {!live && <div className="status-pill"><i />{status}</div>}
     </header>
   );
 }
@@ -1878,11 +1895,7 @@ function HostApp() {
 
   return (
     <div className="app">
-      <Header
-        status={hostLabel}
-        live={status === 'connected'}
-        meta={callActive ? `${sessionDuration} · ${connectedViewerCount}/${maxViewers} na chamada` : 'Sessão privada · P2P'}
-      />
+      <Header status={hostLabel} live={status === 'connected'} />
       <main className="host-main">
         <section className={`share-stage ${localStream ? 'is-live' : ''} ${videoPaused ? 'is-paused' : ''}`}>
           <video ref={videoRef} autoPlay playsInline muted />
@@ -1956,20 +1969,20 @@ function HostApp() {
               <button className="hangup" type="button" onClick={endCall} aria-label="Encerrar chamada" data-label="Encerrar"><Icon name="hangup" /></button>
               {hostAudioMenuOpen && (
                 <section className="dock-popover audio-popover" aria-label="Configurações rápidas de áudio">
-                  <header><strong>Áudio</strong><small>DISPOSITIVOS E VOZ</small></header>
+                  <header><strong>Áudio</strong></header>
                   <div className="device-picker-stack">
                     <DevicePicker id="host-input-device" label="Dispositivo de entrada" icon="microphone" value={hostInputDeviceId} devices={hostAudioDevices.inputs} onChange={deviceId => void changeHostInputDevice(deviceId)} />
                     <DevicePicker id="host-output-device" label="Dispositivo de saída" icon="volume" value={hostOutputDeviceId} devices={hostAudioDevices.outputs} onChange={changeHostOutputDevice} />
                   </div>
                   <div className="audio-popover-scroll">
                     <section className="audio-menu-section">
-                      <header><strong>Envio</strong><small>PARA TODOS</small></header>
+                      <header><strong>Envio</strong></header>
                       <ToggleRow icon={localStream && audioEnabled && audioAvailable ? 'volume' : 'volumeOff'} label="Áudio da tela" description={screenAudioCopy} checked={Boolean(localStream && audioEnabled && audioAvailable)} disabled={!localStream || audioAvailable === false} onClick={toggleScreenAudio} />
                       <ToggleRow icon={microphoneEnabled && microphoneAvailable ? 'microphone' : 'microphoneOff'} label="Microfone" description={microphoneCopy} checked={microphoneEnabled && microphoneAvailable === true} onClick={toggleMicrophone} />
                       <VolumeControl id="host-popover-input-volume" label="Volume de entrada" description="Ganho do seu microfone" value={inputVolume} disabled={microphoneAvailable === false} onChange={changeInputVolume} />
                     </section>
                     <section className="audio-menu-section">
-                      <header><strong>Tratamento de voz</strong><small>MICROFONE</small></header>
+                      <header><strong>Tratamento de voz</strong></header>
                       <div className="voice-settings">
                         <VoiceSetting label="Isolamento de voz" description="Reduz ruídos ao redor" checked={hostVoiceProcessing.noiseSuppression} onChange={enabled => changeHostVoiceProcessing('noiseSuppression', enabled)} />
                         <VoiceSetting label="Controle de eco" description="Evita retorno nos alto-falantes" checked={hostVoiceProcessing.echoCancellation} onChange={enabled => changeHostVoiceProcessing('echoCancellation', enabled)} />
@@ -1977,7 +1990,7 @@ function HostApp() {
                       </div>
                     </section>
                     <section className="audio-menu-section">
-                      <header><strong>Retorno dos espectadores</strong><small>{viewerAudioCount} COM ÁUDIO</small></header>
+                      <header><strong>Retorno dos espectadores{viewerAudioCount ? ` · ${viewerAudioCount}` : ''}</strong></header>
                       <VolumeControl id="host-popover-output-volume" label="Volume de saída" description="Retorno geral neste computador" value={outputVolume} onChange={changeOutputVolume} />
                       <div className={`viewer-mixer ${viewerMixer.length > 5 ? 'is-dense' : ''}`}>
                         {viewerMixer.length ? viewerMixer.map(viewer => (
@@ -2884,7 +2897,7 @@ function ViewerApp({ invite }: { invite: Invite }) {
 
   return (
     <div className="app viewer-mode">
-      <Header status={label} live={callConnected} meta={callConnected ? `${viewerDuration} · chamada privada` : undefined} />
+      <Header status={label} live={callConnected} />
       <main className="viewer-main">
         <section ref={stageRef} className={`viewer-stage ${callConnected && screenSharing ? 'has-video' : ''} ${remotePaused && screenSharing ? 'is-paused' : ''} ${viewerChatOpen ? 'chat-is-open' : ''}`} aria-live="polite">
           <video
@@ -2967,19 +2980,19 @@ function ViewerApp({ invite }: { invite: Invite }) {
               <button className="hangup" type="button" onClick={() => leaveViewerRef.current()} aria-label="Sair da chamada" data-label="Sair" disabled={status === 'ended' || status === 'error'}><Icon name="hangup" /></button>
               {viewerAudioMenuOpen && (
                 <section className="dock-popover audio-popover viewer-audio-popover" aria-label="Configurações de áudio">
-                  <header><strong>Áudio</strong><small>DISPOSITIVOS E VOZ</small></header>
+                  <header><strong>Áudio</strong></header>
                   <div className="device-picker-stack">
                     <DevicePicker id="viewer-input-device" label="Dispositivo de entrada" icon="microphone" value={viewerInputDeviceId} devices={viewerAudioDevices.inputs} onChange={deviceId => void changeViewerInputDevice(deviceId)} />
                     <DevicePicker id="viewer-output-device" label="Dispositivo de saída" icon="volume" value={viewerOutputDeviceId} devices={viewerAudioDevices.outputs} onChange={deviceId => void changeViewerOutputDevice(deviceId)} />
                   </div>
                   <div className="audio-popover-scroll">
                     <section className="audio-menu-section">
-                      <header><strong>Volumes</strong><small>ENTRADA E SAÍDA</small></header>
+                      <header><strong>Volumes</strong></header>
                       <VolumeControl id="viewer-input-volume" label="Volume de entrada" description="Ganho do seu microfone" value={viewerInputVolume} disabled={viewerMicrophoneAvailable === false} onChange={changeViewerInputVolume} />
                       <VolumeControl id="viewer-output-volume" label="Volume de saída" description="Áudio recebido da chamada" value={viewerOutputVolume} onChange={setViewerOutputVolume} />
                     </section>
                     <section className="audio-menu-section">
-                      <header><strong>Tratamento de voz</strong><small>MICROFONE</small></header>
+                      <header><strong>Tratamento de voz</strong></header>
                       <div className="voice-settings">
                         <VoiceSetting label="Isolamento de voz" description="Reduz ruídos ao redor" checked={viewerVoiceProcessing.noiseSuppression} onChange={enabled => changeViewerVoiceProcessing('noiseSuppression', enabled)} />
                         <VoiceSetting label="Controle de eco" description="Evita retorno nos alto-falantes" checked={viewerVoiceProcessing.echoCancellation} onChange={enabled => changeViewerVoiceProcessing('echoCancellation', enabled)} />
