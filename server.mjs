@@ -151,7 +151,7 @@ function endRoom(roomId, { hostEnded = false, closeHost = false } = {}) {
 function setSecurityHeaders(response) {
   response.setHeader('X-Content-Type-Options', 'nosniff');
   response.setHeader('Referrer-Policy', 'no-referrer');
-  response.setHeader('Permissions-Policy', 'camera=(), microphone=(), display-capture=(self)');
+  response.setHeader('Permissions-Policy', 'camera=(), microphone=(self), display-capture=(self)');
   response.setHeader('Content-Security-Policy', "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; media-src 'self' blob:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
 }
 
@@ -356,6 +356,27 @@ websocketServer.on('connection', socket => {
       } else if (client.role === 'viewer' && room.viewer?.socket === socket && room.viewer.id === message.peerId) {
         sendJson(room.host, { type: 'ice-candidate', peerId: message.peerId, candidate: message.candidate });
       }
+      return;
+    }
+
+    if (message.type === 'media-state') {
+      if (
+        client.role !== 'host' ||
+        room.viewer?.id !== message.peerId ||
+        typeof message.videoPaused !== 'boolean' ||
+        typeof message.screenAudioEnabled !== 'boolean' ||
+        typeof message.microphoneEnabled !== 'boolean'
+      ) {
+        fail(socket, 'BAD_MEDIA_STATE', 'Não foi possível atualizar os controles da transmissão.');
+        return;
+      }
+      sendJson(room.viewer.socket, {
+        type: 'media-state',
+        peerId: message.peerId,
+        videoPaused: message.videoPaused,
+        screenAudioEnabled: message.screenAudioEnabled,
+        microphoneEnabled: message.microphoneEnabled
+      });
       return;
     }
 
