@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import {
   createPrivateRoom,
   inviteUrl,
@@ -15,6 +15,66 @@ type AudienceStatus = 'empty' | 'connecting' | 'connected';
 type ViewerStatus = 'connecting' | 'waiting' | 'live' | 'ended' | 'error';
 type PeerRecord = { id: string; pc: RTCPeerConnection; queued: RTCIceCandidateInit[] };
 type RuntimeConfig = { viewerOrigin?: string; mode?: 'p2p-stun' };
+type Resolution = 360 | 480 | 720 | 1080;
+type FrameRate = 15 | 30 | 45 | 60;
+type VideoProfile = { resolution: Resolution; fps: FrameRate };
+type ProfileStatus = 'idle' | 'applying' | 'applied' | 'error';
+
+const RESOLUTIONS: readonly Resolution[] = [360, 480, 720, 1080];
+const FRAME_RATES: readonly FrameRate[] = [15, 30, 45, 60];
+const VIDEO_SIZES: Record<Resolution, { width: number; height: number; bitrate: number }> = {
+  360: { width: 640, height: 360, bitrate: 1_000_000 },
+  480: { width: 854, height: 480, bitrate: 1_600_000 },
+  720: { width: 1280, height: 720, bitrate: 3_500_000 },
+  1080: { width: 1920, height: 1080, bitrate: 6_000_000 }
+};
+
+function videoSettings(profile: VideoProfile) {
+  const size = VIDEO_SIZES[profile.resolution];
+  const frameRateFactor = profile.fps === 15 ? .7 : profile.fps === 30 ? 1 : profile.fps === 45 ? 1.25 : 1.5;
+  return { ...size, fps: profile.fps, bitrate: Math.round(size.bitrate * frameRateFactor) };
+}
+
+async function configureVideoSender(sender: RTCRtpSender, profile: VideoProfile) {
+  const settings = videoSettings(profile);
+  const parameters = sender.getParameters();
+  if (!parameters.encodings?.length) parameters.encodings = [{}];
+  parameters.encodings[0]!.maxBitrate = settings.bitrate;
+  parameters.encodings[0]!.maxFramerate = settings.fps;
+  parameters.degradationPreference = 'balanced';
+  await sender.setParameters(parameters);
+}
+
+function SegmentedControl<T extends number>({ label, suffix, options, value, disabled = false, onChange }: {
+  label: string;
+  suffix: string;
+  options: readonly T[];
+  value: T;
+  disabled?: boolean;
+  onChange: (value: T) => void;
+}) {
+  const activeIndex = options.indexOf(value);
+  return (
+    <fieldset className="profile-fieldset">
+      <legend><span>{label}</span><small>{suffix}</small></legend>
+      <div className="segmented-control" role="radiogroup" aria-label={label} style={{ '--active-index': activeIndex } as CSSProperties}>
+        {options.map(option => (
+          <button
+            key={option}
+            type="button"
+            role="radio"
+            aria-checked={option === value}
+            disabled={disabled}
+            className={option === value ? 'is-active' : ''}
+            onClick={() => onChange(option)}
+          >
+            {option}{suffix === 'resolução' ? 'p' : ''}
+          </button>
+        ))}
+      </div>
+    </fieldset>
+  );
+}
 
 type ModelContext = {
   registerTool: (tool: {
@@ -76,6 +136,8 @@ function HostApp() {
   const inviteRef = useRef<Invite | null>(null);
   const viewerOriginRef = useRef(window.location.origin);
   const iceServersRef = useRef<IceServerConfig[]>([]);
+  const videoProfileRef = useRef<VideoProfile>({ resolution: 720, fps: 30 });
+  const profileRequestRef = useRef(0);
   const stoppingRef = useRef(false);
   const connectionTimerRef = useRef<number | null>(null);
   const stopSharingRef = useRef<() => void>(() => {});
@@ -86,6 +148,9 @@ function HostApp() {
   const [shareUrl, setShareUrl] = useState('');
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState('');
+  const [resolution, setResolution] = useState<Resolution>(720);
+  const [fps, setFps] = useState<FrameRate>(30);
+  const [profileStatus, setProfileStatus] = useState<ProfileStatus>('idle');
   useEffect(() => {
     const controller = new AbortController();
     void fetch('/runtime-config', { signal: controller.signal, cache: 'no-store' })
@@ -110,6 +175,36 @@ function HostApp() {
     }
   }, []);
 
+  const applyVideoProfile = useCallback(async (profile: VideoProfile) => {
+    videoProfileRef.current = profile;
+    setResolution(profile.resolution);
+    setFps(profile.fps);
+    const stream = streamRef.current;
+    if (!stream) {
+      setProfileStatus('idle');
+      return;
+    }
+
+    const requestId = ++profileRequestRef.current;
+    setProfileStatus('applying');
+    const settings = videoSettings(profile);
+    try {
+      const track = stream.getVideoTracks()[0];
+      if (!track) throw new Error('Video track unavailable');
+      track.contentHint = profile.fps >= 45 ? 'motion' : 'detail';
+      await track.applyConstraints({
+        width: { ideal: settings.width, max: settings.width },
+        height: { ideal: settings.height, max: settings.height },
+        frameRate: { ideal: settings.fps, max: settings.fps }
+      });
+      const sender = peerRef.current?.pc.getSenders().find(candidate => candidate.track?.kind === 'video');
+      if (sender) await configureVideoSender(sender, profile);
+      if (profileRequestRef.current === requestId) setProfileStatus('applied');
+    } catch {
+      if (profileRequestRef.current === requestId) setProfileStatus('error');
+    }
+  }, []);
+
   const failSession = useCallback((message: string) => {
     stoppingRef.current = true;
     clearConnectionTimer();
@@ -122,6 +217,7 @@ function HostApp() {
     setLocalStream(null);
     inviteRef.current = null;
     setShareUrl('');
+    setProfileStatus('idle');
     setError(message);
     setStatus('error');
   }, [clearConnectionTimer, destroyPeer]);
@@ -140,6 +236,7 @@ function HostApp() {
     setLocalStream(null);
     setShareUrl('');
     setCopied(false);
+    setProfileStatus('idle');
     setError('');
     setStatus('idle');
   }, [clearConnectionTimer, destroyPeer]);
@@ -160,15 +257,10 @@ function HostApp() {
     peerRef.current = record;
 
     for (const track of stream.getTracks()) {
-      if (track.kind === 'video') track.contentHint = 'detail';
       const sender = pc.addTrack(track, stream);
       if (track.kind === 'video') {
-        const parameters = sender.getParameters();
-        if (!parameters.encodings?.length) parameters.encodings = [{}];
-        parameters.encodings[0]!.maxBitrate = 6_000_000;
-        parameters.encodings[0]!.maxFramerate = 30;
-        parameters.degradationPreference = 'balanced';
-        await sender.setParameters(parameters).catch(() => undefined);
+        track.contentHint = videoProfileRef.current.fps >= 45 ? 'motion' : 'detail';
+        await configureVideoSender(sender, videoProfileRef.current).catch(() => undefined);
       }
     }
 
@@ -237,15 +329,17 @@ function HostApp() {
     stoppingRef.current = false;
     setStatus('starting');
     try {
+      const selectedProfile = videoProfileRef.current;
+      const selectedSettings = videoSettings(selectedProfile);
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: {
-          width: { ideal: 1920, max: 1920 },
-          height: { ideal: 1080, max: 1080 },
-          frameRate: { ideal: 30, max: 30 }
+          width: { ideal: selectedSettings.width, max: selectedSettings.width },
+          height: { ideal: selectedSettings.height, max: selectedSettings.height },
+          frameRate: { ideal: selectedSettings.fps, max: selectedSettings.fps }
         },
         audio: false
       });
-      stream.getVideoTracks()[0]!.contentHint = 'detail';
+      stream.getVideoTracks()[0]!.contentHint = selectedProfile.fps >= 45 ? 'motion' : 'detail';
       streamRef.current = stream;
       setLocalStream(stream);
       stream.getVideoTracks()[0]?.addEventListener('ended', () => stopSharingRef.current(), { once: true });
@@ -375,7 +469,7 @@ function HostApp() {
               {error && <p className="error-message" role="alert">{error}</p>}
             </div>
           )}
-          {localStream && <div className="live-badge"><span /> Prévia da sua tela</div>}
+          {localStream && <div className="live-badge"><span /> {resolution}p · até {fps} FPS</div>}
         </section>
 
         <aside className="control-panel">
@@ -383,6 +477,32 @@ function HostApp() {
             <span className="step-number">01</span>
             <div><h2>{localStream ? 'Tela selecionada' : 'Compartilhe'}</h2><p>{localStream ? 'A prévia está ativa neste computador.' : 'Você escolhe exatamente o que será mostrado.'}</p></div>
           </div>
+          <section className="profile-controls" aria-label="Qualidade da transmissão">
+            <SegmentedControl
+              label="Qualidade"
+              suffix="resolução"
+              options={RESOLUTIONS}
+              value={resolution}
+              disabled={profileStatus === 'applying'}
+              onChange={nextResolution => void applyVideoProfile({ resolution: nextResolution, fps })}
+            />
+            <SegmentedControl
+              label="Fluidez"
+              suffix="FPS"
+              options={FRAME_RATES}
+              value={fps}
+              disabled={profileStatus === 'applying'}
+              onChange={nextFps => void applyVideoProfile({ resolution, fps: nextFps })}
+            />
+            <p className={`profile-summary ${profileStatus}`} aria-live="polite">
+              <i />
+              {profileStatus === 'applying'
+                ? 'Aplicando ajuste…'
+                : profileStatus === 'error'
+                  ? 'O navegador manteve o modo compatível.'
+                  : `${resolution}p · até ${fps} FPS · bitrate adaptativo`}
+            </p>
+          </section>
           <div className="divider" />
           <div className={`panel-heading ${shareUrl ? '' : 'muted-step'}`}>
             <span className="step-number">02</span>
