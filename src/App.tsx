@@ -479,7 +479,7 @@ function Icon({ name }: { name: IconName }) {
     call: <path d="M7.4 3.5 10 8 7.8 10c1.4 2.8 3.4 4.8 6.2 6.2l2-2.2 4.5 2.6-.8 3.8c-.2.8-.9 1.3-1.7 1.2C9.7 20.6 3.4 14.3 2.4 6c-.1-.8.4-1.5 1.2-1.7l3.8-.8Z"/>,
     hangup: <><path d="M4.3 15.5c4.9-4.6 10.5-4.6 15.4 0"/><path d="m7.2 13.3-1.4 4.2-3.5-1.2M16.8 13.3l1.4 4.2 3.5-1.2"/></>,
     message: <><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-5.5 4v-4.5A2.5 2.5 0 0 1 4 14V5.5Z"/><path d="M8 8h8M8 12h5"/></>,
-    send: <><path d="m3 4 18 8-18 8 3-8-3-8Z"/><path d="M6 12h15"/></>,
+    send: <><path d="M12 20V5"/><path d="m6.5 10.5 5.5-5.5 5.5 5.5"/></>,
     expand: <><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></>,
     check: <path d="m5 12 4 4L19 6"/>,
     signal: <><path d="M5 12.5a10 10 0 0 1 14 0"/><path d="M8 16a6 6 0 0 1 8 0"/><path d="M11 19.5a2 2 0 0 1 2 0"/></>,
@@ -494,7 +494,7 @@ function Icon({ name }: { name: IconName }) {
     pip: <><rect x="3" y="5" width="18" height="14" rx="2"/><rect x="12" y="11" width="7" height="5" rx="1"/></>,
     wake: <><circle cx="12" cy="12" r="3.5"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></>,
     auto: <><path d="m12 3 1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3Z"/><path d="m18.5 15 .8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2Z"/></>,
-    chevron: <path d="m8.5 10 3.5 3.5 3.5-3.5"/>,
+    chevron: <path d="m5.5 8 6.5 6.5 6.5-6.5"/>,
     more: <><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none"/></>
   };
 
@@ -652,7 +652,6 @@ function HostApp() {
   const [maxViewers, setMaxViewers] = useState<(typeof VIEWER_LIMITS)[number]>(1);
   const [viewerCount, setViewerCount] = useState(0);
   const [connectedViewerCount, setConnectedViewerCount] = useState(0);
-  const [turnAvailable, setTurnAvailable] = useState(false);
   const [videoPaused, setVideoPaused] = useState(false);
   const [audioEnabled, setAudioEnabled] = useState(true);
   const [audioAvailable, setAudioAvailable] = useState<boolean | null>(null);
@@ -670,6 +669,7 @@ function HostApp() {
   const [chatUnread, setChatUnread] = useState(0);
   const [hostName, setHostName] = useState(() => storedDisplayName('screenlink-host-name', 'Apresentador'));
   const [hostAudioMenuOpen, setHostAudioMenuOpen] = useState(false);
+  const [hostScreenMenuOpen, setHostScreenMenuOpen] = useState(false);
   const [hostInputDeviceId, setHostInputDeviceId] = useState('');
   const [hostOutputDeviceId, setHostOutputDeviceId] = useState('');
   const [hostVoiceProcessing, setHostVoiceProcessing] = useState<VoiceProcessing>({ echoCancellation: true, noiseSuppression: true, autoGainControl: true });
@@ -681,7 +681,6 @@ function HostApp() {
       .then(response => response.ok ? response.json() as Promise<RuntimeConfig> : Promise.reject(new Error('Runtime configuration unavailable')))
       .then(configuration => {
         if (configuration.viewerOrigin) viewerOriginRef.current = configuration.viewerOrigin;
-        setTurnAvailable(Boolean(configuration.turnEnabled));
       })
       .catch(() => undefined);
     return () => controller.abort();
@@ -695,7 +694,10 @@ function HostApp() {
   useEffect(() => { chatMessagesRef.current = chatMessages; }, [chatMessages]);
   useEffect(() => { hostNameRef.current = normalizeDisplayName(hostName) || 'Apresentador'; }, [hostName]);
   useEffect(() => {
-    if (status === 'idle' || status === 'error') setHostAudioMenuOpen(false);
+    if (status === 'idle' || status === 'error') {
+      setHostAudioMenuOpen(false);
+      setHostScreenMenuOpen(false);
+    }
   }, [status]);
   useEffect(() => {
     panelSectionRef.current = panelSection;
@@ -1095,6 +1097,7 @@ function HostApp() {
     chatMessagesRef.current = [];
     setChatMessages([]);
     setChatUnread(0);
+    setPanelSection('stream');
     setError(message);
     setStatus('error');
   }, [clearConnectionTimer, clearReconnectTimer, destroyAllPeers, disposeMicrophonePipeline]);
@@ -1155,6 +1158,7 @@ function HostApp() {
     chatMessagesRef.current = [];
     setChatMessages([]);
     setChatUnread(0);
+    setPanelSection('stream');
     setError('');
     setStatus('idle');
   }, [clearConnectionTimer, clearReconnectTimer, destroyAllPeers, disposeMicrophonePipeline]);
@@ -1310,10 +1314,6 @@ function HostApp() {
       clearReconnectTimer();
       reconnectAttemptRef.current = 0;
       iceServersRef.current = message.iceServers;
-      setTurnAvailable(message.iceServers.some(server => {
-        const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
-        return urls.some(url => /^turns?:/i.test(url));
-      }));
       if (VIEWER_LIMITS.includes(message.maxViewers as (typeof VIEWER_LIMITS)[number])) {
         const acceptedLimit = message.maxViewers as (typeof VIEWER_LIMITS)[number];
         maxViewersRef.current = acceptedLimit;
@@ -1467,6 +1467,7 @@ function HostApp() {
 
   const startScreenShare = useCallback(async () => {
     if (screenShareState === 'selecting') return;
+    setHostScreenMenuOpen(false);
     setError('');
     if (!navigator.mediaDevices?.getDisplayMedia) {
       setError('Use Chrome ou Edge no computador para compartilhar a tela.');
@@ -1736,18 +1737,6 @@ function HostApp() {
     : audience === 'connecting'
       ? `${viewerCount || 1} espectador${viewerCount === 1 ? '' : 'es'} conectando…`
       : `Aguardando espectadores · limite ${maxViewers}`;
-  const qualityCopy = connectionQuality === 'excellent'
-    ? 'Conexão excelente'
-    : connectionQuality === 'good'
-      ? 'Conexão estável'
-      : connectionQuality === 'limited'
-        ? 'Rede limitada — reduzindo qualidade'
-        : connectionQuality === 'blocked'
-          ? 'A rede bloqueou a conexão direta'
-          : 'Aguardando dados da conexão';
-  const metricCopy = connectionMetrics.bitrateKbps
-    ? `${(connectionMetrics.bitrateKbps / 1_000).toFixed(1)} Mbps · ${connectionMetrics.rttMs || '—'} ms`
-    : 'WebRTC P2P direto';
   const screenAudioCopy = !localStream
     ? 'Disponível ao compartilhar uma tela'
     : audioAvailable
@@ -1815,6 +1804,14 @@ function HostApp() {
           )}
           {callActive && (
             <div className="host-call-dock" aria-label="Controles da chamada">
+              <button className={`dock-connection-indicator ${connectionQuality}`} type="button" aria-label={`Conexão: ${connectionMetrics.rttMs ? `${connectionMetrics.rttMs} milissegundos` : 'calculando latência'}`}>
+                <Icon name="signal" />
+                <span className="connection-tooltip" role="tooltip">
+                  <strong>{connectionMetrics.rttMs ? `${connectionMetrics.rttMs} ms` : 'Calculando ping…'}</strong>
+                  <small>{sessionDuration} de chamada</small>
+                </span>
+              </button>
+              <span className="dock-divider" />
               {localStream && (
                 <button type="button" onClick={toggleVideoPaused} aria-label={videoPaused ? 'Retomar transmissão' : 'Pausar transmissão'} aria-pressed={videoPaused} data-label={videoPaused ? 'Retomar' : 'Pausar'}>
                   <Icon name={videoPaused ? 'play' : 'pause'} />
@@ -1827,18 +1824,21 @@ function HostApp() {
                 <button className={microphoneEnabled && microphoneAvailable ? 'is-on' : ''} type="button" onClick={toggleMicrophone} aria-label={microphoneEnabled ? 'Silenciar microfone' : 'Ativar microfone'} aria-pressed={microphoneEnabled && microphoneAvailable === true} data-label="Microfone">
                   <Icon name={microphoneEnabled && microphoneAvailable ? 'microphone' : 'microphoneOff'} />
                 </button>
-                <button className={`dock-chevron ${hostAudioMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => setHostAudioMenuOpen(current => !current)} aria-label="Configurações de áudio" aria-expanded={hostAudioMenuOpen} data-label="Ajustes"><Icon name="chevron" /></button>
+                <button className={`dock-chevron ${hostAudioMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { setHostAudioMenuOpen(current => !current); setHostScreenMenuOpen(false); }} aria-label="Configurações de áudio" aria-expanded={hostAudioMenuOpen} data-label="Ajustes"><Icon name="chevron" /></button>
               </div>
-              <button type="button" onClick={startScreenShare} aria-label={localStream ? 'Trocar tela compartilhada' : 'Compartilhar tela'} data-label={localStream ? 'Trocar tela' : 'Compartilhar'} disabled={status !== 'connected' || screenShareState === 'selecting'}>
-                <Icon name="screen" />
-              </button>
+              <div className="dock-split-control screen-split-control">
+                <button type="button" onClick={startScreenShare} aria-label={localStream ? 'Trocar tela compartilhada' : 'Compartilhar tela'} data-label={localStream ? 'Trocar tela' : 'Compartilhar'} disabled={status !== 'connected' || screenShareState === 'selecting'}>
+                  <Icon name="screen" />
+                </button>
+                <button className={`dock-chevron ${hostScreenMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { setHostScreenMenuOpen(current => !current); setHostAudioMenuOpen(false); }} aria-label="Configurações do compartilhamento" aria-expanded={hostScreenMenuOpen} data-label="Ajustes"><Icon name="chevron" /></button>
+              </div>
               {localStream && (
                 <button type="button" onClick={() => void stopScreenShare()} aria-label="Parar compartilhamento de tela" data-label="Parar tela"><Icon name="screenOff" /></button>
               )}
-              <button className={panelSection === 'chat' ? 'is-on' : ''} type="button" onClick={() => { setPanelSection('chat'); setHostAudioMenuOpen(false); }} aria-label="Abrir chat" data-label="Chat">
+              <button className={panelSection === 'chat' ? 'is-on' : ''} type="button" onClick={() => { setPanelSection('chat'); setHostAudioMenuOpen(false); setHostScreenMenuOpen(false); }} aria-label="Abrir chat" data-label="Chat">
                 <Icon name="message" />{chatUnread > 0 && <b className="dock-unread">{Math.min(chatUnread, 99)}</b>}
               </button>
-              <span />
+              <span className="dock-divider" />
               <button className="hangup" type="button" onClick={endCall} aria-label="Encerrar chamada" data-label="Encerrar"><Icon name="hangup" /></button>
               {hostAudioMenuOpen && (
                 <section className="dock-popover audio-popover" aria-label="Configurações rápidas de áudio">
@@ -1857,6 +1857,19 @@ function HostApp() {
                   <button className="popover-link" type="button" onClick={() => { setPanelSection('audio'); setHostAudioMenuOpen(false); }}>Abrir mixer completo <Icon name="chevron" /></button>
                 </section>
               )}
+              {hostScreenMenuOpen && (
+                <section className="dock-popover more-popover screen-popover" aria-label="Configurações do compartilhamento">
+                  <header><strong>Compartilhamento</strong><small>TELA E QUALIDADE</small></header>
+                  <button type="button" onClick={startScreenShare} disabled={status !== 'connected' || screenShareState === 'selecting'}><Icon name="screen" /><span><strong>{localStream ? 'Trocar tela' : 'Escolher tela'}</strong><small>Tela, janela ou aba do navegador</small></span><Icon name="chevron" /></button>
+                  {localStream && (
+                    <>
+                      <button type="button" onClick={toggleVideoPaused}><Icon name={videoPaused ? 'play' : 'pause'} /><span><strong>{videoPaused ? 'Retomar transmissão' : 'Pausar transmissão'}</strong><small>A chamada continua normalmente</small></span><i>{videoPaused ? 'Pausada' : ''}</i></button>
+                      <button type="button" onClick={toggleScreenAudio} disabled={audioAvailable === false}><Icon name={audioEnabled && audioAvailable ? 'volume' : 'volumeOff'} /><span><strong>Áudio da tela</strong><small>{screenAudioCopy}</small></span><i>{audioEnabled && audioAvailable ? 'Ativo' : ''}</i></button>
+                    </>
+                  )}
+                  <button type="button" onClick={() => { setPanelSection('stream'); setHostScreenMenuOpen(false); }}><Icon name="auto" /><span><strong>Qualidade do vídeo</strong><small>{automaticQuality ? `Automática · ${resolution}p · ${fps} FPS` : `Manual · ${resolution}p · ${fps} FPS`}</small></span><Icon name="chevron" /></button>
+                </section>
+              )}
             </div>
           )}
         </section>
@@ -1868,28 +1881,34 @@ function HostApp() {
           </header>
 
           <nav className="panel-tabs" role="tablist" aria-label="Seções dos controles" style={{ '--tab-index': panelSection === 'stream' ? 0 : panelSection === 'audio' ? 1 : 2 } as CSSProperties}>
-            <button type="button" role="tab" aria-selected={panelSection === 'stream'} aria-controls="stream-panel" className={panelSection === 'stream' ? 'is-active' : ''} onClick={() => { setPanelSection('stream'); setHostAudioMenuOpen(false); }}>Chamada</button>
-            <button type="button" role="tab" aria-selected={panelSection === 'audio'} aria-controls="audio-panel" className={panelSection === 'audio' ? 'is-active' : ''} onClick={() => { setPanelSection('audio'); setHostAudioMenuOpen(false); }}>Áudio <span>{viewerAudioCount}</span></button>
-            <button type="button" role="tab" aria-selected={panelSection === 'chat'} aria-controls="chat-panel" className={panelSection === 'chat' ? 'is-active' : ''} onClick={() => { setPanelSection('chat'); setHostAudioMenuOpen(false); }}>Chat <span>{chatUnread || ''}</span></button>
+            <button type="button" role="tab" aria-selected={panelSection === 'stream'} aria-controls="stream-panel" className={panelSection === 'stream' ? 'is-active' : ''} onClick={() => { setPanelSection('stream'); setHostAudioMenuOpen(false); setHostScreenMenuOpen(false); }}>Chamada</button>
+            <button type="button" role="tab" aria-selected={panelSection === 'audio'} aria-controls="audio-panel" className={panelSection === 'audio' ? 'is-active' : ''} onClick={() => { setPanelSection('audio'); setHostAudioMenuOpen(false); setHostScreenMenuOpen(false); }}>Áudio <span>{viewerAudioCount}</span></button>
+            <button type="button" role="tab" aria-selected={panelSection === 'chat'} aria-controls="chat-panel" className={panelSection === 'chat' ? 'is-active' : ''} onClick={() => { setPanelSection('chat'); setHostAudioMenuOpen(false); setHostScreenMenuOpen(false); }}>Chat <span>{chatUnread || ''}</span></button>
           </nav>
 
           <div className="panel-view">
             {panelSection === 'stream' && (
               <div id="stream-panel" role="tabpanel" className="panel-page">
-                <section className="panel-section source-section" aria-labelledby="source-title">
-                  <div className="section-heading"><h3 id="source-title">Compartilhamento</h3><small>{localStream ? 'ATIVO' : 'OPCIONAL'}</small></div>
-                  <div className="source-row">
-                    <Icon name={localStream ? 'screen' : 'screenOff'} />
-                    <span><strong>{localStream ? sourceLabel : 'Nenhuma tela compartilhada'}</strong><small>{localStream ? 'A chamada permanece ativa ao parar' : 'A chamada continua normalmente'}</small></span>
-                  </div>
-                  <div className="source-actions">
-                    <button type="button" onClick={startScreenShare} disabled={status !== 'connected' || screenShareState === 'selecting'}><Icon name="screen" />{localStream ? 'Trocar tela' : 'Compartilhar tela'}</button>
-                    {localStream && <button type="button" onClick={() => void stopScreenShare()}><Icon name="screenOff" />Parar</button>}
-                  </div>
+                <section className="panel-section invite-section" aria-labelledby="invite-title">
+                  <div className="section-heading"><h3 id="invite-title">Convite da chamada</h3><small>{shareUrl ? audienceCopy : 'APÓS INICIAR'}</small></div>
+                  {shareUrl ? (
+                    <>
+                      <div className="invite-row">
+                        <input id="invite-link" ref={inviteInputRef} aria-label="Link privado para assistir" readOnly value={shareUrl} onFocus={event => event.currentTarget.select()} />
+                        <button type="button" onClick={copyInvite} aria-label="Copiar link privado"><Icon name={copied ? 'check' : 'copy'} /></button>
+                      </div>
+                      <div className="invite-actions">
+                        <button type="button" onClick={() => setQrOpen(true)} disabled={!qrCode}><Icon name="qr" /> QR Code</button>
+                        {typeof navigator.share === 'function' && <button type="button" onClick={shareInvite}><Icon name="share" /> Compartilhar</button>}
+                      </div>
+                    </>
+                  ) : (
+                    <p className="empty-row"><Icon name="link" /> Inicie a chamada para criar o convite.</p>
+                  )}
                 </section>
 
                 <section className="panel-section quality-section" aria-labelledby="quality-title">
-                  <div className="section-heading"><h3 id="quality-title">Qualidade</h3><small>{automaticQuality ? 'AUTOMÁTICA' : 'MANUAL'}</small></div>
+                  <div className="section-heading"><h3 id="quality-title">Qualidade do vídeo</h3><small>{automaticQuality ? 'AUTOMÁTICA' : 'MANUAL'}</small></div>
                   <ToggleRow
                     icon="auto"
                     label="Ajuste automático"
@@ -1903,25 +1922,6 @@ function HostApp() {
                     <SegmentedControl label="Espectadores" suffix="máximo" options={VIEWER_LIMITS} value={maxViewers} disabled={callActive} onChange={setMaxViewers} />
                   </div>
                   <p className={`profile-summary ${profileStatus}`} aria-live="polite"><i />{profileStatus === 'applying' ? 'Aplicando…' : profileStatus === 'error' ? 'Modo compatível mantido' : 'Bitrate adaptativo ativo'}</p>
-                </section>
-
-                <section className="panel-section invite-section" aria-labelledby="invite-title">
-                  <div className="section-heading"><h3 id="invite-title">Convite da chamada</h3><small>{shareUrl ? audienceCopy : 'APÓS INICIAR'}</small></div>
-                  {shareUrl ? (
-                    <>
-                      <div className="invite-row">
-                        <input id="invite-link" ref={inviteInputRef} aria-label="Link privado para assistir" readOnly value={shareUrl} onFocus={event => event.currentTarget.select()} />
-                        <button type="button" onClick={copyInvite} aria-label="Copiar link privado"><Icon name={copied ? 'check' : 'copy'} /></button>
-                      </div>
-                      <div className="invite-actions">
-                        <button type="button" onClick={() => setQrOpen(true)} disabled={!qrCode}><Icon name="qr" /> QR Code</button>
-                        {typeof navigator.share === 'function' && <button type="button" onClick={shareInvite}><Icon name="share" /> Compartilhar</button>}
-                      </div>
-                      <div className={`connection-row ${connectionQuality}`}><Icon name="signal" /><span><strong>{qualityCopy}</strong><small>{audience === 'connected' ? metricCopy : `P2P + STUN${turnAvailable ? '/TURN' : ''}`}</small></span></div>
-                    </>
-                  ) : (
-                    <p className="empty-row"><Icon name="link" /> Inicie a chamada para criar o convite.</p>
-                  )}
                 </section>
               </div>
             )}
