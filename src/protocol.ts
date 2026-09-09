@@ -17,6 +17,7 @@ export type ServerMessage =
   | { type: 'offer'; peerId: string; sdp: SessionDescription }
   | { type: 'answer'; peerId: string; sdp: SessionDescription }
   | { type: 'ice-candidate'; peerId: string; candidate: RTCIceCandidateInit }
+  | { type: 'media-state'; peerId: string; videoPaused: boolean; screenAudioEnabled: boolean; microphoneEnabled: boolean }
   | { type: 'host-ended' }
   | { type: 'error'; code: string; message: string }
   | { type: 'pong'; at: number };
