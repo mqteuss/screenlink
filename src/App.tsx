@@ -22,6 +22,7 @@ type VideoProfile = { resolution: Resolution; fps: FrameRate };
 type ProfileStatus = 'idle' | 'applying' | 'applied' | 'error';
 type ConnectionQuality = 'waiting' | 'excellent' | 'good' | 'limited' | 'blocked';
 type ConnectionMetrics = { bitrateKbps: number; availableKbps: number; rttMs: number; packetLoss: number };
+type HostPanel = 'stream' | 'audio';
 
 type WakeLockSentinelLike = {
   released: boolean;
@@ -134,7 +135,7 @@ function SegmentedControl<T extends number>({ label, suffix, options, value, dis
   );
 }
 
-function ToggleTile({ icon, label, description, checked, disabled = false, onClick }: {
+function ToggleRow({ icon, label, description, checked, disabled = false, onClick }: {
   icon: IconName;
   label: string;
   description: string;
@@ -144,7 +145,7 @@ function ToggleTile({ icon, label, description, checked, disabled = false, onCli
 }) {
   return (
     <button
-      className={`toggle-tile ${checked ? 'is-active' : ''}`}
+      className={`toggle-row ${checked ? 'is-active' : ''}`}
       type="button"
       role="switch"
       aria-checked={checked}
@@ -152,10 +153,37 @@ function ToggleTile({ icon, label, description, checked, disabled = false, onCli
       disabled={disabled}
       onClick={onClick}
     >
-      <span className="toggle-tile-icon"><Icon name={icon} /></span>
-      <span className="toggle-tile-copy"><strong>{label}</strong><small>{description}</small></span>
-      <span className="toggle-tile-switch" aria-hidden="true"><i /></span>
+      <Icon name={icon} />
+      <span className="toggle-row-copy"><strong>{label}</strong><small>{description}</small></span>
+      <span className="toggle-row-switch" aria-hidden="true"><i /></span>
     </button>
+  );
+}
+
+function VolumeControl({ id, label, description, value, disabled = false, onChange }: {
+  id: string;
+  label: string;
+  description: string;
+  value: number;
+  disabled?: boolean;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <div className={`volume-control ${disabled ? 'is-disabled' : ''}`}>
+      <label htmlFor={id}><strong>{label}</strong><small>{description}</small></label>
+      <input
+        id={id}
+        type="range"
+        min="0"
+        max="100"
+        step="1"
+        value={value}
+        disabled={disabled}
+        aria-valuetext={`${value}%`}
+        onChange={event => onChange(Number(event.currentTarget.value))}
+      />
+      <output htmlFor={id}>{value}%</output>
+    </div>
   );
 }
 
@@ -250,9 +278,17 @@ function HostApp() {
   const reconnectAttemptRef = useRef(0);
   const screenAudioTracksRef = useRef<MediaStreamTrack[]>([]);
   const microphoneTrackRef = useRef<MediaStreamTrack | null>(null);
+  const microphoneSourceStreamRef = useRef<MediaStream | null>(null);
+  const microphoneAudioContextRef = useRef<AudioContext | null>(null);
+  const microphoneGainRef = useRef<GainNode | null>(null);
   const videoPausedRef = useRef(false);
   const audioEnabledRef = useRef(true);
   const microphoneEnabledRef = useRef(false);
+  const inputVolumeRef = useRef(100);
+  const outputVolumeRef = useRef(100);
+  const viewerVolumesRef = useRef<Record<string, number>>({});
+  const viewerLabelsRef = useRef(new Map<string, number>());
+  const nextViewerLabelRef = useRef(1);
   const automaticQualityRef = useRef(true);
   const manualProfileRef = useRef<VideoProfile>({ resolution: 720, fps: 30 });
   const maxViewersRef = useRef<(typeof VIEWER_LIMITS)[number]>(1);
@@ -283,6 +319,11 @@ function HostApp() {
   const [audioAvailable, setAudioAvailable] = useState<boolean | null>(null);
   const [microphoneEnabled, setMicrophoneEnabled] = useState(false);
   const [microphoneAvailable, setMicrophoneAvailable] = useState<boolean | null>(null);
+  const [panelSection, setPanelSection] = useState<HostPanel>('stream');
+  const [inputVolume, setInputVolume] = useState(100);
+  const [outputVolume, setOutputVolume] = useState(100);
+  const [viewerIds, setViewerIds] = useState<string[]>([]);
+  const [viewerVolumes, setViewerVolumes] = useState<Record<string, number>>({});
   const [qrCode, setQrCode] = useState('');
   const [qrOpen, setQrOpen] = useState(false);
   const [sessionStartedAt, setSessionStartedAt] = useState<number | null>(null);
@@ -333,9 +374,46 @@ function HostApp() {
   const syncAudience = useCallback(() => {
     const peers = [...peersRef.current.values()];
     const connected = peers.filter(peer => peer.pc.connectionState === 'connected').length;
+    setViewerIds(peers.map(peer => peer.id));
     setViewerCount(peers.length);
     setConnectedViewerCount(connected);
     setAudience(connected > 0 ? 'connected' : peers.length > 0 ? 'connecting' : 'empty');
+  }, []);
+
+  const applyViewerVolume = useCallback((peerId: string) => {
+    const audio = peersRef.current.get(peerId)?.remoteAudio;
+    if (!audio) return;
+    const individualVolume = viewerVolumesRef.current[peerId] ?? 100;
+    audio.volume = Math.min(1, (outputVolumeRef.current / 100) * (individualVolume / 100));
+  }, []);
+
+  const changeOutputVolume = useCallback((value: number) => {
+    outputVolumeRef.current = value;
+    setOutputVolume(value);
+    for (const peerId of peersRef.current.keys()) applyViewerVolume(peerId);
+  }, [applyViewerVolume]);
+
+  const changeViewerVolume = useCallback((peerId: string, value: number) => {
+    viewerVolumesRef.current = { ...viewerVolumesRef.current, [peerId]: value };
+    setViewerVolumes(viewerVolumesRef.current);
+    applyViewerVolume(peerId);
+  }, [applyViewerVolume]);
+
+  const changeInputVolume = useCallback((value: number) => {
+    inputVolumeRef.current = value;
+    setInputVolume(value);
+    const context = microphoneAudioContextRef.current;
+    const gain = microphoneGainRef.current;
+    if (context && gain) gain.gain.setTargetAtTime(value / 100, context.currentTime, .015);
+  }, []);
+
+  const disposeMicrophonePipeline = useCallback(() => {
+    stopStream(microphoneSourceStreamRef.current);
+    microphoneSourceStreamRef.current = null;
+    microphoneGainRef.current = null;
+    const context = microphoneAudioContextRef.current;
+    microphoneAudioContextRef.current = null;
+    if (context && context.state !== 'closed') void context.close().catch(() => undefined);
   }, []);
 
   const destroyPeer = useCallback((peerId: string) => {
@@ -349,6 +427,10 @@ function HostApp() {
   const destroyAllPeers = useCallback(() => {
     for (const peer of peersRef.current.values()) closePeer(peer);
     peersRef.current.clear();
+    viewerLabelsRef.current.clear();
+    nextViewerLabelRef.current = 1;
+    viewerVolumesRef.current = {};
+    setViewerVolumes({});
     syncAudience();
   }, [syncAudience]);
 
@@ -481,6 +563,7 @@ function HostApp() {
     socketRef.current = null;
     socket?.close(1000, 'Session failed');
     stopStream(streamRef.current);
+    disposeMicrophonePipeline();
     streamRef.current = null;
     setLocalStream(null);
     setSourceLabel('');
@@ -497,7 +580,7 @@ function HostApp() {
     setSessionStartedAt(null);
     setError(message);
     setStatus('error');
-  }, [clearConnectionTimer, clearReconnectTimer, destroyAllPeers]);
+  }, [clearConnectionTimer, clearReconnectTimer, destroyAllPeers, disposeMicrophonePipeline]);
 
   const stopSharing = useCallback(() => {
     stoppingRef.current = true;
@@ -509,6 +592,7 @@ function HostApp() {
     socket?.close(1000, 'Host ended');
     destroyAllPeers();
     stopStream(streamRef.current);
+    disposeMicrophonePipeline();
     streamRef.current = null;
     inviteRef.current = null;
     setLocalStream(null);
@@ -527,7 +611,7 @@ function HostApp() {
     setSessionStartedAt(null);
     setError('');
     setStatus('idle');
-  }, [clearConnectionTimer, clearReconnectTimer, destroyAllPeers]);
+  }, [clearConnectionTimer, clearReconnectTimer, destroyAllPeers, disposeMicrophonePipeline]);
   stopSharingRef.current = stopSharing;
 
   const createPeerForViewer = useCallback(async (peerId: string, force = false) => {
@@ -551,6 +635,13 @@ function HostApp() {
       bundlePolicy: 'max-bundle',
       iceCandidatePoolSize: 4
     });
+    if (!viewerLabelsRef.current.has(peerId)) {
+      viewerLabelsRef.current.set(peerId, nextViewerLabelRef.current++);
+    }
+    if (viewerVolumesRef.current[peerId] === undefined) {
+      viewerVolumesRef.current = { ...viewerVolumesRef.current, [peerId]: 100 };
+      setViewerVolumes(viewerVolumesRef.current);
+    }
     const record: PeerRecord = { id: peerId, pc, queued: [], remoteAudio: null };
     peersRef.current.set(peerId, record);
     syncAudience();
@@ -570,7 +661,12 @@ function HostApp() {
     };
     pc.ontrack = event => {
       if (event.track.kind !== 'audio') return;
-      record.remoteAudio?.remove();
+      if (record.remoteAudio) {
+        const previousStream = record.remoteAudio.srcObject instanceof MediaStream ? record.remoteAudio.srcObject : null;
+        previousStream?.getTracks().forEach(track => track.stop());
+        record.remoteAudio.srcObject = null;
+        record.remoteAudio.remove();
+      }
       const audio = document.createElement('audio');
       audio.autoplay = true;
       audio.srcObject = new MediaStream([event.track]);
@@ -578,6 +674,15 @@ function HostApp() {
       audio.style.display = 'none';
       document.body.append(audio);
       record.remoteAudio = audio;
+      applyViewerVolume(peerId);
+      syncAudience();
+      event.track.addEventListener('ended', () => {
+        if (record.remoteAudio !== audio) return;
+        audio.srcObject = null;
+        audio.remove();
+        record.remoteAudio = null;
+        syncAudience();
+      }, { once: true });
       void audio.play().catch(() => undefined);
     };
     pc.onconnectionstatechange = () => {
@@ -595,7 +700,7 @@ function HostApp() {
     await pc.setLocalDescription(offer);
     send(socketRef.current, { type: 'offer', peerId, sdp: offer });
     broadcastMediaState();
-  }, [broadcastMediaState, destroyPeer, syncAudience]);
+  }, [applyViewerVolume, broadcastMediaState, destroyPeer, syncAudience]);
 
   const handleSignal = useCallback(async (message: ServerMessage) => {
     if (message.type === 'room-created') {
@@ -763,11 +868,26 @@ function HostApp() {
             video: false,
             audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
           });
-          const microphoneTrack = microphoneStream.getAudioTracks()[0] ?? null;
+          microphoneSourceStreamRef.current = microphoneStream;
+          const sourceTrack = microphoneStream.getAudioTracks()[0] ?? null;
+          let microphoneTrack = sourceTrack;
+          if (sourceTrack) {
+            const audioContext = new AudioContext();
+            const source = audioContext.createMediaStreamSource(new MediaStream([sourceTrack]));
+            const gain = audioContext.createGain();
+            const destination = audioContext.createMediaStreamDestination();
+            gain.gain.value = inputVolumeRef.current / 100;
+            source.connect(gain).connect(destination);
+            microphoneAudioContextRef.current = audioContext;
+            microphoneGainRef.current = gain;
+            microphoneTrack = destination.stream.getAudioTracks()[0] ?? sourceTrack;
+            void audioContext.resume().catch(() => undefined);
+          }
           microphoneTrackRef.current = microphoneTrack;
           setMicrophoneAvailable(Boolean(microphoneTrack));
           if (microphoneTrack) stream.addTrack(microphoneTrack);
         } catch {
+          disposeMicrophonePipeline();
           microphoneTrackRef.current = null;
           microphoneEnabledRef.current = false;
           setMicrophoneEnabled(false);
@@ -797,7 +917,7 @@ function HostApp() {
         failSession('Não foi possível iniciar o compartilhamento. Tente novamente.');
       }
     }
-  }, [failSession]);
+  }, [disposeMicrophonePipeline, failSession]);
 
   useEffect(() => {
     if (videoRef.current) videoRef.current.srcObject = localStream;
@@ -805,6 +925,8 @@ function HostApp() {
 
   useEffect(() => {
     const resumeViewerAudio = () => {
+      const microphoneContext = microphoneAudioContextRef.current;
+      if (microphoneContext?.state === 'suspended') void microphoneContext.resume().catch(() => undefined);
       for (const peer of peersRef.current.values()) {
         if (peer.remoteAudio) void peer.remoteAudio.play().catch(() => undefined);
       }
@@ -912,7 +1034,8 @@ function HostApp() {
     for (const peer of peersRef.current.values()) closePeer(peer);
     peersRef.current.clear();
     stopStream(streamRef.current);
-  }, [clearConnectionTimer, clearReconnectTimer]);
+    disposeMicrophonePipeline();
+  }, [clearConnectionTimer, clearReconnectTimer, disposeMicrophonePipeline]);
 
   useEffect(() => {
     const modelContext = (document as Document & { modelContext?: ModelContext }).modelContext;
@@ -1008,6 +1131,17 @@ function HostApp() {
     : microphoneAvailable
       ? microphoneEnabled ? 'Sua voz está sendo enviada' : 'Microfone silenciado'
       : 'Permissão não concedida';
+  const viewerMixer = viewerIds.map((peerId, index) => {
+    const peer = peersRef.current.get(peerId);
+    return {
+      id: peerId,
+      label: `Espectador ${viewerLabelsRef.current.get(peerId) ?? index + 1}`,
+      connected: peer?.pc.connectionState === 'connected',
+      hasAudio: Boolean(peer?.remoteAudio),
+      volume: viewerVolumes[peerId] ?? 100
+    };
+  });
+  const viewerAudioCount = viewerMixer.filter(viewer => viewer.hasAudio).length;
 
   return (
     <div className="app">
@@ -1020,30 +1154,16 @@ function HostApp() {
         <section className={`share-stage ${localStream ? 'is-live' : ''} ${videoPaused ? 'is-paused' : ''}`}>
           <video ref={videoRef} autoPlay playsInline muted />
           {!localStream && (
-            <div className="stage-intro">
-              <div className="stage-copy">
-                <span className="eyebrow"><Icon name="screen" /> Transmissão privada</span>
-                <h1>Sua tela em primeiro plano.</h1>
-                <p>Escolha o conteúdo, ajuste a qualidade e compartilhe um único link. O espectador não precisa instalar nada.</p>
-                <button className="primary-action" type="button" onClick={startSharing} disabled={status === 'starting'}>
-                  <Icon name="screen" /> {status === 'starting' ? 'Abrindo seletor…' : 'Escolher tela e transmitir'}
-                </button>
-                <div className="stage-assurances" aria-label="Recursos da transmissão">
-                  <span><i /> Vídeo direto</span>
-                  <span><i /> Link privado</span>
-                  <span><i /> Sem gravação</span>
-                </div>
-                {error && <p className="error-message" role="alert">{error}</p>}
-              </div>
-              <div className="preflight-preview" aria-hidden="true">
-                <div className="preflight-windowbar"><i /><i /><i /><span>PRÉVIA</span></div>
-                <div className="preflight-canvas">
-                  <span className="preflight-orbit"><Icon name="screen" /></span>
-                  <strong>Pronto para transmitir</strong>
-                  <small>Você escolhe exatamente o que será exibido</small>
-                </div>
-                <div className="preflight-footer"><span><i /> P2P</span><span>720p · 30 FPS</span></div>
-              </div>
+            <div className="stage-empty">
+              <Icon name="screen" />
+              <span className="eyebrow">Nenhuma fonte selecionada</span>
+              <h1>Escolha uma tela ou janela</h1>
+              <p>Você confere a prévia aqui antes de enviar o link aos espectadores.</p>
+              <button className="primary-action" type="button" onClick={startSharing} disabled={status === 'starting'}>
+                <Icon name="screen" /> {status === 'starting' ? 'Abrindo seletor…' : 'Escolher tela'}
+              </button>
+              <small className="stage-note"><Icon name="shield" /> Transmissão direta, privada e sem gravação.</small>
+              {error && <p className="error-message" role="alert">{error}</p>}
             </div>
           )}
           {localStream && (
@@ -1068,134 +1188,96 @@ function HostApp() {
         </section>
 
         <aside className="control-panel">
-          <div className="stream-panel-heading">
-            <span className={`panel-kicker ${localStream ? 'is-live' : ''}`}><i /> {localStream ? 'Transmissão ativa' : 'Configuração'}</span>
-            <h2>{localStream ? 'Sua transmissão' : 'Preparar transmissão'}</h2>
-            <p>{localStream ? audienceCopy : 'Configure como sua tela chegará aos espectadores.'}</p>
+          <header className="panel-header">
+            <div><span className={`panel-state ${localStream ? 'is-live' : ''}`}><i /> {localStream ? 'Ao vivo' : 'Configurar'}</span><h2>Controles</h2></div>
+            <span className="audience-count">{connectedViewerCount}/{maxViewers}</span>
+          </header>
+
+          <nav className="panel-tabs" role="tablist" aria-label="Seções dos controles">
+            <button type="button" role="tab" aria-selected={panelSection === 'stream'} aria-controls="stream-panel" className={panelSection === 'stream' ? 'is-active' : ''} onClick={() => setPanelSection('stream')}>Transmissão</button>
+            <button type="button" role="tab" aria-selected={panelSection === 'audio'} aria-controls="audio-panel" className={panelSection === 'audio' ? 'is-active' : ''} onClick={() => setPanelSection('audio')}>Áudio <span>{viewerAudioCount}</span></button>
+          </nav>
+
+          <div className="panel-view">
+            {panelSection === 'stream' && (
+              <div id="stream-panel" role="tabpanel" className="panel-page">
+                <section className="panel-section source-section" aria-labelledby="source-title">
+                  <div className="section-heading"><h3 id="source-title">Fonte</h3><small>{localStream ? 'ATIVA' : 'NÃO SELECIONADA'}</small></div>
+                  <div className="source-row">
+                    <Icon name="screen" />
+                    <span><strong>{localStream ? sourceLabel : 'Tela, janela ou aba'}</strong><small>{localStream ? 'Prévia visível neste computador' : 'Escolhida ao iniciar'}</small></span>
+                  </div>
+                </section>
+
+                <section className="panel-section quality-section" aria-labelledby="quality-title">
+                  <div className="section-heading"><h3 id="quality-title">Qualidade</h3><small>{automaticQuality ? 'AUTOMÁTICA' : 'MANUAL'}</small></div>
+                  <ToggleRow
+                    icon="auto"
+                    label="Ajuste automático"
+                    description={`${resolution}p · até ${fps} FPS`}
+                    checked={automaticQuality}
+                    onClick={toggleAutomaticQuality}
+                  />
+                  <div className="quality-controls">
+                    <SegmentedControl label="Resolução" suffix="resolução" options={RESOLUTIONS} value={resolution} disabled={profileStatus === 'applying' || automaticQuality} onChange={nextResolution => selectManualProfile({ resolution: nextResolution, fps })} />
+                    <SegmentedControl label="Fluidez" suffix="FPS" options={FRAME_RATES} value={fps} disabled={profileStatus === 'applying' || automaticQuality} onChange={nextFps => selectManualProfile({ resolution, fps: nextFps })} />
+                    <SegmentedControl label="Espectadores" suffix="máximo" options={VIEWER_LIMITS} value={maxViewers} disabled={Boolean(localStream)} onChange={setMaxViewers} />
+                  </div>
+                  <p className={`profile-summary ${profileStatus}`} aria-live="polite"><i />{profileStatus === 'applying' ? 'Aplicando…' : profileStatus === 'error' ? 'Modo compatível mantido' : 'Bitrate adaptativo ativo'}</p>
+                </section>
+
+                <section className="panel-section invite-section" aria-labelledby="invite-title">
+                  <div className="section-heading"><h3 id="invite-title">Convite</h3><small>{shareUrl ? audienceCopy : 'APÓS INICIAR'}</small></div>
+                  {shareUrl ? (
+                    <>
+                      <div className="invite-row">
+                        <input id="invite-link" ref={inviteInputRef} aria-label="Link privado para assistir" readOnly value={shareUrl} onFocus={event => event.currentTarget.select()} />
+                        <button type="button" onClick={copyInvite} aria-label="Copiar link privado"><Icon name={copied ? 'check' : 'copy'} /></button>
+                      </div>
+                      <div className="invite-actions">
+                        <button type="button" onClick={() => setQrOpen(true)} disabled={!qrCode}><Icon name="qr" /> QR Code</button>
+                        {typeof navigator.share === 'function' && <button type="button" onClick={shareInvite}><Icon name="share" /> Compartilhar</button>}
+                      </div>
+                      <div className={`connection-row ${connectionQuality}`}><Icon name="signal" /><span><strong>{qualityCopy}</strong><small>{audience === 'connected' ? metricCopy : `P2P + STUN${turnAvailable ? '/TURN' : ''}`}</small></span></div>
+                    </>
+                  ) : (
+                    <p className="empty-row"><Icon name="link" /> O link e o QR Code aparecem aqui.</p>
+                  )}
+                </section>
+              </div>
+            )}
+
+            {panelSection === 'audio' && (
+              <div id="audio-panel" role="tabpanel" className="panel-page audio-page">
+                <section className="panel-section" aria-labelledby="send-audio-title">
+                  <div className="section-heading"><h3 id="send-audio-title">Áudio enviado</h3><small>PARA TODOS</small></div>
+                  <ToggleRow icon={audioEnabled && audioAvailable !== false ? 'volume' : 'volumeOff'} label="Áudio da tela" description={screenAudioCopy} checked={audioEnabled && audioAvailable !== false} disabled={Boolean(localStream && audioAvailable === false)} onClick={toggleScreenAudio} />
+                  <ToggleRow icon={microphoneEnabled && microphoneAvailable !== false ? 'microphone' : 'microphoneOff'} label="Microfone" description={microphoneCopy} checked={microphoneEnabled && microphoneAvailable !== false} disabled={Boolean(localStream && microphoneAvailable !== true)} onClick={toggleMicrophone} />
+                  <VolumeControl id="input-volume" label="Volume de entrada" description="Ganho do seu microfone" value={inputVolume} onChange={changeInputVolume} />
+                </section>
+
+                <section className="panel-section mixer-section" aria-labelledby="mixer-title">
+                  <div className="section-heading"><h3 id="mixer-title">Retorno dos espectadores</h3><small>{viewerAudioCount} COM ÁUDIO</small></div>
+                  <VolumeControl id="output-volume" label="Volume de saída" description="Retorno geral neste computador" value={outputVolume} onChange={changeOutputVolume} />
+                  <div className={`viewer-mixer ${viewerMixer.length > 5 ? 'is-dense' : ''}`}>
+                    {viewerMixer.length ? viewerMixer.map(viewer => (
+                      <VolumeControl
+                        key={viewer.id}
+                        id={`viewer-volume-${viewer.id}`}
+                        label={viewer.label}
+                        description={viewer.hasAudio ? viewer.connected ? 'Microfone conectado' : 'Conectando áudio…' : 'Microfone indisponível'}
+                        value={viewer.volume}
+                        disabled={!viewer.hasAudio}
+                        onChange={value => changeViewerVolume(viewer.id, value)}
+                      />
+                    )) : <p className="empty-row"><Icon name="microphoneOff" /> Nenhum espectador conectado.</p>}
+                  </div>
+                </section>
+              </div>
+            )}
           </div>
 
-          <section className={`source-card ${localStream ? 'is-selected' : ''}`} aria-label="Fonte da transmissão">
-            <span className="source-card-icon"><Icon name="screen" /></span>
-            <span className="source-card-copy">
-              <small>O que será transmitido</small>
-              <strong>{localStream ? sourceLabel : 'Uma tela, janela ou aba'}</strong>
-              <span>{localStream ? 'A prévia está visível somente neste computador.' : 'O navegador abrirá o seletor antes de iniciar.'}</span>
-            </span>
-            <span className="source-card-state">{localStream ? 'ATIVA' : 'DEPOIS'}</span>
-          </section>
-
-          <section className="control-section" aria-labelledby="quality-title">
-            <div className="control-section-heading">
-              <div><span>01</span><h3 id="quality-title">Qualidade da transmissão</h3></div>
-              <small>{automaticQuality ? 'AUTOMÁTICA' : 'MANUAL'}</small>
-            </div>
-            <ToggleTile
-              icon="auto"
-              label="Ajuste automático"
-              description={automaticQuality ? `Usando ${resolution}p a ${fps} FPS` : 'Resolução e FPS definidos por você'}
-              checked={automaticQuality}
-              onClick={toggleAutomaticQuality}
-            />
-            <div className="quality-controls">
-              <SegmentedControl
-                label="Qualidade"
-                suffix="resolução"
-                options={RESOLUTIONS}
-                value={resolution}
-                disabled={profileStatus === 'applying' || automaticQuality}
-                onChange={nextResolution => selectManualProfile({ resolution: nextResolution, fps })}
-              />
-              <SegmentedControl
-                label="Fluidez"
-                suffix="FPS"
-                options={FRAME_RATES}
-                value={fps}
-                disabled={profileStatus === 'applying' || automaticQuality}
-                onChange={nextFps => selectManualProfile({ resolution, fps: nextFps })}
-              />
-              <SegmentedControl
-                label="Espectadores"
-                suffix="máximo"
-                options={VIEWER_LIMITS}
-                value={maxViewers}
-                disabled={Boolean(localStream)}
-                onChange={setMaxViewers}
-              />
-            </div>
-            <p className={`profile-summary ${profileStatus}`} aria-live="polite">
-              <i />
-              {profileStatus === 'applying'
-                ? 'Aplicando ajuste…'
-                : profileStatus === 'error'
-                  ? 'O navegador manteve o modo compatível.'
-                  : automaticQuality
-                    ? `Auto · ${resolution}p · até ${fps} FPS`
-                    : `${resolution}p · até ${fps} FPS · bitrate adaptativo`}
-            </p>
-            <p className="section-hint"><Icon name="signal" /> P2P envia um fluxo por espectador; mais pessoas usam mais upload.</p>
-          </section>
-
-          <section className="control-section" aria-labelledby="audio-title">
-            <div className="control-section-heading">
-              <div><span>02</span><h3 id="audio-title">Áudio</h3></div>
-              <small>OPCIONAL</small>
-            </div>
-            <div className="media-tile-grid">
-              <ToggleTile
-                icon={audioEnabled && audioAvailable !== false ? 'volume' : 'volumeOff'}
-                label="Áudio da tela"
-                description={screenAudioCopy}
-                checked={audioEnabled && audioAvailable !== false}
-                disabled={Boolean(localStream && audioAvailable === false)}
-                onClick={toggleScreenAudio}
-              />
-              <ToggleTile
-                icon={microphoneEnabled && microphoneAvailable !== false ? 'microphone' : 'microphoneOff'}
-                label="Microfone"
-                description={microphoneCopy}
-                checked={microphoneEnabled && microphoneAvailable !== false}
-                disabled={Boolean(localStream && microphoneAvailable !== true)}
-                onClick={toggleMicrophone}
-              />
-            </div>
-          </section>
-
-          {shareUrl && (
-            <section className="control-section invite-section" aria-labelledby="invite-title">
-              <div className="control-section-heading">
-                <div><span>03</span><h3 id="invite-title">Convidar espectadores</h3></div>
-                <small>{connectedViewerCount}/{maxViewers}</small>
-              </div>
-              <div className="invite-card">
-                <label htmlFor="invite-link"><Icon name="link" /> Link privado para assistir</label>
-                <div className="invite-row">
-                  <input id="invite-link" ref={inviteInputRef} readOnly value={shareUrl} onFocus={event => event.currentTarget.select()} />
-                  <button type="button" onClick={copyInvite} aria-label="Copiar link privado"><Icon name={copied ? 'check' : 'copy'} /></button>
-                </div>
-                <div className="invite-actions">
-                  <button type="button" onClick={() => setQrOpen(true)} disabled={!qrCode}><Icon name="qr" /> QR Code</button>
-                  {typeof navigator.share === 'function' && <button type="button" onClick={shareInvite}><Icon name="share" /> Compartilhar</button>}
-                </div>
-                <span className="copy-feedback" aria-live="polite">{copied ? 'Link copiado' : 'Abra este link no celular ou em outro PC'}</span>
-              </div>
-            </section>
-          )}
-
-          {!shareUrl && (
-            <section className="invite-placeholder" aria-label="Convite ainda indisponível">
-              <span><Icon name="link" /></span>
-              <div><strong>O convite vem depois</strong><small>O link e o QR Code aparecem assim que você escolher a tela.</small></div>
-            </section>
-          )}
-
-          {shareUrl && (
-            <div className={`network-note ${connectionQuality}`}>
-              <Icon name="signal" />
-              <span><strong>{qualityCopy}</strong>{audience === 'connected' ? `${metricCopy} · ${connectedViewerCount}/${maxViewers} espectadores` : `P2P direto + STUN${turnAvailable ? '/TURN' : ''} · aguardando espectador`}</span>
-            </div>
-          )}
-
-          <div className="privacy-note"><Icon name="shield" /><span><strong>Conexão privada</strong>O vídeo não é gravado nem armazenado pelo ScreenLink.</span></div>
+          <footer className="panel-footer"><Icon name="shield" /><span>Conexão privada · nada é gravado</span></footer>
         </aside>
       </main>
       {qrOpen && qrCode && (
