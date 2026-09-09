@@ -117,19 +117,22 @@ function SegmentedControl<T extends number>({ label, suffix, options, value, dis
     <fieldset className="profile-fieldset">
       <legend><span>{label}</span><small>{suffix}</small></legend>
       <div className="segmented-control" role="radiogroup" aria-label={label} style={{ '--active-index': activeIndex, '--option-count': options.length } as CSSProperties}>
-        {options.map(option => (
-          <button
-            key={option}
-            type="button"
-            role="radio"
-            aria-checked={option === value}
-            disabled={disabled}
-            className={option === value ? 'is-active' : ''}
-            onClick={() => onChange(option)}
-          >
-            {option}{suffix === 'resolução' ? 'p' : ''}
-          </button>
-        ))}
+        {options.map(option => {
+          const premium = (suffix === 'resolução' && option === 1080) || (suffix === 'FPS' && option === 60);
+          return (
+            <button
+              key={option}
+              type="button"
+              role="radio"
+              aria-checked={option === value}
+              disabled={disabled}
+              className={[option === value ? 'is-active' : '', premium ? 'is-premium' : ''].filter(Boolean).join(' ')}
+              onClick={() => onChange(option)}
+            >
+              {option}{suffix === 'resolução' ? 'p' : ''}
+            </button>
+          );
+        })}
       </div>
     </fieldset>
   );
@@ -223,7 +226,45 @@ function Icon({ name }: { name: IconName }) {
     auto: <><path d="m12 3 1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3Z"/><path d="m18.5 15 .8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2Z"/></>
   };
 
-  return <svg className="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
+  return <svg className={`icon icon-${name}`} viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
+}
+
+function ScreenLinkMascot() {
+  return (
+    <svg className="waiting-mascot" viewBox="0 0 180 160" aria-hidden="true">
+      <ellipse className="mascot-shadow" cx="91" cy="144" rx="40" ry="6" />
+      <g className="mascot-float">
+        <g className="mascot-signal-group">
+          <path className="mascot-signal-arc" d="M78 28c8-7 20-8 29-2" />
+          <circle className="mascot-signal" cx="94" cy="20" r="3.5" />
+          <circle className="mascot-signal-ring" cx="94" cy="20" r="7" />
+        </g>
+        <path className="mascot-ear mascot-ear-left" d="M51 51C39 43 25 45 23 57c8-3 13 2 14 11 5-3 10-8 14-17Z" />
+        <path className="mascot-ear mascot-ear-right" d="M130 48c13-7 25-3 27 8-7-2-12 3-13 12-6-4-10-10-14-20Z" />
+        <path className="mascot-arm mascot-hand-left" d="M48 87c-10 2-16 9-17 18m0 0-7-5m7 5 2-9" />
+        <path className="mascot-arm" d="M135 84c9 2 14 8 15 16m0 0 6-5m-6 5-1-8" />
+        <path className="mascot-body" d="M53 38c20-13 57-13 77 3 17 14 18 53 4 72-15 20-64 23-86 6-18-14-18-61 5-81Z" />
+        <path className="mascot-belly" d="M58 101c19 11 48 11 67-2-5 19-16 27-34 28-17 0-28-8-33-26Z" />
+        <path className="mascot-highlight" d="M59 43c13-8 35-10 49-6" />
+        <g className="mascot-face">
+          <ellipse cx="74" cy="73" rx="4" ry="5" />
+          <ellipse cx="108" cy="72" rx="4" ry="5" />
+          <path d="M82 87c6 5 14 5 20 0" />
+        </g>
+        <circle className="mascot-cheek" cx="62" cy="87" r="3.5" />
+        <circle className="mascot-cheek" cx="120" cy="86" r="3.5" />
+        <g className="mascot-mark">
+          <rect x="82" y="106" width="12" height="9" rx="3" />
+          <rect x="96" y="106" width="12" height="9" rx="3" />
+          <path d="M92 110h6" />
+        </g>
+        <path className="mascot-leg" d="m72 123-2 10m41-11 2 10" />
+        <path className="mascot-foot" d="M61 136c4-4 9-5 14-3m49 3c-4-4-9-5-14-3" />
+        <g className="mascot-spark mascot-spark-one"><path d="m147 29 1-9m-5 5 10-1" /></g>
+        <g className="mascot-spark mascot-spark-two"><path d="m31 40-3-6m0 8-7-2" /></g>
+      </g>
+    </svg>
+  );
 }
 
 function Header({ status, live = false, meta }: { status: string; live?: boolean; meta?: string }) {
@@ -232,7 +273,7 @@ function Header({ status, live = false, meta }: { status: string; live?: boolean
       <div className="brand"><span className="brand-mark"><span /></span><strong>ScreenLink</strong></div>
       <div className="topbar-session">
         {meta && <span className="topbar-meta">{meta}</span>}
-        <div className={`status-pill ${live ? 'live' : ''}`}><i />{status}</div>
+        {!live && <div className="status-pill"><i />{status}</div>}
       </div>
     </header>
   );
@@ -1102,7 +1143,7 @@ function HostApp() {
     : status === 'reconnecting'
       ? 'Reconectando'
       : status === 'live'
-        ? videoPaused ? 'Pausado' : 'Compartilhando'
+        ? videoPaused ? 'Pausado' : 'Sessão ativa'
         : status === 'error' ? 'Atenção' : 'Pronto';
   const audienceCopy = connectedViewerCount > 0
     ? `${connectedViewerCount} espectador${connectedViewerCount === 1 ? '' : 'es'} conectado${connectedViewerCount === 1 ? '' : 's'} · limite ${maxViewers}`
@@ -1155,7 +1196,7 @@ function HostApp() {
           <video ref={videoRef} autoPlay playsInline muted />
           {!localStream && (
             <div className="stage-empty">
-              <Icon name="screen" />
+              <ScreenLinkMascot />
               <span className="eyebrow">Nenhuma fonte selecionada</span>
               <h1>Escolha uma tela ou janela</h1>
               <p>Você confere a prévia aqui antes de enviar o link aos espectadores.</p>
@@ -1168,8 +1209,8 @@ function HostApp() {
           )}
           {localStream && (
             <>
-              <div className={`live-badge ${videoPaused ? 'paused' : ''}`}><span /> {videoPaused ? 'Transmissão pausada' : `${resolution}p · até ${fps} FPS`} · {sessionDuration}</div>
-              <div className="source-live-chip"><Icon name="screen" /><span><small>Compartilhando</small><strong>{sourceLabel}</strong></span></div>
+              <div className={`live-badge ${videoPaused ? 'paused' : ''}`}>{videoPaused ? 'Transmissão pausada' : `${resolution}p · até ${fps} FPS`} · {sessionDuration}</div>
+              <div className="source-live-chip"><Icon name="screen" /><span><strong>{sourceLabel}</strong></span></div>
               <div className="host-call-dock" aria-label="Controles da transmissão">
                 <button type="button" onClick={toggleVideoPaused} aria-label={videoPaused ? 'Retomar transmissão' : 'Pausar transmissão'} aria-pressed={videoPaused} data-label={videoPaused ? 'Retomar' : 'Pausar'}>
                   <Icon name={videoPaused ? 'play' : 'pause'} />
@@ -1189,7 +1230,7 @@ function HostApp() {
 
         <aside className="control-panel">
           <header className="panel-header">
-            <div><span className={`panel-state ${localStream ? 'is-live' : ''}`}><i /> {localStream ? 'Ao vivo' : 'Configurar'}</span><h2>Controles</h2></div>
+            <div><h2>Controles</h2></div>
             <span className="audience-count">{connectedViewerCount}/{maxViewers}</span>
           </header>
 
@@ -1756,7 +1797,7 @@ function ViewerApp({ invite }: { invite: Invite }) {
     };
   }, [keepAwake, status]);
 
-  const label = status === 'live' ? 'Ao vivo' : status === 'ended' ? 'Encerrado' : status === 'error' ? 'Atenção' : 'Conectando';
+  const label = status === 'live' ? 'Sessão ativa' : status === 'ended' ? 'Encerrado' : status === 'error' ? 'Atenção' : 'Conectando';
   const title = status === 'ended' ? 'Transmissão encerrada' : status === 'error' ? 'Não foi possível assistir' : 'Preparando a transmissão';
 
   async function openFullscreen() {
@@ -1910,11 +1951,15 @@ function ViewerApp({ invite }: { invite: Invite }) {
           />
           {status !== 'live' && (
             <div className="viewer-empty">
-              <div className={`connection-visual ${status}`} aria-hidden="true">
-                <Icon name="screen" />
-                <span className="connection-line"><i /></span>
-                <Icon name={status === 'error' || status === 'ended' ? 'link' : 'phone'} />
-              </div>
+              {status === 'connecting' || status === 'waiting' ? (
+                <ScreenLinkMascot />
+              ) : (
+                <div className={`connection-visual ${status}`} aria-hidden="true">
+                  <Icon name="screen" />
+                  <span className="connection-line"><i /></span>
+                  <Icon name="link" />
+                </div>
+              )}
               <h1>{title}</h1>
               <p>{message}</p>
               {status === 'error' && <button className="retry-action" type="button" onClick={() => window.location.reload()}>Tentar novamente</button>}
@@ -1930,7 +1975,6 @@ function ViewerApp({ invite }: { invite: Invite }) {
           )}
           {status === 'live' && (
             <div className={`viewer-live-info ${viewerQuality}`}>
-              <i />
               <span><strong>{viewerQualityLabel} · {viewerDuration}</strong><small>{liveDescription}{viewerMetrics.rttMs ? ` · ${viewerMetrics.rttMs} ms` : ''}</small></span>
             </div>
           )}
