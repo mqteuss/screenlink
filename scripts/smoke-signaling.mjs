@@ -15,7 +15,10 @@ const child = spawn(process.execPath, ['server.mjs'], {
     PORT: String(PORT),
     HOST: '127.0.0.1',
     PUBLIC_ORIGIN: 'https://screenlink.example.test/path-is-ignored',
-    STUN_URLS: 'stun:stun.cloudflare.com:3478'
+    STUN_URLS: 'stun:stun.cloudflare.com:3478',
+    TURN_URLS: 'turn:turn.example.test:3478?transport=udp',
+    TURN_USERNAME: 'screenlink-test',
+    TURN_CREDENTIAL: 'screenlink-secret'
   },
   stdio: ['ignore', 'pipe', 'pipe']
 });
@@ -100,18 +103,21 @@ try {
   assert.equal(runtimeConfig.viewerOrigin, 'https://screenlink.example.test');
   assert.equal(runtimeConfig.mode, 'p2p-stun');
 
-  const host = await connect();
+  let host = await connect();
   const viewer = await connect();
+  const viewerTwo = await connect();
+  const viewerThree = await connect();
   const extraViewer = await connect();
-  sockets.push(host, viewer, extraViewer);
+  sockets.push(host, viewer, viewerTwo, viewerThree, extraViewer);
 
   const roomCreated = nextMessage(host, 'room-created');
-  send(host, { type: 'create-room', roomId, token });
+  send(host, { type: 'create-room', roomId, token, maxViewers: 3 });
   const created = await roomCreated;
   assert.equal(created.roomId, roomId);
-  assert.ok(created.iceServers.every(server => {
+  assert.equal(created.maxViewers, 3);
+  assert.ok(created.iceServers.some(server => {
     const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
-    return urls.every(url => String(url).startsWith('stun:'));
+    return urls.some(url => String(url).startsWith('turn:'));
   }));
 
   const viewerJoined = nextMessage(viewer, 'joined');
@@ -120,6 +126,18 @@ try {
   const joined = await viewerJoined;
   const hostJoin = await hostSawViewer;
   assert.equal(hostJoin.peerId, joined.peerId);
+
+  const viewerTwoJoined = nextMessage(viewerTwo, 'joined');
+  const hostSawViewerTwo = nextMessage(host, 'viewer-joined');
+  send(viewerTwo, { type: 'join-room', roomId, token });
+  const joinedTwo = await viewerTwoJoined;
+  assert.equal((await hostSawViewerTwo).peerId, joinedTwo.peerId);
+
+  const viewerThreeJoined = nextMessage(viewerThree, 'joined');
+  const hostSawViewerThree = nextMessage(host, 'viewer-joined');
+  send(viewerThree, { type: 'join-room', roomId, token });
+  const joinedThree = await viewerThreeJoined;
+  assert.equal((await hostSawViewerThree).peerId, joinedThree.peerId);
 
   const roomFull = nextMessage(extraViewer, 'error');
   send(extraViewer, { type: 'join-room', roomId, token });
@@ -137,25 +155,54 @@ try {
   send(host, { type: 'ice-candidate', peerId: joined.peerId, candidate: { candidate: 'candidate:test' } });
   assert.equal((await candidateReceived).candidate.candidate, 'candidate:test');
 
+  const viewerMicrophoneOffer = nextMessage(host, 'offer');
+  send(viewer, { type: 'offer', peerId: joined.peerId, sdp: { type: 'offer', sdp: 'v=0\r\na=sendonly\r\n' } });
+  assert.equal((await viewerMicrophoneOffer).peerId, joined.peerId);
+
+  const viewerMicrophoneAnswer = nextMessage(viewer, 'answer');
+  send(host, { type: 'answer', peerId: joined.peerId, sdp: { type: 'answer', sdp: 'v=0\r\na=recvonly\r\n' } });
+  assert.equal((await viewerMicrophoneAnswer).peerId, joined.peerId);
+
+  host.terminate();
+  await delay(50);
+  host = await connect();
+  sockets.push(host);
+  const resumedRoom = nextMessage(host, 'room-created');
+  send(host, { type: 'create-room', roomId, token, maxViewers: 3 });
+  const resumed = await resumedRoom;
+  assert.equal(resumed.maxViewers, 3);
+  assert.deepEqual(new Set(resumed.viewerIds), new Set([joined.peerId, joinedTwo.peerId, joinedThree.peerId]));
+
+  const reconnectId = joinedTwo.peerId;
+  viewerTwo.terminate();
+  await delay(50);
+  const viewerTwoReconnect = await connect();
+  sockets.push(viewerTwoReconnect);
+  const viewerTwoRejoined = nextMessage(viewerTwoReconnect, 'joined');
+  send(viewerTwoReconnect, { type: 'join-room', roomId, token, peerId: reconnectId });
+  assert.equal((await viewerTwoRejoined).peerId, reconnectId);
+
   const viewerLeft = nextMessage(host, 'viewer-left');
   send(viewer, { type: 'leave-room' });
   assert.equal((await viewerLeft).peerId, joined.peerId);
 
-  const replacementJoined = nextMessage(extraViewer, 'joined');
-  const hostSawReplacement = nextMessage(host, 'viewer-joined');
+  const extraJoined = nextMessage(extraViewer, 'joined');
+  const hostSawExtra = nextMessage(host, 'viewer-joined');
   send(extraViewer, { type: 'join-room', roomId, token });
-  const replacement = await replacementJoined;
-  assert.equal((await hostSawReplacement).peerId, replacement.peerId);
+  const extra = await extraJoined;
+  assert.equal((await hostSawExtra).peerId, extra.peerId);
 
-  const hostEnded = nextMessage(extraViewer, 'host-ended');
+  const hostEndedTwo = nextMessage(viewerTwoReconnect, 'host-ended');
+  const hostEndedThree = nextMessage(viewerThree, 'host-ended');
+  const hostEndedExtra = nextMessage(extraViewer, 'host-ended');
   send(host, { type: 'leave-room' });
-  await hostEnded;
+  await Promise.all([hostEndedTwo, hostEndedThree, hostEndedExtra]);
 
   await delay(50);
   const finalHealth = await (await fetch(`${HTTP_URL}/health`)).json();
   assert.equal(finalHealth.rooms, 0);
 
-  console.log('PASS: site, private room, one-viewer limit, P2P/STUN signaling, and shutdown flow.');
+  console.log('PASS: configurable viewers, bidirectional offers, host/viewer signaling resume, STUN/TURN fallback, and shutdown flow.');
 } finally {
   for (const socket of sockets) {
     if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) socket.close();

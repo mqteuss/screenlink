@@ -10,9 +10,9 @@ export type SessionDescription = {
 };
 
 export type ServerMessage =
-  | { type: 'room-created'; roomId: string; iceServers: IceServerConfig[] }
-  | { type: 'joined'; roomId: string; peerId: string; iceServers: IceServerConfig[] }
-  | { type: 'viewer-joined'; peerId: string }
+  | { type: 'room-created'; roomId: string; iceServers: IceServerConfig[]; maxViewers: number; viewerIds: string[] }
+  | { type: 'joined'; roomId: string; peerId: string; iceServers: IceServerConfig[]; resumed?: boolean }
+  | { type: 'viewer-joined'; peerId: string; resumed?: boolean }
   | { type: 'viewer-left'; peerId: string }
   | { type: 'offer'; peerId: string; sdp: SessionDescription }
   | { type: 'answer'; peerId: string; sdp: SessionDescription }

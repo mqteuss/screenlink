@@ -98,8 +98,8 @@ h1, h2, p { margin-top: 0; }
 .profile-fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .profile-fieldset legend { width: 100%; margin-bottom: .55rem; display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; color: #dedede; font-size: .78rem; font-weight: 650; }
 .profile-fieldset legend small { color: var(--faint); font-size: .7rem; font-weight: 550; text-transform: uppercase; letter-spacing: .055em; }
-.segmented-control { position: relative; isolation: isolate; height: 2.75rem; padding: .2rem; border-radius: .62rem; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); background: #151515; }
-.segmented-control::before { content: ""; position: absolute; z-index: -1; top: .2rem; bottom: .2rem; left: .2rem; width: calc((100% - .4rem) / 4); border-radius: .46rem; background: #f0f0f0; transform: translateX(calc(var(--active-index) * 100%)); transition: transform 300ms var(--ease-out), background var(--fast) var(--ease-out); }
+.segmented-control { position: relative; isolation: isolate; height: 2.75rem; padding: .2rem; border-radius: .62rem; display: grid; grid-template-columns: repeat(var(--option-count, 4), minmax(0, 1fr)); background: #151515; }
+.segmented-control::before { content: ""; position: absolute; z-index: -1; top: .2rem; bottom: .2rem; left: .2rem; width: calc((100% - .4rem) / var(--option-count, 4)); border-radius: .46rem; background: #f0f0f0; transform: translateX(calc(var(--active-index) * 100%)); transition: transform 300ms var(--ease-out), background var(--fast) var(--ease-out); }
 .segmented-control button { min-width: 0; border: 0; border-radius: .46rem; padding: 0 .15rem; color: #858585; background: transparent; font-size: .78rem; font-variant-numeric: tabular-nums; font-weight: 700; transition: color 220ms var(--ease-out), transform var(--fast) var(--ease-out); }
 .segmented-control button:hover { color: #d5d5d5; }
 .segmented-control button.is-active { color: #0a0a0a; }
@@ -286,6 +286,10 @@ h1, h2, p { margin-top: 0; }
   .viewer-bar { bottom: max(.75rem, env(safe-area-inset-bottom)); min-height: 3.85rem; padding: .45rem; border-radius: 1rem; }
   .viewer-actions { gap: .3rem; }
   .sound-prompt { bottom: 5.6rem; }
+}
+
+@media (max-width: 360px) {
+  .host-call-dock button, .viewer-actions button { width: 2.55rem; height: 2.55rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {

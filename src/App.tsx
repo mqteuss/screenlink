@@ -14,8 +14,8 @@ type IconName = 'screen' | 'link' | 'shield' | 'stop' | 'copy' | 'phone' | 'expa
 type HostStatus = 'idle' | 'starting' | 'live' | 'reconnecting' | 'error';
 type AudienceStatus = 'empty' | 'connecting' | 'connected';
 type ViewerStatus = 'connecting' | 'waiting' | 'live' | 'ended' | 'error';
-type PeerRecord = { id: string; pc: RTCPeerConnection; queued: RTCIceCandidateInit[] };
-type RuntimeConfig = { viewerOrigin?: string; mode?: 'p2p-stun' };
+type PeerRecord = { id: string; pc: RTCPeerConnection; queued: RTCIceCandidateInit[]; remoteAudio: HTMLAudioElement | null };
+type RuntimeConfig = { viewerOrigin?: string; mode?: 'p2p-stun'; turnEnabled?: boolean };
 type Resolution = 360 | 480 | 720 | 1080;
 type FrameRate = 15 | 30 | 45 | 60;
 type VideoProfile = { resolution: Resolution; fps: FrameRate };
@@ -38,11 +38,12 @@ type PictureInPictureDocument = Document & { pictureInPictureEnabled?: boolean; 
 
 const RESOLUTIONS: readonly Resolution[] = [360, 480, 720, 1080];
 const FRAME_RATES: readonly FrameRate[] = [15, 30, 45, 60];
+const VIEWER_LIMITS = [1, 2, 3, 4, 5, 6, 7, 8] as const;
 const VIDEO_SIZES: Record<Resolution, { width: number; height: number; bitrate: number }> = {
-  360: { width: 640, height: 360, bitrate: 1_000_000 },
-  480: { width: 854, height: 480, bitrate: 1_600_000 },
-  720: { width: 1280, height: 720, bitrate: 3_500_000 },
-  1080: { width: 1920, height: 1080, bitrate: 6_000_000 }
+  360: { width: 640, height: 360, bitrate: 1_500_000 },
+  480: { width: 854, height: 480, bitrate: 2_500_000 },
+  720: { width: 1280, height: 720, bitrate: 5_500_000 },
+  1080: { width: 1920, height: 1080, bitrate: 9_000_000 }
 };
 
 function videoSettings(profile: VideoProfile) {
@@ -83,11 +84,13 @@ function classifyConnection(metrics: ConnectionMetrics): ConnectionQuality {
 
 function automaticProfile(metrics: ConnectionMetrics): VideoProfile {
   const capacity = metrics.availableKbps;
-  if (metrics.packetLoss >= 8 || metrics.rttMs >= 450 || (capacity > 0 && capacity < 900)) return { resolution: 360, fps: 15 };
-  if (metrics.packetLoss >= 4 || metrics.rttMs >= 280 || (capacity > 0 && capacity < 1_800)) return { resolution: 480, fps: 30 };
-  if (metrics.packetLoss >= 2 || metrics.rttMs >= 170 || (capacity > 0 && capacity < 3_500)) return { resolution: 720, fps: 30 };
+  if (metrics.packetLoss >= 8 || metrics.rttMs >= 450 || (capacity > 0 && capacity < 1_200)) return { resolution: 360, fps: 15 };
+  if (metrics.packetLoss >= 4 || metrics.rttMs >= 280 || (capacity > 0 && capacity < 2_500)) return { resolution: 480, fps: 30 };
+  if (metrics.packetLoss >= 2 || metrics.rttMs >= 170 || (capacity > 0 && capacity < 4_500)) return { resolution: 720, fps: 30 };
   if (!capacity) return { resolution: 720, fps: 30 };
-  return { resolution: 1080, fps: 45 };
+  if (metrics.rttMs >= 120 || capacity < 7_500) return { resolution: 720, fps: 45 };
+  if (capacity < 12_000) return { resolution: 1080, fps: 45 };
+  return { resolution: 1080, fps: 60 };
 }
 
 async function configureVideoSender(sender: RTCRtpSender, profile: VideoProfile) {
@@ -96,7 +99,7 @@ async function configureVideoSender(sender: RTCRtpSender, profile: VideoProfile)
   if (!parameters.encodings?.length) parameters.encodings = [{}];
   parameters.encodings[0]!.maxBitrate = settings.bitrate;
   parameters.encodings[0]!.maxFramerate = settings.fps;
-  parameters.degradationPreference = 'balanced';
+  parameters.degradationPreference = 'maintain-framerate';
   await sender.setParameters(parameters);
 }
 
@@ -112,7 +115,7 @@ function SegmentedControl<T extends number>({ label, suffix, options, value, dis
   return (
     <fieldset className="profile-fieldset">
       <legend><span>{label}</span><small>{suffix}</small></legend>
-      <div className="segmented-control" role="radiogroup" aria-label={label} style={{ '--active-index': activeIndex } as CSSProperties}>
+      <div className="segmented-control" role="radiogroup" aria-label={label} style={{ '--active-index': activeIndex, '--option-count': options.length } as CSSProperties}>
         {options.map(option => (
           <button
             key={option}
@@ -187,7 +190,15 @@ function closePeer(record: PeerRecord | null) {
   if (!record) return;
   record.pc.onicecandidate = null;
   record.pc.onconnectionstatechange = null;
+  record.pc.ontrack = null;
   record.pc.close();
+  if (record.remoteAudio) {
+    const stream = record.remoteAudio.srcObject instanceof MediaStream ? record.remoteAudio.srcObject : null;
+    stream?.getTracks().forEach(track => track.stop());
+    record.remoteAudio.srcObject = null;
+    record.remoteAudio.remove();
+    record.remoteAudio = null;
+  }
 }
 
 function stopStream(stream: MediaStream | null) {
@@ -199,7 +210,7 @@ function HostApp() {
   const inviteInputRef = useRef<HTMLInputElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
-  const peerRef = useRef<PeerRecord | null>(null);
+  const peersRef = useRef(new Map<string, PeerRecord>());
   const inviteRef = useRef<Invite | null>(null);
   const viewerOriginRef = useRef(window.location.origin);
   const iceServersRef = useRef<IceServerConfig[]>([]);
@@ -216,6 +227,7 @@ function HostApp() {
   const microphoneEnabledRef = useRef(false);
   const automaticQualityRef = useRef(true);
   const manualProfileRef = useRef<VideoProfile>({ resolution: 720, fps: 30 });
+  const maxViewersRef = useRef<(typeof VIEWER_LIMITS)[number]>(1);
   const previousStatsRef = useRef<{ bytes: number; at: number } | null>(null);
   const handleSignalRef = useRef<(message: ServerMessage) => Promise<void>>(async () => undefined);
   const connectHostSignalRef = useRef<() => void>(() => undefined);
@@ -233,6 +245,10 @@ function HostApp() {
   const [automaticQuality, setAutomaticQuality] = useState(true);
   const [connectionQuality, setConnectionQuality] = useState<ConnectionQuality>('waiting');
   const [connectionMetrics, setConnectionMetrics] = useState<ConnectionMetrics>({ bitrateKbps: 0, availableKbps: 0, rttMs: 0, packetLoss: 0 });
+  const [maxViewers, setMaxViewers] = useState<(typeof VIEWER_LIMITS)[number]>(1);
+  const [viewerCount, setViewerCount] = useState(0);
+  const [connectedViewerCount, setConnectedViewerCount] = useState(0);
+  const [turnAvailable, setTurnAvailable] = useState(false);
   const [videoPaused, setVideoPaused] = useState(false);
   const [audioEnabled, setAudioEnabled] = useState(true);
   const [audioAvailable, setAudioAvailable] = useState<boolean | null>(null);
@@ -248,6 +264,7 @@ function HostApp() {
       .then(response => response.ok ? response.json() as Promise<RuntimeConfig> : Promise.reject(new Error('Runtime configuration unavailable')))
       .then(configuration => {
         if (configuration.viewerOrigin) viewerOriginRef.current = configuration.viewerOrigin;
+        setTurnAvailable(Boolean(configuration.turnEnabled));
       })
       .catch(() => undefined);
     return () => controller.abort();
@@ -257,6 +274,7 @@ function HostApp() {
   useEffect(() => { microphoneEnabledRef.current = microphoneEnabled; }, [microphoneEnabled]);
   useEffect(() => { videoPausedRef.current = videoPaused; }, [videoPaused]);
   useEffect(() => { automaticQualityRef.current = automaticQuality; }, [automaticQuality]);
+  useEffect(() => { maxViewersRef.current = maxViewers; }, [maxViewers]);
 
   useEffect(() => {
     let active = true;
@@ -283,11 +301,27 @@ function HostApp() {
     return () => window.removeEventListener('keydown', closeOnEscape);
   }, [qrOpen]);
 
-  const destroyPeer = useCallback(() => {
-    closePeer(peerRef.current);
-    peerRef.current = null;
-    setAudience('empty');
+  const syncAudience = useCallback(() => {
+    const peers = [...peersRef.current.values()];
+    const connected = peers.filter(peer => peer.pc.connectionState === 'connected').length;
+    setViewerCount(peers.length);
+    setConnectedViewerCount(connected);
+    setAudience(connected > 0 ? 'connected' : peers.length > 0 ? 'connecting' : 'empty');
   }, []);
+
+  const destroyPeer = useCallback((peerId: string) => {
+    const peer = peersRef.current.get(peerId);
+    if (!peer) return;
+    peersRef.current.delete(peerId);
+    closePeer(peer);
+    syncAudience();
+  }, [syncAudience]);
+
+  const destroyAllPeers = useCallback(() => {
+    for (const peer of peersRef.current.values()) closePeer(peer);
+    peersRef.current.clear();
+    syncAudience();
+  }, [syncAudience]);
 
   const clearConnectionTimer = useCallback(() => {
     if (connectionTimerRef.current !== null) {
@@ -308,15 +342,15 @@ function HostApp() {
     screenAudioEnabled: boolean;
     microphoneEnabled: boolean;
   }> = {}) => {
-    const peerId = peerRef.current?.id;
-    if (!peerId) return;
-    send(socketRef.current, {
-      type: 'media-state',
-      peerId,
-      videoPaused: overrides.videoPaused ?? videoPausedRef.current,
-      screenAudioEnabled: overrides.screenAudioEnabled ?? audioEnabledRef.current,
-      microphoneEnabled: overrides.microphoneEnabled ?? microphoneEnabledRef.current
-    });
+    for (const peerId of peersRef.current.keys()) {
+      send(socketRef.current, {
+        type: 'media-state',
+        peerId,
+        videoPaused: overrides.videoPaused ?? videoPausedRef.current,
+        screenAudioEnabled: overrides.screenAudioEnabled ?? audioEnabledRef.current,
+        microphoneEnabled: overrides.microphoneEnabled ?? microphoneEnabledRef.current
+      });
+    }
   }, []);
 
   const applyVideoProfile = useCallback(async (profile: VideoProfile) => {
@@ -341,8 +375,10 @@ function HostApp() {
         height: { ideal: settings.height, max: settings.height },
         frameRate: { ideal: settings.fps, max: settings.fps }
       });
-      const sender = peerRef.current?.pc.getSenders().find(candidate => candidate.track?.kind === 'video');
-      if (sender) await configureVideoSender(sender, profile);
+      await Promise.all([...peersRef.current.values()].map(async peer => {
+        const sender = peer.pc.getSenders().find(candidate => candidate.track?.kind === 'video');
+        if (sender) await configureVideoSender(sender, profile);
+      }));
       if (profileRequestRef.current === requestId) setProfileStatus('applied');
     } catch {
       if (profileRequestRef.current === requestId) setProfileStatus('error');
@@ -411,7 +447,7 @@ function HostApp() {
     stoppingRef.current = true;
     clearConnectionTimer();
     clearReconnectTimer();
-    destroyPeer();
+    destroyAllPeers();
     const socket = socketRef.current;
     socketRef.current = null;
     socket?.close(1000, 'Session failed');
@@ -431,7 +467,7 @@ function HostApp() {
     setSessionStartedAt(null);
     setError(message);
     setStatus('error');
-  }, [clearConnectionTimer, clearReconnectTimer, destroyPeer]);
+  }, [clearConnectionTimer, clearReconnectTimer, destroyAllPeers]);
 
   const stopSharing = useCallback(() => {
     stoppingRef.current = true;
@@ -441,7 +477,7 @@ function HostApp() {
     const socket = socketRef.current;
     socketRef.current = null;
     socket?.close(1000, 'Host ended');
-    destroyPeer();
+    destroyAllPeers();
     stopStream(streamRef.current);
     streamRef.current = null;
     inviteRef.current = null;
@@ -460,22 +496,33 @@ function HostApp() {
     setSessionStartedAt(null);
     setError('');
     setStatus('idle');
-  }, [clearConnectionTimer, clearReconnectTimer, destroyPeer]);
+  }, [clearConnectionTimer, clearReconnectTimer, destroyAllPeers]);
   stopSharingRef.current = stopSharing;
 
-  const createPeerForViewer = useCallback(async (peerId: string) => {
+  const createPeerForViewer = useCallback(async (peerId: string, force = false) => {
     const stream = streamRef.current;
     if (!stream) return;
 
-    destroyPeer();
-    setAudience('connecting');
+    const existing = peersRef.current.get(peerId);
+    if (existing && !force && existing.pc.connectionState !== 'failed' && existing.pc.connectionState !== 'closed') {
+      const pendingOffer = existing.pc.localDescription;
+      if (existing.pc.signalingState === 'have-local-offer' && pendingOffer?.type === 'offer') {
+        send(socketRef.current, { type: 'offer', peerId, sdp: pendingOffer });
+        broadcastMediaState();
+      }
+      syncAudience();
+      return;
+    }
+    if (existing) destroyPeer(peerId);
+
     const pc = new RTCPeerConnection({
       iceServers: iceServersRef.current as RTCIceServer[],
       bundlePolicy: 'max-bundle',
-      iceCandidatePoolSize: 2
+      iceCandidatePoolSize: 4
     });
-    const record: PeerRecord = { id: peerId, pc, queued: [] };
-    peerRef.current = record;
+    const record: PeerRecord = { id: peerId, pc, queued: [], remoteAudio: null };
+    peersRef.current.set(peerId, record);
+    syncAudience();
 
     for (const track of stream.getTracks()) {
       const sender = pc.addTrack(track, stream);
@@ -490,24 +537,34 @@ function HostApp() {
         send(socketRef.current, { type: 'ice-candidate', peerId, candidate: event.candidate.toJSON() });
       }
     };
+    pc.ontrack = event => {
+      if (event.track.kind !== 'audio') return;
+      record.remoteAudio?.remove();
+      const audio = document.createElement('audio');
+      audio.autoplay = true;
+      audio.srcObject = new MediaStream([event.track]);
+      audio.dataset.screenlinkViewer = peerId;
+      audio.style.display = 'none';
+      document.body.append(audio);
+      record.remoteAudio = audio;
+      void audio.play().catch(() => undefined);
+    };
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === 'connected') {
-        setAudience('connected');
         setConnectionQuality('good');
       }
-      if (pc.connectionState === 'connecting') setAudience('connecting');
-      if (pc.connectionState === 'disconnected') setAudience('connecting');
+      syncAudience();
       if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
         if (pc.connectionState === 'failed') setConnectionQuality('blocked');
-        if (peerRef.current?.pc === pc) destroyPeer();
+        if (peersRef.current.get(peerId)?.pc === pc) destroyPeer(peerId);
       }
     };
 
-    const offer = await pc.createOffer();
+    const offer = await pc.createOffer({ iceRestart: force });
     await pc.setLocalDescription(offer);
     send(socketRef.current, { type: 'offer', peerId, sdp: offer });
     broadcastMediaState();
-  }, [broadcastMediaState, destroyPeer]);
+  }, [broadcastMediaState, destroyPeer, syncAudience]);
 
   const handleSignal = useCallback(async (message: ServerMessage) => {
     if (message.type === 'room-created') {
@@ -515,22 +572,59 @@ function HostApp() {
       clearReconnectTimer();
       reconnectAttemptRef.current = 0;
       iceServersRef.current = message.iceServers;
+      setTurnAvailable(message.iceServers.some(server => {
+        const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+        return urls.some(url => /^turns?:/i.test(url));
+      }));
+      if (VIEWER_LIMITS.includes(message.maxViewers as (typeof VIEWER_LIMITS)[number])) {
+        const acceptedLimit = message.maxViewers as (typeof VIEWER_LIMITS)[number];
+        maxViewersRef.current = acceptedLimit;
+        setMaxViewers(acceptedLimit);
+      }
+      const serverViewers = new Set(message.viewerIds);
+      for (const peerId of [...peersRef.current.keys()]) {
+        if (!serverViewers.has(peerId)) destroyPeer(peerId);
+      }
+      for (const peerId of message.viewerIds) {
+        const peer = peersRef.current.get(peerId);
+        if (!peer || peer.pc.connectionState === 'failed' || peer.pc.connectionState === 'closed' || peer.pc.connectionState === 'disconnected') {
+          await createPeerForViewer(peerId, Boolean(peer));
+        }
+      }
       setStatus('live');
       setError('');
       setSessionStartedAt(current => current ?? Date.now());
+      syncAudience();
       return;
     }
     if (message.type === 'viewer-joined') {
-      await createPeerForViewer(message.peerId);
+      const peer = peersRef.current.get(message.peerId);
+      const shouldRebuild = Boolean(peer && (peer.pc.connectionState === 'failed' || peer.pc.connectionState === 'closed' || peer.pc.connectionState === 'disconnected'));
+      await createPeerForViewer(message.peerId, shouldRebuild);
       return;
     }
     if (message.type === 'viewer-left') {
-      if (peerRef.current?.id === message.peerId) destroyPeer();
+      destroyPeer(message.peerId);
+      return;
+    }
+    if (message.type === 'offer') {
+      const peer = peersRef.current.get(message.peerId);
+      if (!peer) return;
+      if (peer.pc.signalingState === 'have-local-offer') {
+        await peer.pc.setLocalDescription({ type: 'rollback' });
+      }
+      await peer.pc.setRemoteDescription(message.sdp);
+      for (const candidate of peer.queued.splice(0)) {
+        await peer.pc.addIceCandidate(candidate).catch(() => undefined);
+      }
+      const answer = await peer.pc.createAnswer();
+      await peer.pc.setLocalDescription(answer);
+      send(socketRef.current, { type: 'answer', peerId: message.peerId, sdp: answer });
       return;
     }
     if (message.type === 'answer') {
-      const peer = peerRef.current;
-      if (!peer || peer.id !== message.peerId) return;
+      const peer = peersRef.current.get(message.peerId);
+      if (!peer || peer.pc.signalingState !== 'have-local-offer') return;
       await peer.pc.setRemoteDescription(message.sdp);
       for (const candidate of peer.queued.splice(0)) {
         await peer.pc.addIceCandidate(candidate).catch(() => undefined);
@@ -538,14 +632,20 @@ function HostApp() {
       return;
     }
     if (message.type === 'ice-candidate') {
-      const peer = peerRef.current;
-      if (!peer || peer.id !== message.peerId) return;
+      const peer = peersRef.current.get(message.peerId);
+      if (!peer) return;
       if (peer.pc.remoteDescription) await peer.pc.addIceCandidate(message.candidate).catch(() => undefined);
       else peer.queued.push(message.candidate);
       return;
     }
-    if (message.type === 'error') failSession(message.message);
-  }, [clearConnectionTimer, clearReconnectTimer, createPeerForViewer, destroyPeer, failSession]);
+    if (message.type === 'error') {
+      if (message.code === 'PEER_OFFLINE') {
+        setError('Um espectador está temporariamente em segundo plano. A transmissão continuará e tentará recuperar a sinalização.');
+        return;
+      }
+      failSession(message.message);
+    }
+  }, [clearConnectionTimer, clearReconnectTimer, createPeerForViewer, destroyPeer, failSession, syncAudience]);
   handleSignalRef.current = handleSignal;
 
   const connectHostSignal = useCallback(() => {
@@ -570,13 +670,12 @@ function HostApp() {
       }
     }, 12_000);
 
-    socket.onopen = () => send(socket, { type: 'create-room', ...invite });
+    socket.onopen = () => send(socket, { type: 'create-room', ...invite, maxViewers: maxViewersRef.current });
     socket.onmessage = event => {
       try {
         const message = JSON.parse(String(event.data)) as ServerMessage;
         void handleSignalRef.current(message).catch(() => {
           setError('A negociação do vídeo falhou. Aguardando uma nova tentativa do espectador.');
-          destroyPeer();
         });
       } catch {
         setError('O serviço respondeu de forma inesperada. Reconectando…');
@@ -588,9 +687,7 @@ function HostApp() {
       clearConnectionTimer();
       if (socketRef.current === socket) socketRef.current = null;
       if (stoppingRef.current || event.code === 1000) return;
-      destroyPeer();
       setStatus('reconnecting');
-      setAudience('connecting');
       const delay = Math.min(8_000, 600 * 2 ** Math.min(reconnectAttemptRef.current++, 4));
       clearReconnectTimer();
       reconnectTimerRef.current = window.setTimeout(() => {
@@ -598,7 +695,7 @@ function HostApp() {
         connectHostSignalRef.current();
       }, delay);
     };
-  }, [clearConnectionTimer, clearReconnectTimer, destroyPeer]);
+  }, [clearConnectionTimer, clearReconnectTimer]);
   connectHostSignalRef.current = connectHostSignal;
 
   const startSharing = useCallback(async () => {
@@ -675,6 +772,16 @@ function HostApp() {
   }, [localStream]);
 
   useEffect(() => {
+    const resumeViewerAudio = () => {
+      for (const peer of peersRef.current.values()) {
+        if (peer.remoteAudio) void peer.remoteAudio.play().catch(() => undefined);
+      }
+    };
+    window.addEventListener('pointerdown', resumeViewerAudio, { passive: true });
+    return () => window.removeEventListener('pointerdown', resumeViewerAudio);
+  }, []);
+
+  useEffect(() => {
     if (!localStream) {
       previousStatsRef.current = null;
       return;
@@ -683,28 +790,33 @@ function HostApp() {
     let active = true;
     let adapting = false;
     const sample = async () => {
-      const pc = peerRef.current?.pc;
-      if (!pc || pc.connectionState !== 'connected') {
+      const connectedPeers = [...peersRef.current.values()].filter(peer => peer.pc.connectionState === 'connected');
+      if (!connectedPeers.length) {
         if (active) setConnectionQuality('waiting');
         return;
       }
       try {
-        const report = await pc.getStats();
         let bytes = 0;
         let rttMs = 0;
         let packetLoss = 0;
-        let availableKbps = 0;
-        report.forEach(stat => {
-          if (stat.type === 'outbound-rtp' && stat.kind === 'video' && !stat.isRemote) bytes = Number(stat.bytesSent || 0);
-          if (stat.type === 'remote-inbound-rtp' && stat.kind === 'video') {
-            packetLoss = Math.max(packetLoss, Number(stat.fractionLost || 0) * 100);
-            if (stat.roundTripTime) rttMs = Math.max(rttMs, Number(stat.roundTripTime) * 1_000);
-          }
-          if (stat.type === 'candidate-pair' && (stat.selected || stat.nominated)) {
-            if (stat.currentRoundTripTime) rttMs = Math.max(rttMs, Number(stat.currentRoundTripTime) * 1_000);
-            if (stat.availableOutgoingBitrate) availableKbps = Math.round(Number(stat.availableOutgoingBitrate) / 1_000);
-          }
-        });
+        const capacities: number[] = [];
+        await Promise.all(connectedPeers.map(async peer => {
+          const report = await peer.pc.getStats();
+          report.forEach(stat => {
+            if (stat.type === 'outbound-rtp' && stat.kind === 'video' && !stat.isRemote) bytes += Number(stat.bytesSent || 0);
+            if (stat.type === 'remote-inbound-rtp' && stat.kind === 'video') {
+              packetLoss = Math.max(packetLoss, Number(stat.fractionLost || 0) * 100);
+              if (stat.roundTripTime) rttMs = Math.max(rttMs, Number(stat.roundTripTime) * 1_000);
+            }
+            if (stat.type === 'candidate-pair' && (stat.selected || stat.nominated)) {
+              if (stat.currentRoundTripTime) rttMs = Math.max(rttMs, Number(stat.currentRoundTripTime) * 1_000);
+              if (stat.availableOutgoingBitrate) capacities.push(Math.round(Number(stat.availableOutgoingBitrate) / 1_000));
+            }
+          });
+        }));
+        const availableKbps = capacities.length
+          ? Math.max(1, Math.floor(Math.min(...capacities) / connectedPeers.length))
+          : 0;
         const now = performance.now();
         const previous = previousStatsRef.current;
         const bitrateKbps = previous && now > previous.at
@@ -738,13 +850,35 @@ function HostApp() {
     };
   }, [applyVideoProfile, localStream]);
 
+  useEffect(() => {
+    const recoverSignaling = () => {
+      if (!streamRef.current || stoppingRef.current) return;
+      const socket = socketRef.current;
+      if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) return;
+      clearReconnectTimer();
+      connectHostSignalRef.current();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') recoverSignaling();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pageshow', recoverSignaling);
+    window.addEventListener('online', recoverSignaling);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pageshow', recoverSignaling);
+      window.removeEventListener('online', recoverSignaling);
+    };
+  }, [clearReconnectTimer]);
+
   useEffect(() => () => {
     stoppingRef.current = true;
     clearConnectionTimer();
     clearReconnectTimer();
     send(socketRef.current, { type: 'leave-room' });
     socketRef.current?.close(1000, 'Page closed');
-    closePeer(peerRef.current);
+    for (const peer of peersRef.current.values()) closePeer(peer);
+    peersRef.current.clear();
     stopStream(streamRef.current);
   }, [clearConnectionTimer, clearReconnectTimer]);
 
@@ -815,11 +949,11 @@ function HostApp() {
       : status === 'live'
         ? videoPaused ? 'Pausado' : 'Compartilhando'
         : status === 'error' ? 'Atenção' : 'Pronto';
-  const audienceCopy = audience === 'connected'
-    ? '1 espectador conectado'
+  const audienceCopy = connectedViewerCount > 0
+    ? `${connectedViewerCount} espectador${connectedViewerCount === 1 ? '' : 'es'} conectado${connectedViewerCount === 1 ? '' : 's'} · limite ${maxViewers}`
     : audience === 'connecting'
-      ? 'Conectando ao espectador…'
-      : 'Aguardando o outro dispositivo';
+      ? `${viewerCount || 1} espectador${viewerCount === 1 ? '' : 'es'} conectando…`
+      : `Aguardando espectadores · limite ${maxViewers}`;
   const qualityCopy = connectionQuality === 'excellent'
     ? 'Conexão excelente'
     : connectionQuality === 'good'
@@ -899,6 +1033,15 @@ function HostApp() {
               disabled={profileStatus === 'applying' || automaticQuality}
               onChange={nextFps => selectManualProfile({ resolution, fps: nextFps })}
             />
+            <SegmentedControl
+              label="Espectadores"
+              suffix="máximo"
+              options={VIEWER_LIMITS}
+              value={maxViewers}
+              disabled={Boolean(localStream)}
+              onChange={setMaxViewers}
+            />
+            <p className="profile-summary"><i />P2P envia um fluxo por espectador; mais pessoas exigem mais upload do computador.</p>
             <p className={`profile-summary ${profileStatus}`} aria-live="polite">
               <i />
               {profileStatus === 'applying'
@@ -976,7 +1119,7 @@ function HostApp() {
           {shareUrl && (
             <div className={`network-note ${connectionQuality}`}>
               <Icon name="signal" />
-              <span><strong>{qualityCopy}</strong>{audience === 'connected' ? metricCopy : 'P2P direto + STUN · aguardando espectador'}</span>
+              <span><strong>{qualityCopy}</strong>{audience === 'connected' ? `${metricCopy} · ${connectedViewerCount}/${maxViewers} espectadores` : `P2P direto + STUN${turnAvailable ? '/TURN' : ''} · aguardando espectador`}</span>
             </div>
           )}
 
@@ -989,7 +1132,7 @@ function HostApp() {
           <section className="qr-modal" role="dialog" aria-modal="true" aria-labelledby="qr-title" onMouseDown={event => event.stopPropagation()}>
             <span className="eyebrow"><Icon name="phone" /> Abrir no celular</span>
             <h2 id="qr-title">Escaneie para assistir</h2>
-            <p>O convite continua privado e aceita apenas um espectador.</p>
+            <p>O convite continua privado e aceita até {maxViewers} espectador{maxViewers === 1 ? '' : 'es'}.</p>
             <img src={qrCode} alt="QR Code do link privado da transmissão" />
             <button type="button" onClick={() => setQrOpen(false)}>Fechar</button>
           </section>
@@ -1003,6 +1146,14 @@ function ViewerApp({ invite }: { invite: Invite }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const stageRef = useRef<HTMLElement>(null);
   const wakeLockRef = useRef<WakeLockSentinelLike | null>(null);
+  const viewerSocketRef = useRef<WebSocket | null>(null);
+  const viewerPeerRef = useRef<RTCPeerConnection | null>(null);
+  const viewerPeerIdRef = useRef('');
+  const viewerMicrophoneStreamRef = useRef<MediaStream | null>(null);
+  const viewerMicrophoneTrackRef = useRef<MediaStreamTrack | null>(null);
+  const viewerMicrophoneSenderRef = useRef<RTCRtpSender | null>(null);
+  const ensureViewerMicrophoneRef = useRef<() => Promise<void>>(async () => undefined);
+  const viewerMicrophoneEnabledRef = useRef(false);
   const [status, setStatus] = useState<ViewerStatus>('connecting');
   const [message, setMessage] = useState('Conectando ao computador…');
   const [hasAudio, setHasAudio] = useState(false);
@@ -1013,6 +1164,9 @@ function ViewerApp({ invite }: { invite: Invite }) {
   const [remotePaused, setRemotePaused] = useState(false);
   const [screenAudioActive, setScreenAudioActive] = useState(false);
   const [microphoneActive, setMicrophoneActive] = useState(false);
+  const [viewerMicrophoneEnabled, setViewerMicrophoneEnabled] = useState(false);
+  const [viewerMicrophoneAvailable, setViewerMicrophoneAvailable] = useState<boolean | null>(null);
+  const [viewerMicrophoneMessage, setViewerMicrophoneMessage] = useState('');
   const [zoom, setZoom] = useState(1);
   const [keepAwake, setKeepAwake] = useState(true);
   const [wakeActive, setWakeActive] = useState(false);
@@ -1031,6 +1185,8 @@ function ViewerApp({ invite }: { invite: Invite }) {
     let peer: RTCPeerConnection | null = null;
     let remoteStream: MediaStream | null = null;
     let peerId = '';
+    let initialNegotiationComplete = false;
+    let microphoneRenegotiationPending = false;
     let queuedCandidates: RTCIceCandidateInit[] = [];
     let previousBytes: { bytes: number; at: number } | null = null;
 
@@ -1050,8 +1206,11 @@ function ViewerApp({ invite }: { invite: Invite }) {
         peer.close();
       }
       peer = null;
+      viewerPeerRef.current = null;
+      viewerMicrophoneSenderRef.current = null;
+      initialNegotiationComplete = false;
+      microphoneRenegotiationPending = false;
       remoteStream = null;
-      peerId = '';
       queuedCandidates = [];
       if (videoRef.current) videoRef.current.srcObject = null;
       setHasAudio(false);
@@ -1065,11 +1224,41 @@ function ViewerApp({ invite }: { invite: Invite }) {
       previousBytes = null;
     }
 
-    function retry(copy: string) {
+    async function ensureViewerMicrophone() {
+      const currentPeer = peer;
+      const track = viewerMicrophoneTrackRef.current;
+      const microphoneStream = viewerMicrophoneStreamRef.current;
+      if (
+        disposed ||
+        !currentPeer ||
+        !track ||
+        !microphoneStream ||
+        !viewerMicrophoneEnabledRef.current ||
+        !initialNegotiationComplete ||
+        activeSocket?.readyState !== WebSocket.OPEN ||
+        currentPeer.signalingState !== 'stable'
+      ) return;
+
+      if (!viewerMicrophoneSenderRef.current) {
+        viewerMicrophoneSenderRef.current = currentPeer.addTrack(track, microphoneStream);
+        microphoneRenegotiationPending = true;
+      }
+      if (!microphoneRenegotiationPending) return;
+      const offer = await currentPeer.createOffer();
+      await currentPeer.setLocalDescription(offer);
+      microphoneRenegotiationPending = false;
+      send(activeSocket, { type: 'offer', peerId, sdp: offer });
+    }
+    ensureViewerMicrophoneRef.current = ensureViewerMicrophone;
+
+    function retry(copy: string, resetPeer = false) {
       if (disposed || terminal || reconnectTimer !== null) return;
-      destroyViewerPeer();
-      setStatus('connecting');
-      setMessage(copy);
+      if (resetPeer) destroyViewerPeer();
+      const mediaAlive = peer?.connectionState === 'connected';
+      if (!mediaAlive) {
+        setStatus('connecting');
+        setMessage(copy);
+      }
       const delay = Math.min(5_000, 500 * 2 ** Math.min(attempt++, 4));
       reconnectTimer = window.setTimeout(() => {
         reconnectTimer = null;
@@ -1135,15 +1324,23 @@ function ViewerApp({ invite }: { invite: Invite }) {
 
     function connect() {
       if (disposed || terminal) return;
+      if (activeSocket?.readyState === WebSocket.OPEN || activeSocket?.readyState === WebSocket.CONNECTING) return;
       const socket = new WebSocket(signalUrl());
       activeSocket = socket;
-      setStatus('connecting');
-      setMessage(attempt ? 'Reconectando ao computador…' : 'Conectando ao computador…');
+      viewerSocketRef.current = socket;
+      if (peer?.connectionState !== 'connected') {
+        setStatus('connecting');
+        setMessage(attempt ? 'Reconectando ao computador…' : 'Conectando ao computador…');
+      }
 
-      socket.onopen = () => send(socket, { type: 'join-room', ...invite });
+      socket.onopen = () => {
+        const rememberedPeerId = peerId || sessionStorage.getItem(`screenlink-peer:${invite.roomId}`) || undefined;
+        send(socket, { type: 'join-room', ...invite, peerId: rememberedPeerId });
+      };
       socket.onerror = () => setMessage('O servidor está demorando para responder…');
       socket.onclose = event => {
         if (activeSocket === socket) activeSocket = null;
+        if (viewerSocketRef.current === socket) viewerSocketRef.current = null;
         if (!disposed && !terminal && event.code !== 1000) retry('A conexão caiu. Tentando novamente…');
       };
       socket.onmessage = event => {
@@ -1155,8 +1352,9 @@ function ViewerApp({ invite }: { invite: Invite }) {
           return;
         }
         void handleMessage(serverMessage, socket).catch(() => {
+          destroyViewerPeer();
           socket.close(4002, 'WebRTC failed');
-          retry('O vídeo não conectou. Tentando novamente…');
+          retry('O vídeo não conectou. Tentando novamente…', true);
         });
       };
     }
@@ -1164,16 +1362,36 @@ function ViewerApp({ invite }: { invite: Invite }) {
     async function handleMessage(serverMessage: ServerMessage, socket: WebSocket) {
       if (serverMessage.type === 'joined') {
         attempt = 0;
+        const currentExistingPeer = peer;
+        const samePeer = Boolean(currentExistingPeer && peerId === serverMessage.peerId && currentExistingPeer.connectionState !== 'failed' && currentExistingPeer.connectionState !== 'closed');
+        peerId = serverMessage.peerId;
+        viewerPeerIdRef.current = peerId;
+        sessionStorage.setItem(`screenlink-peer:${invite.roomId}`, peerId);
+        if (serverMessage.resumed && samePeer && currentExistingPeer) {
+          const pendingOffer = currentExistingPeer.localDescription;
+          if (currentExistingPeer.signalingState === 'have-local-offer' && pendingOffer?.type === 'offer') {
+            send(socket, { type: 'offer', peerId, sdp: pendingOffer });
+          } else {
+            void ensureViewerMicrophoneRef.current().catch(() => undefined);
+          }
+          if (currentExistingPeer.connectionState === 'connected' && videoRef.current?.srcObject) {
+            setStatus('live');
+            setMessage('');
+          }
+          return;
+        }
         destroyViewerPeer();
         peerId = serverMessage.peerId;
+        viewerPeerIdRef.current = peerId;
         setStatus('waiting');
         setMessage('Conectado. Aguardando o vídeo…');
         peer = new RTCPeerConnection({
           iceServers: serverMessage.iceServers as RTCIceServer[],
           bundlePolicy: 'max-bundle',
-          iceCandidatePoolSize: 2
+          iceCandidatePoolSize: 4
         });
         const currentPeer = peer;
+        viewerPeerRef.current = currentPeer;
         currentPeer.onicecandidate = event => {
           if (event.candidate) send(socket, { type: 'ice-candidate', peerId, candidate: event.candidate.toJSON() });
         };
@@ -1216,12 +1434,16 @@ function ViewerApp({ invite }: { invite: Invite }) {
               setMessage('');
             }
             startViewerStats(currentPeer);
+            void ensureViewerMicrophoneRef.current().catch(() => undefined);
           }
           if (currentPeer.connectionState === 'disconnected') {
             setStatus('connecting');
             setMessage('Recuperando a conexão…');
             if (peerTimer !== null) window.clearTimeout(peerTimer);
-            peerTimer = window.setTimeout(() => socket.close(4002, 'WebRTC disconnected'), 8_000);
+            peerTimer = window.setTimeout(() => {
+              destroyViewerPeer();
+              socket.close(4002, 'WebRTC disconnected');
+            }, 12_000);
           }
           if (currentPeer.connectionState === 'failed') {
             peerFailures += 1;
@@ -1229,6 +1451,7 @@ function ViewerApp({ invite }: { invite: Invite }) {
               setViewerQuality('blocked');
               failPermanently('Esta rede bloqueou a conexão direta. Tente outra rede ou habilite TURN no ScreenLink.');
             } else {
+              destroyViewerPeer();
               socket.close(4002, 'WebRTC failed');
             }
           }
@@ -1236,17 +1459,31 @@ function ViewerApp({ invite }: { invite: Invite }) {
         peerTimer = window.setTimeout(() => {
           peerFailures += 1;
           if (peerFailures >= 3) failPermanently('O computador foi encontrado, mas a rede bloqueou o vídeo direto.');
-          else socket.close(4002, 'WebRTC timeout');
-        }, 15_000);
+          else {
+            destroyViewerPeer();
+            socket.close(4002, 'WebRTC timeout');
+          }
+        }, 18_000);
         return;
       }
       if (serverMessage.type === 'offer') {
         if (!peer || serverMessage.peerId !== peerId) return;
+        if (peer.signalingState === 'have-local-offer') {
+          await peer.setLocalDescription({ type: 'rollback' });
+          microphoneRenegotiationPending = Boolean(viewerMicrophoneSenderRef.current);
+        }
         await peer.setRemoteDescription(serverMessage.sdp);
         for (const candidate of queuedCandidates.splice(0)) await peer.addIceCandidate(candidate).catch(() => undefined);
         const answer = await peer.createAnswer();
         await peer.setLocalDescription(answer);
         send(socket, { type: 'answer', peerId, sdp: answer });
+        initialNegotiationComplete = true;
+        window.setTimeout(() => void ensureViewerMicrophoneRef.current().catch(() => undefined), 0);
+        return;
+      }
+      if (serverMessage.type === 'answer') {
+        if (!peer || serverMessage.peerId !== peerId || peer.signalingState !== 'have-local-offer') return;
+        await peer.setRemoteDescription(serverMessage.sdp);
         return;
       }
       if (serverMessage.type === 'ice-candidate') {
@@ -1275,7 +1512,7 @@ function ViewerApp({ invite }: { invite: Invite }) {
           socket.close(4001, 'Host offline');
           retry('O computador está reconectando ou ainda não iniciou. Tentando novamente…');
         } else if (serverMessage.code === 'ROOM_FULL') {
-          failPermanently('Este link já está sendo usado em outro dispositivo.');
+          failPermanently(serverMessage.message || 'Esta transmissão atingiu o limite de espectadores.');
         } else if (serverMessage.code === 'UNAUTHORIZED' || serverMessage.code === 'BAD_ROOM') {
           failPermanently('Este convite é inválido ou já expirou. Peça um novo link ao apresentador.');
         } else {
@@ -1284,13 +1521,42 @@ function ViewerApp({ invite }: { invite: Invite }) {
       }
     }
 
+    const recoverAfterBackground = () => {
+      if (disposed || terminal) return;
+      if (document.visibilityState === 'visible') {
+        void videoRef.current?.play().catch(() => undefined);
+        void ensureViewerMicrophoneRef.current().catch(() => undefined);
+      }
+      if (activeSocket?.readyState === WebSocket.OPEN || activeSocket?.readyState === WebSocket.CONNECTING) return;
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      connect();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') recoverAfterBackground();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pageshow', recoverAfterBackground);
+    window.addEventListener('online', recoverAfterBackground);
     connect();
     return () => {
       disposed = true;
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pageshow', recoverAfterBackground);
+      window.removeEventListener('online', recoverAfterBackground);
       send(activeSocket, { type: 'leave-room' });
       activeSocket?.close(1000, 'Viewer left');
+      viewerSocketRef.current = null;
       destroyViewerPeer();
+      stopStream(viewerMicrophoneStreamRef.current);
+      viewerMicrophoneStreamRef.current = null;
+      viewerMicrophoneTrackRef.current = null;
+      viewerMicrophoneSenderRef.current = null;
+      ensureViewerMicrophoneRef.current = async () => undefined;
+      sessionStorage.removeItem(`screenlink-peer:${invite.roomId}`);
     };
   }, [invite.roomId, invite.token]);
 
@@ -1377,6 +1643,71 @@ function ViewerApp({ invite }: { invite: Invite }) {
     setViewerMuted(nextMuted);
   }
 
+  async function toggleViewerMicrophone() {
+    const currentTrack = viewerMicrophoneTrackRef.current;
+    if (viewerMicrophoneEnabledRef.current && currentTrack) {
+      currentTrack.enabled = false;
+      viewerMicrophoneEnabledRef.current = false;
+      setViewerMicrophoneEnabled(false);
+      setViewerMicrophoneMessage('Seu microfone está silenciado.');
+      return;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setViewerMicrophoneAvailable(false);
+      setViewerMicrophoneMessage('Este navegador não oferece acesso ao microfone.');
+      return;
+    }
+
+    let track = currentTrack;
+    if (!track || track.readyState === 'ended') {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: false,
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+        });
+        track = stream.getAudioTracks()[0] ?? null;
+        if (!track) throw new Error('Microphone track unavailable');
+        stopStream(viewerMicrophoneStreamRef.current);
+        viewerMicrophoneStreamRef.current = stream;
+        viewerMicrophoneTrackRef.current = track;
+        viewerMicrophoneSenderRef.current = null;
+        track.addEventListener('mute', () => {
+          if (viewerMicrophoneTrackRef.current === track && viewerMicrophoneEnabledRef.current) {
+            setViewerMicrophoneMessage('O sistema suspendeu temporariamente o microfone.');
+          }
+        });
+        track.addEventListener('unmute', () => {
+          if (viewerMicrophoneTrackRef.current === track && viewerMicrophoneEnabledRef.current) {
+            setViewerMicrophoneMessage('Seu microfone está ativo.');
+          }
+        });
+        track.addEventListener('ended', () => {
+          if (viewerMicrophoneTrackRef.current !== track) return;
+          viewerMicrophoneTrackRef.current = null;
+          viewerMicrophoneSenderRef.current = null;
+          viewerMicrophoneEnabledRef.current = false;
+          setViewerMicrophoneEnabled(false);
+          setViewerMicrophoneAvailable(false);
+          setViewerMicrophoneMessage('O acesso ao microfone foi encerrado pelo navegador ou pelo sistema.');
+        }, { once: true });
+        setViewerMicrophoneAvailable(true);
+      } catch {
+        setViewerMicrophoneAvailable(false);
+        setViewerMicrophoneMessage('Permita o acesso ao microfone para falar com o apresentador.');
+        return;
+      }
+    }
+
+    track.enabled = true;
+    viewerMicrophoneEnabledRef.current = true;
+    setViewerMicrophoneEnabled(true);
+    setViewerMicrophoneMessage('Seu microfone está ativo.');
+    void ensureViewerMicrophoneRef.current().catch(() => {
+      setViewerMicrophoneMessage('Microfone pronto; reconectando o canal de voz…');
+    });
+  }
+
   function updateStreamDetails() {
     const video = videoRef.current;
     const stream = video?.srcObject instanceof MediaStream ? video.srcObject : null;
@@ -1395,8 +1726,10 @@ function ViewerApp({ invite }: { invite: Invite }) {
       ? viewerMuted
         ? 'áudio disponível'
         : [screenAudioActive ? 'som da tela' : '', microphoneActive ? 'microfone' : ''].filter(Boolean).join(' + ') || 'áudio ativo'
-      : 'sem áudio'
-  ].join(' · ');
+      : 'sem áudio',
+    viewerMicrophoneEnabled ? 'seu mic ativo' : '',
+    viewerMicrophoneAvailable === false && viewerMicrophoneMessage ? 'mic precisa de permissão' : ''
+  ].filter(Boolean).join(' · ');
   const viewerQualityLabel = viewerQuality === 'excellent'
     ? 'Excelente'
     : viewerQuality === 'good'
@@ -1452,6 +1785,9 @@ function ViewerApp({ invite }: { invite: Invite }) {
             <div className="viewer-actions">
               <button className={!viewerMuted && hasAudio ? 'is-on' : ''} type="button" onClick={toggleViewerAudio} aria-label={viewerMuted ? 'Ouvir áudio' : 'Silenciar áudio'} aria-pressed={!viewerMuted && hasAudio} data-label="Áudio" disabled={status !== 'live' || !hasAudio}>
                 <Icon name={!hasAudio || viewerMuted ? 'volumeOff' : 'volume'} />
+              </button>
+              <button className={viewerMicrophoneEnabled ? 'is-on' : ''} type="button" onClick={toggleViewerMicrophone} aria-label={viewerMicrophoneEnabled ? 'Silenciar seu microfone' : 'Ativar seu microfone'} aria-pressed={viewerMicrophoneEnabled} data-label="Falar" disabled={status !== 'live'} title={viewerMicrophoneMessage || undefined}>
+                <Icon name={viewerMicrophoneEnabled ? 'microphone' : 'microphoneOff'} />
               </button>
               <button className={wakeActive ? 'is-on' : ''} type="button" onClick={() => setKeepAwake(current => !current)} aria-label={keepAwake ? 'Permitir que a tela adormeça' : 'Manter tela ativa'} aria-pressed={keepAwake} data-label="Tela ativa" disabled={status !== 'live' || !wakeLockSupported}>
                 <Icon name="wake" />
