@@ -9,7 +9,7 @@ import {
   type ServerMessage
 } from './protocol';
 
-type IconName = 'screen' | 'link' | 'shield' | 'stop' | 'copy' | 'phone' | 'expand' | 'check' | 'signal';
+type IconName = 'screen' | 'link' | 'shield' | 'stop' | 'copy' | 'phone' | 'expand' | 'check' | 'signal' | 'volume' | 'volumeOff';
 type HostStatus = 'idle' | 'starting' | 'live' | 'error';
 type AudienceStatus = 'empty' | 'connecting' | 'connected';
 type ViewerStatus = 'connecting' | 'waiting' | 'live' | 'ended' | 'error';
@@ -97,7 +97,9 @@ function Icon({ name }: { name: IconName }) {
     phone: <><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></>,
     expand: <><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></>,
     check: <path d="m5 12 4 4L19 6"/>,
-    signal: <><path d="M5 12.5a10 10 0 0 1 14 0"/><path d="M8 16a6 6 0 0 1 8 0"/><path d="M11 19.5a2 2 0 0 1 2 0"/></>
+    signal: <><path d="M5 12.5a10 10 0 0 1 14 0"/><path d="M8 16a6 6 0 0 1 8 0"/><path d="M11 19.5a2 2 0 0 1 2 0"/></>,
+    volume: <><path d="M11 5 6.5 9H3v6h3.5l4.5 4V5Z"/><path d="M15 9.5a4 4 0 0 1 0 5"/><path d="M17.8 6.8a8 8 0 0 1 0 10.4"/></>,
+    volumeOff: <><path d="M11 5 6.5 9H3v6h3.5l4.5 4V5Z"/><path d="m16 10 5 5M21 10l-5 5"/></>
   };
 
   return <svg className="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
@@ -151,6 +153,8 @@ function HostApp() {
   const [resolution, setResolution] = useState<Resolution>(720);
   const [fps, setFps] = useState<FrameRate>(30);
   const [profileStatus, setProfileStatus] = useState<ProfileStatus>('idle');
+  const [audioEnabled, setAudioEnabled] = useState(true);
+  const [audioAvailable, setAudioAvailable] = useState<boolean | null>(null);
   useEffect(() => {
     const controller = new AbortController();
     void fetch('/runtime-config', { signal: controller.signal, cache: 'no-store' })
@@ -205,6 +209,22 @@ function HostApp() {
     }
   }, []);
 
+  const toggleScreenAudio = useCallback(() => {
+    const stream = streamRef.current;
+    const nextEnabled = !audioEnabled;
+    if (!stream) {
+      setAudioEnabled(nextEnabled);
+      return;
+    }
+    const audioTracks = stream.getAudioTracks();
+    if (!audioTracks.length) {
+      setAudioAvailable(false);
+      return;
+    }
+    for (const track of audioTracks) track.enabled = nextEnabled;
+    setAudioEnabled(nextEnabled);
+  }, [audioEnabled]);
+
   const failSession = useCallback((message: string) => {
     stoppingRef.current = true;
     clearConnectionTimer();
@@ -218,6 +238,7 @@ function HostApp() {
     inviteRef.current = null;
     setShareUrl('');
     setProfileStatus('idle');
+    setAudioAvailable(null);
     setError(message);
     setStatus('error');
   }, [clearConnectionTimer, destroyPeer]);
@@ -237,6 +258,7 @@ function HostApp() {
     setShareUrl('');
     setCopied(false);
     setProfileStatus('idle');
+    setAudioAvailable(null);
     setError('');
     setStatus('idle');
   }, [clearConnectionTimer, destroyPeer]);
@@ -337,9 +359,12 @@ function HostApp() {
           height: { ideal: selectedSettings.height, max: selectedSettings.height },
           frameRate: { ideal: selectedSettings.fps, max: selectedSettings.fps }
         },
-        audio: false
+        audio: audioEnabled
       });
       stream.getVideoTracks()[0]!.contentHint = selectedProfile.fps >= 45 ? 'motion' : 'detail';
+      const capturedAudio = stream.getAudioTracks();
+      setAudioAvailable(capturedAudio.length > 0);
+      for (const track of capturedAudio) track.enabled = audioEnabled;
       streamRef.current = stream;
       setLocalStream(stream);
       stream.getVideoTracks()[0]?.addEventListener('ended', () => stopSharingRef.current(), { once: true });
@@ -383,7 +408,7 @@ function HostApp() {
         failSession('Não foi possível iniciar o compartilhamento. Tente novamente.');
       }
     }
-  }, [failSession, handleSignal]);
+  }, [audioEnabled, failSession, handleSignal]);
 
   useEffect(() => {
     if (videoRef.current) videoRef.current.srcObject = localStream;
@@ -502,6 +527,27 @@ function HostApp() {
                   ? 'O navegador manteve o modo compatível.'
                   : `${resolution}p · até ${fps} FPS · bitrate adaptativo`}
             </p>
+            <div className="audio-setting">
+              <div>
+                <span className="audio-setting-title"><Icon name={audioEnabled && audioAvailable !== false ? 'volume' : 'volumeOff'} /> Áudio da tela</span>
+                <small aria-live="polite">
+                  {!localStream
+                    ? audioEnabled ? 'Será solicitado ao escolher a tela.' : 'A transmissão começará sem áudio.'
+                    : audioAvailable
+                      ? audioEnabled ? 'Enviando o áudio capturado.' : 'Áudio pausado.'
+                      : audioEnabled ? 'A fonte escolhida não ofereceu áudio.' : 'Reinicie para solicitar áudio.'}
+                </small>
+              </div>
+              <button
+                className="switch-control"
+                type="button"
+                role="switch"
+                aria-label="Compartilhar áudio da tela"
+                aria-checked={audioEnabled && audioAvailable !== false}
+                disabled={Boolean(localStream && audioAvailable === false)}
+                onClick={toggleScreenAudio}
+              ><i /></button>
+            </div>
           </section>
           <div className="divider" />
           <div className={`panel-heading ${shareUrl ? '' : 'muted-step'}`}>
@@ -540,6 +586,9 @@ function ViewerApp({ invite }: { invite: Invite }) {
   const stageRef = useRef<HTMLElement>(null);
   const [status, setStatus] = useState<ViewerStatus>('connecting');
   const [message, setMessage] = useState('Conectando ao computador…');
+  const [hasAudio, setHasAudio] = useState(false);
+  const [viewerMuted, setViewerMuted] = useState(true);
+  const [streamDetails, setStreamDetails] = useState('');
 
   useEffect(() => {
     let disposed = false;
@@ -548,6 +597,7 @@ function ViewerApp({ invite }: { invite: Invite }) {
     let reconnectTimer: number | null = null;
     let activeSocket: WebSocket | null = null;
     let peer: RTCPeerConnection | null = null;
+    let remoteStream: MediaStream | null = null;
     let peerId = '';
     let queuedCandidates: RTCIceCandidateInit[] = [];
 
@@ -559,9 +609,13 @@ function ViewerApp({ invite }: { invite: Invite }) {
         peer.close();
       }
       peer = null;
+      remoteStream = null;
       peerId = '';
       queuedCandidates = [];
       if (videoRef.current) videoRef.current.srcObject = null;
+      setHasAudio(false);
+      setViewerMuted(true);
+      setStreamDetails('');
     }
 
     function retry(copy: string) {
@@ -629,13 +683,31 @@ function ViewerApp({ invite }: { invite: Invite }) {
           if (event.candidate) send(socket, { type: 'ice-candidate', peerId, candidate: event.candidate.toJSON() });
         };
         currentPeer.ontrack = event => {
-          const stream = event.streams[0] ?? new MediaStream([event.track]);
+          const isFirstTrack = remoteStream === null;
+          if (event.streams[0]) remoteStream = event.streams[0];
+          else {
+            remoteStream ??= new MediaStream();
+            remoteStream.addTrack(event.track);
+          }
+          const stream = remoteStream;
+          const syncAudioAvailability = () => setHasAudio(stream.getAudioTracks().some(track => track.readyState === 'live'));
+          syncAudioAvailability();
+          stream.addEventListener('removetrack', syncAudioAvailability);
+          if (event.track.kind === 'audio') {
+            event.track.addEventListener('ended', syncAudioAvailability, { once: true });
+          }
           if (videoRef.current) {
             videoRef.current.srcObject = stream;
+            if (isFirstTrack) {
+              videoRef.current.muted = true;
+              setViewerMuted(true);
+            }
             void videoRef.current.play().catch(() => undefined);
           }
-          setStatus('live');
-          setMessage('');
+          if (event.track.kind === 'video') {
+            setStatus('live');
+            setMessage('');
+          }
         };
         currentPeer.onconnectionstatechange = () => {
           if (currentPeer.connectionState === 'failed') socket.close(4002, 'WebRTC failed');
@@ -698,12 +770,46 @@ function ViewerApp({ invite }: { invite: Invite }) {
     await stageRef.current?.requestFullscreen?.();
   }
 
+  async function toggleViewerAudio() {
+    const video = videoRef.current;
+    if (!video || !hasAudio) return;
+    const nextMuted = !viewerMuted;
+    video.muted = nextMuted;
+    if (!nextMuted) {
+      try {
+        await video.play();
+      } catch {
+        video.muted = true;
+        setViewerMuted(true);
+        return;
+      }
+    }
+    setViewerMuted(nextMuted);
+  }
+
+  function updateStreamDetails() {
+    const video = videoRef.current;
+    const stream = video?.srcObject instanceof MediaStream ? video.srcObject : null;
+    const settings = stream?.getVideoTracks()[0]?.getSettings();
+    const height = video?.videoHeight || settings?.height;
+    const frameRate = settings?.frameRate;
+    setStreamDetails([
+      height ? `${height}p` : '',
+      frameRate ? `até ${Math.round(frameRate)} FPS` : ''
+    ].filter(Boolean).join(' · '));
+  }
+
+  const liveDescription = [
+    streamDetails || 'Conexão P2P direta',
+    hasAudio ? viewerMuted ? 'áudio disponível' : 'áudio ativo' : 'sem áudio'
+  ].join(' · ');
+
   return (
     <div className="app viewer-mode">
       <Header status={label} live={status === 'live'} />
       <main className="viewer-main">
         <section ref={stageRef} className={`viewer-stage ${status === 'live' ? 'has-video' : ''}`} aria-live="polite">
-          <video ref={videoRef} autoPlay playsInline muted />
+          <video ref={videoRef} autoPlay playsInline muted={viewerMuted} onLoadedMetadata={updateStreamDetails} />
           {status !== 'live' && (
             <div className="viewer-empty">
               <div className={`connection-visual ${status}`} aria-hidden="true">
@@ -716,10 +822,23 @@ function ViewerApp({ invite }: { invite: Invite }) {
               {status === 'error' && <button className="retry-action" type="button" onClick={() => window.location.reload()}>Tentar novamente</button>}
             </div>
           )}
+          {status === 'live' && hasAudio && viewerMuted && (
+            <button className="sound-prompt" type="button" onClick={toggleViewerAudio}>
+              <Icon name="volume" /> Ouvir áudio
+            </button>
+          )}
         </section>
         <div className="viewer-bar">
-          <div><strong>{status === 'live' ? 'Tela compartilhada' : 'Link privado'}</strong><span>{status === 'live' ? 'Transmissão direta do computador' : 'Somente este dispositivo pode usar o convite agora'}</span></div>
-          <button type="button" onClick={openFullscreen} aria-label="Abrir em tela cheia" disabled={status !== 'live'}><Icon name="expand" /></button>
+          <div className="viewer-status">
+            <i className={status === 'live' ? 'is-live' : ''} />
+            <span><strong>{status === 'live' ? 'Tela compartilhada' : 'Link privado'}</strong><small>{status === 'live' ? liveDescription : 'Somente este dispositivo pode usar o convite agora'}</small></span>
+          </div>
+          <div className="viewer-actions">
+            <button type="button" onClick={toggleViewerAudio} aria-label={viewerMuted ? 'Ouvir áudio' : 'Silenciar áudio'} disabled={status !== 'live' || !hasAudio}>
+              <Icon name={!hasAudio || viewerMuted ? 'volumeOff' : 'volume'} />
+            </button>
+            <button type="button" onClick={openFullscreen} aria-label="Abrir em tela cheia" disabled={status !== 'live'}><Icon name="expand" /></button>
+          </div>
         </div>
       </main>
     </div>
