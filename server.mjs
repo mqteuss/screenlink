@@ -365,7 +365,7 @@ function relayToViewer(room, peerId, payload) {
 function setSecurityHeaders(response) {
   response.setHeader('X-Content-Type-Options', 'nosniff');
   response.setHeader('Referrer-Policy', 'no-referrer');
-  response.setHeader('Permissions-Policy', 'camera=(), microphone=(self), display-capture=(self)');
+  response.setHeader('Permissions-Policy', 'camera=(self), microphone=(self), display-capture=(self)');
   response.setHeader('Content-Security-Policy', "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; media-src 'self' blob:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
 }
 

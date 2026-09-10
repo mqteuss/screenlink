@@ -24,6 +24,7 @@ type PeerRecord = {
   screenAudioReceiver: RTCRtpReceiver | null;
   chatChannel: RTCDataChannel | null;
   callAudio: HTMLAudioElement | null;
+  screenAudio: HTMLAudioElement | null;
   screenStream: MediaStream;
 };
 
@@ -268,20 +269,17 @@ async function readPeerRttMs(pc: RTCPeerConnection): Promise<number | null> {
   return rtt === null ? null : Math.round(rtt);
 }
 
-function ScreenTile({ stream, name, local, playbackEnabled, volume = 1, outputDeviceId = '' }: { stream: MediaStream; name: string; local?: boolean; playbackEnabled: boolean; volume?: number; outputDeviceId?: string }) {
+function ScreenTile({ stream, name, local }: { stream: MediaStream; name: string; local?: boolean; playbackEnabled?: boolean; volume?: number; outputDeviceId?: string }) {
   const ref = useRef<HTMLVideoElement>(null);
   useEffect(() => {
     const video = ref.current;
     if (!video) return;
     video.srcObject = stream;
-    video.muted = local || !playbackEnabled;
-    video.volume = Math.min(1, Math.max(0, volume));
-    const sinkable = video as HTMLVideoElement & { setSinkId?: (deviceId: string) => Promise<void> };
-    if (!local && outputDeviceId && sinkable.setSinkId) void sinkable.setSinkId(outputDeviceId).catch(() => undefined);
+    video.muted = true;
     void video.play().catch(() => undefined);
     return () => { if (video.srcObject === stream) video.srcObject = null; };
-  }, [local, outputDeviceId, playbackEnabled, stream, volume]);
-  return <article className="screen-tile"><video ref={ref} autoPlay playsInline/><span>{local ? 'Sua tela' : `Tela de ${name}`}</span></article>;
+  }, [stream]);
+  return <article className="screen-tile"><video ref={ref} autoPlay muted playsInline/><span>{local ? 'Sua tela' : `Tela de ${name}`}</span></article>;
 }
 
 export default function RoomApp() {
@@ -486,6 +484,7 @@ export default function RoomApp() {
     peersRef.current.delete(peerId);
     record.chatChannel?.close();
     record.callAudio?.remove();
+    record.screenAudio?.remove();
     record.pc.ontrack = null;
     record.pc.onicecandidate = null;
     record.pc.onconnectionstatechange = null;
@@ -533,13 +532,26 @@ export default function RoomApp() {
       record.callAudio = audioElement;
       if (playbackEnabledRef.current) void audioElement.play().catch(() => undefined);
     }
-    const nextTracks = [screenVideo.receiver.track, screenAudio.receiver.track];
-    for (const track of record.screenStream.getTracks()) record.screenStream.removeTrack(track);
-    for (const track of nextTracks) record.screenStream.addTrack(track);
-    for (const track of nextTracks) {
-      track.addEventListener('unmute', () => setPeerVersion(version => version + 1));
-      track.addEventListener('mute', () => setPeerVersion(version => version + 1));
+    const screenAudioTrack = screenAudio.receiver.track;
+    if (!record.screenAudio || !(record.screenAudio.srcObject instanceof MediaStream) || record.screenAudio.srcObject.getAudioTracks()[0]?.id !== screenAudioTrack.id) {
+      record.screenAudio?.remove();
+      const audioElement = document.createElement('audio');
+      audioElement.autoplay = true;
+      audioElement.muted = !playbackEnabledRef.current;
+      audioElement.volume = audioSettingsRef.current.outputVolume / 100;
+      const sinkable = audioElement as HTMLAudioElement & { setSinkId?: (deviceId: string) => Promise<void> };
+      if (audioSettingsRef.current.outputDeviceId && sinkable.setSinkId) void sinkable.setSinkId(audioSettingsRef.current.outputDeviceId).catch(() => undefined);
+      audioElement.srcObject = mediaStreamWith(screenAudioTrack);
+      audioElement.dataset.roomScreenAudioPeer = record.id;
+      document.body.append(audioElement);
+      record.screenAudio = audioElement;
+      if (playbackEnabledRef.current) void audioElement.play().catch(() => undefined);
     }
+    const screenVideoTrack = screenVideo.receiver.track;
+    for (const track of record.screenStream.getTracks()) record.screenStream.removeTrack(track);
+    record.screenStream.addTrack(screenVideoTrack);
+    screenVideoTrack.addEventListener('unmute', () => setPeerVersion(version => version + 1));
+    screenVideoTrack.addEventListener('mute', () => setPeerVersion(version => version + 1));
     setPeerVersion(version => version + 1);
   }, []);
 
@@ -560,6 +572,7 @@ export default function RoomApp() {
       screenAudioReceiver: null,
       chatChannel: null,
       callAudio: null,
+      screenAudio: null,
       screenStream: new MediaStream()
     };
     peersRef.current.set(peerId, record);
@@ -1046,9 +1059,11 @@ export default function RoomApp() {
     audioSettingsRef.current = next;
     setAudioSettings(next);
     for (const peer of peersRef.current.values()) {
-      if (!peer.callAudio) continue;
-      const sinkable = peer.callAudio as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> };
-      if (sinkable.setSinkId) void sinkable.setSinkId(deviceId).catch(() => undefined);
+      for (const audioElement of [peer.callAudio, peer.screenAudio]) {
+        if (!audioElement) continue;
+        const sinkable = audioElement as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> };
+        if (sinkable.setSinkId) void sinkable.setSinkId(deviceId).catch(() => undefined);
+      }
     }
   }
 
@@ -1063,7 +1078,10 @@ export default function RoomApp() {
     const next = { ...audioSettingsRef.current, outputVolume: value };
     audioSettingsRef.current = next;
     setAudioSettings(next);
-    for (const peer of peersRef.current.values()) if (peer.callAudio) peer.callAudio.volume = value / 100;
+    for (const peer of peersRef.current.values()) {
+      if (peer.callAudio) peer.callAudio.volume = value / 100;
+      if (peer.screenAudio) peer.screenAudio.volume = value / 100;
+    }
   }
 
   function changeVoiceSetting(key: 'echoCancellation' | 'noiseSuppression' | 'autoGainControl') {
@@ -1080,9 +1098,11 @@ export default function RoomApp() {
     setPlaybackEnabled(next);
     if (audioContextRef.current?.state === 'suspended') void audioContextRef.current.resume();
     for (const peer of peersRef.current.values()) {
-      if (!peer.callAudio) continue;
-      peer.callAudio.muted = !next;
-      if (next) void peer.callAudio.play().catch(() => undefined);
+      for (const audioElement of [peer.callAudio, peer.screenAudio]) {
+        if (!audioElement) continue;
+        audioElement.muted = !next;
+        if (next) void audioElement.play().catch(() => undefined);
+      }
     }
   }
 

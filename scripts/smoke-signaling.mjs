@@ -97,6 +97,7 @@ try {
 
   const page = await fetch(HTTP_URL);
   assert.equal(page.status, 200);
+  assert.equal(page.headers.get('permissions-policy'), 'camera=(self), microphone=(self), display-capture=(self)');
   assert.match(await page.text(), /<div id="root"><\/div>/);
 
   const runtimeConfig = await (await fetch(`${HTTP_URL}/runtime-config`)).json();
