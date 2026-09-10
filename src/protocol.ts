@@ -24,6 +24,43 @@ export type ServerMessage =
 
 export type Invite = { roomId: string; token: string };
 
+export type RoomProfile = {
+  name: string;
+  avatar: string;
+  device: 'desktop' | 'mobile';
+};
+
+export type RoomParticipant = RoomProfile & {
+  id: string;
+  joinedAt: number;
+  sharing: boolean;
+  microphoneEnabled: boolean;
+  connected: boolean;
+};
+
+export type RoomServerMessage =
+  | {
+      type: 'room-ready';
+      roomId: string;
+      selfId: string;
+      leaderId: string;
+      maxParticipants: number;
+      isOwner: boolean;
+      resumed: boolean;
+      iceServers: IceServerConfig[];
+      participants: RoomParticipant[];
+    }
+  | { type: 'participant-joined'; participant: RoomParticipant }
+  | { type: 'participant-left'; peerId: string }
+  | { type: 'participant-state'; participant: RoomParticipant }
+  | { type: 'leader-changed'; leaderId: string; reclaimed: boolean }
+  | { type: 'peer-signal'; fromId: string; signal: 'offer' | 'answer' | 'ice-candidate'; sdp?: SessionDescription; candidate?: RTCIceCandidateInit }
+  | { type: 'room-closed' }
+  | { type: 'error'; code: string; message: string }
+  | { type: 'pong'; at: number };
+
+export type OwnedRoom = Invite & { ownerKey: string };
+
 export function parseInvite(hash = window.location.hash): Invite | null {
   const params = new URLSearchParams(hash.replace(/^#/, ''));
   const roomId = params.get('room')?.trim();
@@ -36,6 +73,34 @@ export function createPrivateRoom(): Invite {
     roomId: randomBase64Url(12),
     token: randomBase64Url(32)
   };
+}
+
+export function createOwnedRoom(): OwnedRoom {
+  return {
+    ...createPrivateRoom(),
+    ownerKey: randomBase64Url(32)
+  };
+}
+
+export function inviteCode(invite: Invite): string {
+  return `${invite.roomId}.${invite.token}`;
+}
+
+export function parseInviteCode(value: string): Invite | null {
+  const normalized = value.trim();
+  if (!normalized) return null;
+  try {
+    if (/^https?:\/\//i.test(normalized)) {
+      const url = new URL(normalized);
+      return parseInvite(url.hash);
+    }
+  } catch {
+    return null;
+  }
+  const [roomId, token, ...rest] = normalized.replace(/^#/, '').split('.');
+  if (rest.length || !roomId || !token) return null;
+  if (!/^[A-Za-z0-9_-]{12,64}$/.test(roomId) || !/^[A-Za-z0-9_-]{32,128}$/.test(token)) return null;
+  return { roomId, token };
 }
 
 export function inviteUrl(invite: Invite, origin = window.location.origin): string {

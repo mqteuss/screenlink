@@ -111,6 +111,16 @@ const rooms = new Map();
 /** @type {WeakMap<WebSocket, {role: 'host' | 'viewer', roomId: string, peerId?: string}>} */
 const clients = new WeakMap();
 
+/**
+ * @typedef {{name: string, avatar: string, device: 'desktop' | 'mobile'}} GroupProfile
+ * @typedef {{id: string, socket: WebSocket | null, profile: GroupProfile, joinedAt: number, sharing: boolean, microphoneEnabled: boolean, isOwner: boolean, expiryTimer: NodeJS.Timeout | null}} GroupParticipant
+ * @typedef {{tokenHash: Buffer, ownerKeyHash: Buffer, ownerId: string, leaderId: string, participants: Map<string, GroupParticipant>, maxParticipants: number, expiryTimer: NodeJS.Timeout | null}} GroupRoom
+ */
+/** @type {Map<string, GroupRoom>} */
+const groupRooms = new Map();
+/** @type {WeakMap<WebSocket, {roomId: string, peerId: string}>} */
+const groupClients = new WeakMap();
+
 function tokenHash(token) {
   return createHash('sha256').update(token).digest();
 }
@@ -138,6 +148,127 @@ function validToken(value) {
 
 function validPeerId(value) {
   return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function normalizeProfile(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  const name = String(source.name || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 28) || 'Participante';
+  const avatar = /^[a-z0-9-]{1,24}$/i.test(String(source.avatar || '')) ? String(source.avatar) : 'orbit';
+  const device = source.device === 'mobile' ? 'mobile' : 'desktop';
+  return { name, avatar, device };
+}
+
+function publicParticipant(participant) {
+  return {
+    id: participant.id,
+    name: participant.profile.name,
+    avatar: participant.profile.avatar,
+    device: participant.profile.device,
+    joinedAt: participant.joinedAt,
+    sharing: participant.sharing,
+    microphoneEnabled: participant.microphoneEnabled,
+    connected: Boolean(participant.socket?.readyState === WebSocket.OPEN)
+  };
+}
+
+function connectedGroupParticipants(room, exceptId = '') {
+  return [...room.participants.values()]
+    .filter(participant => participant.id !== exceptId && participant.socket?.readyState === WebSocket.OPEN)
+    .sort((left, right) => left.joinedAt - right.joinedAt);
+}
+
+function broadcastGroup(room, payload, exceptId = '') {
+  for (const participant of connectedGroupParticipants(room, exceptId)) sendJson(participant.socket, payload);
+}
+
+function electGroupLeader(room, { reclaimed = false } = {}) {
+  const owner = room.participants.get(room.ownerId);
+  const nextLeader = owner?.socket?.readyState === WebSocket.OPEN
+    ? owner.id
+    : connectedGroupParticipants(room)[0]?.id || '';
+  if (room.leaderId === nextLeader && !reclaimed) return;
+  room.leaderId = nextLeader;
+  if (nextLeader) broadcastGroup(room, { type: 'leader-changed', leaderId: nextLeader, reclaimed });
+}
+
+function clearGroupRoomExpiry(room) {
+  if (room.expiryTimer) clearTimeout(room.expiryTimer);
+  room.expiryTimer = null;
+}
+
+function scheduleGroupRoomExpiry(roomId, room) {
+  clearGroupRoomExpiry(room);
+  if (connectedGroupParticipants(room).length) return;
+  room.expiryTimer = setTimeout(() => {
+    if (groupRooms.get(roomId) === room && connectedGroupParticipants(room).length === 0) groupRooms.delete(roomId);
+  }, SIGNAL_GRACE_MS);
+  room.expiryTimer.unref?.();
+}
+
+function detachGroupParticipant(roomId, room, participant, { remove = false } = {}) {
+  const socket = participant.socket;
+  if (socket) groupClients.delete(socket);
+  participant.socket = null;
+  participant.sharing = false;
+  participant.microphoneEnabled = false;
+  if (participant.expiryTimer) clearTimeout(participant.expiryTimer);
+  broadcastGroup(room, { type: 'participant-left', peerId: participant.id }, participant.id);
+  if (remove) {
+    room.participants.delete(participant.id);
+  } else {
+    participant.expiryTimer = setTimeout(() => {
+      if (room.participants.get(participant.id) === participant && participant.socket === null && !participant.isOwner) {
+        room.participants.delete(participant.id);
+      }
+    }, SIGNAL_GRACE_MS);
+    participant.expiryTimer.unref?.();
+  }
+  electGroupLeader(room);
+  scheduleGroupRoomExpiry(roomId, room);
+}
+
+function attachGroupParticipant(roomId, room, participant, socket, profile, resumed) {
+  clearGroupRoomExpiry(room);
+  if (participant.expiryTimer) clearTimeout(participant.expiryTimer);
+  participant.expiryTimer = null;
+  const previousSocket = participant.socket;
+  if (previousSocket && previousSocket !== socket) {
+    groupClients.delete(previousSocket);
+    if (previousSocket.readyState === WebSocket.OPEN || previousSocket.readyState === WebSocket.CONNECTING) previousSocket.close(4003, 'Participant signal replaced');
+  }
+  participant.socket = socket;
+  participant.profile = normalizeProfile(profile);
+  groupClients.set(socket, { roomId, peerId: participant.id });
+  const roster = connectedGroupParticipants(room).map(publicParticipant);
+  sendJson(socket, {
+    type: 'room-ready',
+    roomId,
+    selfId: participant.id,
+    leaderId: room.leaderId || participant.id,
+    maxParticipants: room.maxParticipants,
+    isOwner: participant.isOwner,
+    resumed,
+    iceServers,
+    participants: roster
+  });
+  broadcastGroup(room, { type: 'participant-joined', participant: publicParticipant(participant) }, participant.id);
+  const wasLeader = room.leaderId;
+  electGroupLeader(room, { reclaimed: participant.isOwner && wasLeader !== participant.id });
+}
+
+function closeGroupRoom(roomId) {
+  const room = groupRooms.get(roomId);
+  if (!room) return;
+  groupRooms.delete(roomId);
+  clearGroupRoomExpiry(room);
+  for (const participant of room.participants.values()) {
+    if (participant.expiryTimer) clearTimeout(participant.expiryTimer);
+    if (participant.socket) {
+      sendJson(participant.socket, { type: 'room-closed' });
+      groupClients.delete(participant.socket);
+      participant.socket.close(1000, 'Room closed');
+    }
+  }
 }
 
 function validDescription(value) {
@@ -240,12 +371,12 @@ async function serveFile(request, response) {
   const url = new URL(request.url || '/', 'http://screenlink.local');
   if (url.pathname === '/health') {
     response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-    response.end(JSON.stringify({ ok: true, rooms: rooms.size, mode: 'p2p-stun', turnEnabled }));
+    response.end(JSON.stringify({ ok: true, rooms: rooms.size + groupRooms.size, mode: 'p2p-mesh', turnEnabled }));
     return;
   }
   if (url.pathname === '/runtime-config') {
     response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-    response.end(JSON.stringify({ viewerOrigin: viewerOrigin(request), mode: 'p2p-stun', turnEnabled }));
+    response.end(JSON.stringify({ viewerOrigin: viewerOrigin(request), mode: 'p2p-mesh', turnEnabled }));
     return;
   }
   if (request.method !== 'GET' && request.method !== 'HEAD') {
@@ -333,6 +464,163 @@ websocketServer.on('connection', socket => {
 
     if (message.type === 'ping') {
       sendJson(socket, { type: 'pong', at: Number(message.at) || Date.now() });
+      return;
+    }
+
+    if (message.type === 'create-group-room') {
+      if (clients.has(socket) || groupClients.has(socket)) {
+        fail(socket, 'ALREADY_JOINED', 'Este dispositivo já está em uma sala.');
+        return;
+      }
+      if (!validRoomId(message.roomId) || !validToken(message.token) || !validToken(message.ownerKey)) {
+        fail(socket, 'BAD_ROOM', 'Não foi possível criar a sala.');
+        return;
+      }
+      const maxParticipants = Math.max(2, normalizeMaxViewers(message.maxParticipants));
+      let room = groupRooms.get(message.roomId);
+      if (room) {
+        if (!tokenMatches(room.tokenHash, message.token) || !tokenMatches(room.ownerKeyHash, message.ownerKey)) {
+          fail(socket, 'UNAUTHORIZED_OWNER', 'A chave deste computador não corresponde ao criador da sala.');
+          return;
+        }
+        room.maxParticipants = Math.max(room.maxParticipants, connectedGroupParticipants(room).length, maxParticipants);
+        let owner = room.participants.get(room.ownerId);
+        if (!owner) {
+          owner = {
+            id: room.ownerId,
+            socket: null,
+            profile: normalizeProfile(message.profile),
+            joinedAt: Date.now(),
+            sharing: false,
+            microphoneEnabled: false,
+            isOwner: true,
+            expiryTimer: null
+          };
+          room.participants.set(owner.id, owner);
+        }
+        attachGroupParticipant(message.roomId, room, owner, socket, message.profile, true);
+        return;
+      }
+
+      const ownerId = validPeerId(message.participantId) ? message.participantId : randomUUID();
+      const owner = {
+        id: ownerId,
+        socket: null,
+        profile: normalizeProfile(message.profile),
+        joinedAt: Date.now(),
+        sharing: false,
+        microphoneEnabled: false,
+        isOwner: true,
+        expiryTimer: null
+      };
+      room = {
+        tokenHash: tokenHash(message.token),
+        ownerKeyHash: tokenHash(message.ownerKey),
+        ownerId,
+        leaderId: ownerId,
+        participants: new Map([[ownerId, owner]]),
+        maxParticipants,
+        expiryTimer: null
+      };
+      groupRooms.set(message.roomId, room);
+      attachGroupParticipant(message.roomId, room, owner, socket, message.profile, false);
+      return;
+    }
+
+    if (message.type === 'join-group-room') {
+      if (clients.has(socket) || groupClients.has(socket)) {
+        fail(socket, 'ALREADY_JOINED', 'Este dispositivo já está em uma sala.');
+        return;
+      }
+      if (!validRoomId(message.roomId) || !validToken(message.token)) {
+        fail(socket, 'BAD_ROOM', 'O código da sala não é válido.');
+        return;
+      }
+      const room = groupRooms.get(message.roomId);
+      if (!room || !tokenMatches(room.tokenHash, message.token)) {
+        fail(socket, 'ROOM_NOT_FOUND', 'A sala não existe mais ou o código está incorreto.');
+        return;
+      }
+      const requestedId = validPeerId(message.participantId) ? message.participantId : '';
+      let participant = requestedId ? room.participants.get(requestedId) : null;
+      if (participant?.isOwner) participant = null;
+      const resumed = Boolean(participant);
+      if (!participant) {
+        if (connectedGroupParticipants(room).length >= room.maxParticipants) {
+          fail(socket, 'ROOM_FULL', `A sala atingiu o limite de ${room.maxParticipants} participantes.`);
+          return;
+        }
+        participant = {
+          id: randomUUID(),
+          socket: null,
+          profile: normalizeProfile(message.profile),
+          joinedAt: Date.now(),
+          sharing: false,
+          microphoneEnabled: false,
+          isOwner: false,
+          expiryTimer: null
+        };
+        room.participants.set(participant.id, participant);
+      }
+      attachGroupParticipant(message.roomId, room, participant, socket, message.profile, resumed);
+      return;
+    }
+
+    const groupClient = groupClients.get(socket);
+    if (groupClient) {
+      const room = groupRooms.get(groupClient.roomId);
+      const participant = room?.participants.get(groupClient.peerId);
+      if (!room || !participant || participant.socket !== socket) {
+        fail(socket, 'ROOM_NOT_FOUND', 'A sala não está mais disponível.');
+        return;
+      }
+
+      if (message.type === 'leave-group-room') {
+        detachGroupParticipant(groupClient.roomId, room, participant, { remove: !participant.isOwner });
+        socket.close(1000, 'Participant left');
+        return;
+      }
+
+      if (message.type === 'close-group-room') {
+        if (!participant.isOwner) {
+          fail(socket, 'OWNER_ONLY', 'Somente o criador pode encerrar a sala para todos.');
+          return;
+        }
+        closeGroupRoom(groupClient.roomId);
+        return;
+      }
+
+      if (message.type === 'peer-signal') {
+        const target = typeof message.targetId === 'string' ? room.participants.get(message.targetId) : null;
+        if (!target?.socket || target.socket.readyState !== WebSocket.OPEN) {
+          fail(socket, 'PEER_OFFLINE', 'O outro participante está temporariamente offline.');
+          return;
+        }
+        if (message.kind === 'offer' || message.kind === 'answer') {
+          if (!validDescription(message.sdp) || message.sdp.type !== message.kind) {
+            fail(socket, 'BAD_DESCRIPTION', 'Não foi possível negociar a conexão WebRTC.');
+            return;
+          }
+          sendJson(target.socket, { type: 'peer-signal', fromId: participant.id, kind: message.kind, sdp: message.sdp });
+          return;
+        }
+        if (message.kind === 'ice-candidate' && message.candidate && typeof message.candidate === 'object') {
+          sendJson(target.socket, { type: 'peer-signal', fromId: participant.id, kind: 'ice-candidate', candidate: message.candidate });
+          return;
+        }
+        fail(socket, 'BAD_SIGNAL', 'Sinal WebRTC inválido.');
+        return;
+      }
+
+      if (message.type === 'participant-state') {
+        participant.profile = normalizeProfile(message.profile || participant.profile);
+        participant.sharing = Boolean(message.sharing);
+        participant.microphoneEnabled = Boolean(message.microphoneEnabled);
+        broadcastGroup(room, { type: 'participant-state', participant: publicParticipant(participant) }, participant.id);
+        return;
+      }
+
+      fail(socket, 'UNKNOWN_MESSAGE', 'Mensagem não reconhecida.');
       return;
     }
 
@@ -513,6 +801,14 @@ websocketServer.on('connection', socket => {
   });
 
   socket.on('close', () => {
+    const groupClient = groupClients.get(socket);
+    if (groupClient) {
+      groupClients.delete(socket);
+      const room = groupRooms.get(groupClient.roomId);
+      const participant = room?.participants.get(groupClient.peerId);
+      if (room && participant?.socket === socket) detachGroupParticipant(groupClient.roomId, room, participant);
+      return;
+    }
     const client = clients.get(socket);
     if (!client) return;
     clients.delete(socket);
@@ -548,6 +844,7 @@ server.listen(PORT, HOST, () => {
 
 function shutdown() {
   clearInterval(heartbeat);
+  for (const roomId of [...groupRooms.keys()]) closeGroupRoom(roomId);
   for (const roomId of [...rooms.keys()]) endRoom(roomId, { hostEnded: true });
   for (const socket of websocketServer.clients) socket.close(1001, 'Server shutdown');
   server.close(() => process.exit(0));

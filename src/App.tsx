@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type FocusEvent as ReactFocusEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from 'react';
 import QRCode from 'qrcode';
+import RoomApp from './RoomApp';
 import {
   createPrivateRoom,
   inviteUrl,
@@ -26,7 +27,7 @@ type PeerRecord = {
   chatChannel: RTCDataChannel | null;
   displayName: string;
 };
-type RuntimeConfig = { viewerOrigin?: string; mode?: 'p2p-stun'; turnEnabled?: boolean };
+type RuntimeConfig = { viewerOrigin?: string; mode?: 'p2p-stun' | 'p2p-mesh'; turnEnabled?: boolean };
 type Resolution = 360 | 480 | 720 | 1080;
 type FrameRate = 15 | 30 | 45 | 60;
 type VideoProfile = { resolution: Resolution; fps: FrameRate };
@@ -1925,11 +1926,6 @@ function HostApp() {
                   <Icon name="call" /> Iniciar chamada
                 </button>
               )}
-              {callActive && status === 'connected' && (
-                <button className="primary-action" type="button" onClick={startScreenShare} disabled={screenShareState === 'selecting'}>
-                  <Icon name="screen" /> {screenShareState === 'selecting' ? 'Abrindo seletor…' : 'Compartilhar tela'}
-                </button>
-              )}
               <small className="stage-note"><Icon name="shield" /> A chamada segue ativa quando a tela para.</small>
               {error && <p className="error-message" role="alert">{error}</p>}
             </div>
@@ -1965,14 +1961,11 @@ function HostApp() {
                 <button className={`dock-chevron ${hostAudioMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { setHostAudioMenuOpen(current => !current); setHostScreenMenuOpen(false); }} aria-label="Configurações de áudio" aria-expanded={hostAudioMenuOpen} data-label="Ajustes"><Icon name="chevron" /></button>
               </div>
               <div className="dock-split-control screen-split-control">
-                <button type="button" onClick={startScreenShare} aria-label={localStream ? 'Trocar tela compartilhada' : 'Compartilhar tela'} data-label={localStream ? 'Trocar tela' : 'Compartilhar'} disabled={status !== 'connected' || screenShareState === 'selecting'}>
+                <button className={localStream ? 'is-on' : ''} type="button" onClick={localStream ? () => void stopScreenShare() : startScreenShare} aria-label={localStream ? 'Parar compartilhamento de tela' : 'Compartilhar tela'} aria-pressed={Boolean(localStream)} data-label={localStream ? 'Parar tela' : 'Compartilhar'} disabled={status !== 'connected' || screenShareState === 'selecting'}>
                   <Icon name="screen" />
                 </button>
                 <button className={`dock-chevron ${hostScreenMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { setHostScreenMenuOpen(current => !current); setHostAudioMenuOpen(false); }} aria-label="Configurações do compartilhamento" aria-expanded={hostScreenMenuOpen} data-label="Ajustes"><Icon name="chevron" /></button>
               </div>
-              {localStream && (
-                <button type="button" onClick={() => void stopScreenShare()} aria-label="Parar compartilhamento de tela" data-label="Parar tela"><Icon name="screenOff" /></button>
-              )}
               <button className={panelSection === 'chat' ? 'is-on' : ''} type="button" onClick={() => { setPanelSection('chat'); setHostAudioMenuOpen(false); setHostScreenMenuOpen(false); }} aria-label="Abrir chat" data-label="Chat">
                 <Icon name="message" />{chatUnread > 0 && <b className="dock-unread">{Math.min(chatUnread, 99)}</b>}
               </button>
@@ -3030,11 +3023,5 @@ function ViewerApp({ invite }: { invite: Invite }) {
 }
 
 export default function App() {
-  const [invite, setInvite] = useState(() => parseInvite());
-  useEffect(() => {
-    const updateInvite = () => setInvite(parseInvite());
-    window.addEventListener('hashchange', updateInvite);
-    return () => window.removeEventListener('hashchange', updateInvite);
-  }, []);
-  return invite ? <ViewerApp invite={invite} /> : <HostApp />;
+  return <RoomApp />;
 }

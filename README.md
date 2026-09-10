@@ -13,6 +13,20 @@ Chamada de voz, compartilhamento de tela e chat temporário em tempo real entre 
 
 Cada sala permite escolher de 1 a 8 espectadores. O compartilhamento oferece até 1080p/60 FPS, áudio da tela, microfone bidirecional e chat efêmero, sempre sujeitos à capacidade real de CPU e rede.
 
+## Sala multiusuário
+
+O ScreenLink usa uma única interface para criar uma sala ou entrar com um código. Nessa mesma chamada:
+
+- participantes no computador entram colando o link ou o código da sala;
+- qualquer participante no computador pode iniciar ou parar a própria tela pelo mesmo botão;
+- várias telas podem ficar ativas ao mesmo tempo;
+- se o criador sair, o participante conectado há mais tempo assume a liderança;
+- quando o criador retorna com a chave privada salva neste navegador, ele retoma a liderança;
+- nomes e avatares predefinidos ficam salvos somente no armazenamento local do navegador;
+- a interface compacta para celular mantém voz, visualização, participantes e chat, sem expor o controle de compartilhar tela.
+
+A sala em grupo usa uma malha WebRTC: cada participante mantém uma conexão direta com cada um dos demais. É adequada para grupos pequenos, mas várias telas simultâneas multiplicam upload, CPU e consumo de bateria. Para grupos grandes, a evolução indicada é usar uma SFU.
+
 ## Arquitetura
 
 Existe apenas um serviço Node.js:
@@ -76,7 +90,7 @@ O arquivo `render.yaml` descreve o deploy completo em um único Web Service.
 1. Coloque o conteúdo desta pasta em um repositório Git.
 2. No Render, crie um **Blueprint** a partir do repositório.
 3. Aguarde o build e abra o endereço `onrender.com` fornecido.
-4. Confira `/health`. O campo `mode` deve ser `p2p-stun`.
+4. Confira `/health`. O campo `mode` deve ser `p2p-mesh`.
 
 O plano gratuito do Render pode adormecer após um período sem uso. O primeiro acesso seguinte pode levar alguns segundos para despertar o serviço; isso não muda a arquitetura.
 

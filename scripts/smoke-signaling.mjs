@@ -93,7 +93,7 @@ const sockets = [];
 try {
   const initialHealth = await waitForServer();
   assert.equal(initialHealth.ok, true);
-  assert.equal(initialHealth.mode, 'p2p-stun');
+  assert.equal(initialHealth.mode, 'p2p-mesh');
 
   const page = await fetch(HTTP_URL);
   assert.equal(page.status, 200);
@@ -101,7 +101,7 @@ try {
 
   const runtimeConfig = await (await fetch(`${HTTP_URL}/runtime-config`)).json();
   assert.equal(runtimeConfig.viewerOrigin, 'https://screenlink.example.test');
-  assert.equal(runtimeConfig.mode, 'p2p-stun');
+  assert.equal(runtimeConfig.mode, 'p2p-mesh');
 
   let host = await connect();
   const viewer = await connect();
@@ -198,11 +198,94 @@ try {
   send(host, { type: 'leave-room' });
   await Promise.all([hostEndedTwo, hostEndedThree, hostEndedExtra]);
 
+  let roomOwner = await connect();
+  const roomMember = await connect();
+  const roomMemberTwo = await connect();
+  sockets.push(roomOwner, roomMember, roomMemberTwo);
+  const ownerKey = 'owner_1234567890_abcdefghijklmnopqrstuvwxyz';
+  const ownerReady = nextMessage(roomOwner, 'room-ready');
+  send(roomOwner, {
+    type: 'create-group-room',
+    roomId,
+    token,
+    ownerKey,
+    maxParticipants: 8,
+    profile: { name: 'Criador', avatar: 'orbit', device: 'desktop' }
+  });
+  const ownerSession = await ownerReady;
+  assert.equal(ownerSession.leaderId, ownerSession.selfId);
+  assert.equal(ownerSession.participants.length, 1);
+
+  const memberReady = nextMessage(roomMember, 'room-ready');
+  const ownerSawMember = nextMessage(roomOwner, 'participant-joined');
+  send(roomMember, {
+    type: 'join-group-room',
+    roomId,
+    token,
+    profile: { name: 'Membro 1', avatar: 'nova', device: 'desktop' }
+  });
+  const memberSession = await memberReady;
+  assert.equal((await ownerSawMember).participant.id, memberSession.selfId);
+  assert.equal(memberSession.leaderId, ownerSession.selfId);
+
+  const memberTwoReady = nextMessage(roomMemberTwo, 'room-ready');
+  const ownerSawMemberTwo = nextMessage(roomOwner, 'participant-joined');
+  send(roomMemberTwo, {
+    type: 'join-group-room',
+    roomId,
+    token,
+    profile: { name: 'Membro 2', avatar: 'pixel', device: 'mobile' }
+  });
+  const memberTwoSession = await memberTwoReady;
+  assert.equal((await ownerSawMemberTwo).participant.id, memberTwoSession.selfId);
+
+  const memberSignal = nextMessage(roomMember, 'peer-signal');
+  send(roomMemberTwo, { type: 'peer-signal', targetId: memberSession.selfId, kind: 'offer', sdp: { type: 'offer', sdp: 'v=0\r\n' } });
+  const relayedGroupOffer = await memberSignal;
+  assert.equal(relayedGroupOffer.fromId, memberTwoSession.selfId);
+
+  const ownerState = nextMessage(roomOwner, 'participant-state');
+  send(roomMember, {
+    type: 'participant-state',
+    profile: { name: 'Membro 1', avatar: 'nova', device: 'desktop' },
+    sharing: true,
+    microphoneEnabled: true
+  });
+  const sharedState = await ownerState;
+  assert.equal(sharedState.participant.sharing, true);
+  assert.equal(sharedState.participant.microphoneEnabled, true);
+
+  const promoted = nextMessage(roomMember, 'leader-changed');
+  roomOwner.terminate();
+  assert.equal((await promoted).leaderId, memberSession.selfId);
+
+  roomOwner = await connect();
+  sockets.push(roomOwner);
+  const reclaimedReady = nextMessage(roomOwner, 'room-ready');
+  const reclaimedLeadership = nextMessage(roomMember, 'leader-changed');
+  send(roomOwner, {
+    type: 'create-group-room',
+    roomId,
+    token,
+    ownerKey,
+    participantId: ownerSession.selfId,
+    maxParticipants: 8,
+    profile: { name: 'Criador', avatar: 'orbit', device: 'desktop' }
+  });
+  const reclaimedSession = await reclaimedReady;
+  assert.equal(reclaimedSession.selfId, ownerSession.selfId);
+  assert.equal((await reclaimedLeadership).leaderId, ownerSession.selfId);
+
+  const roomClosedOne = nextMessage(roomMember, 'room-closed');
+  const roomClosedTwo = nextMessage(roomMemberTwo, 'room-closed');
+  send(roomOwner, { type: 'close-group-room' });
+  await Promise.all([roomClosedOne, roomClosedTwo]);
+
   await delay(50);
   const finalHealth = await (await fetch(`${HTTP_URL}/health`)).json();
   assert.equal(finalHealth.rooms, 0);
 
-  console.log('PASS: configurable viewers, bidirectional offers, host/viewer signaling resume, STUN/TURN fallback, and shutdown flow.');
+  console.log('PASS: legacy signaling plus mesh room relay, presence, screen state, leader migration, owner reclaim, STUN/TURN fallback, and shutdown flow.');
 } finally {
   for (const socket of sockets) {
     if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) socket.close();
