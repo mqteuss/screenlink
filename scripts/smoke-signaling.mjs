@@ -244,6 +244,17 @@ try {
   const relayedGroupOffer = await memberSignal;
   assert.equal(relayedGroupOffer.fromId, memberTwoSession.selfId);
 
+  const ownerChatFallback = nextMessage(roomOwner, 'chat-fallback');
+  const memberTwoChatFallback = nextMessage(roomMemberTwo, 'chat-fallback');
+  send(roomMember, { type: 'chat-fallback', message: { id: 'fallback-chat-1', text: 'mensagem de fallback', sentAt: 123456789 } });
+  const [ownerFallbackMessage, memberTwoFallbackMessage] = await Promise.all([ownerChatFallback, memberTwoChatFallback]);
+  assert.equal(ownerFallbackMessage.message.id, 'fallback-chat-1');
+  assert.equal(ownerFallbackMessage.message.text, 'mensagem de fallback');
+  assert.equal(ownerFallbackMessage.message.senderId, memberSession.selfId);
+  assert.equal(ownerFallbackMessage.message.senderName, 'Membro 1');
+  assert.equal(memberTwoFallbackMessage.message.id, 'fallback-chat-1');
+  assert.equal(memberTwoFallbackMessage.message.senderId, memberSession.selfId);
+
   const ownerState = nextMessage(roomOwner, 'participant-state');
   send(roomMember, {
     type: 'participant-state',

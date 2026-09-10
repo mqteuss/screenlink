@@ -615,6 +615,28 @@ websocketServer.on('connection', socket => {
         return;
       }
 
+      if (message.type === 'chat-fallback') {
+        const incoming = message.message;
+        const id = typeof incoming?.id === 'string' ? incoming.id.slice(0, 200) : '';
+        const text = typeof incoming?.text === 'string' ? incoming.text.trim().slice(0, 1_000) : '';
+        const sentAt = Number(incoming?.sentAt);
+        if (!id || !text) {
+          fail(socket, 'BAD_CHAT', 'A mensagem enviada é inválida.');
+          return;
+        }
+        broadcastGroup(room, {
+          type: 'chat-fallback',
+          message: {
+            id,
+            senderId: participant.id,
+            senderName: participant.profile.name,
+            text,
+            sentAt: Number.isFinite(sentAt) && sentAt > 0 ? sentAt : Date.now()
+          }
+        }, participant.id);
+        return;
+      }
+
       if (message.type === 'participant-state') {
         participant.profile = normalizeProfile(message.profile || participant.profile);
         participant.sharing = Boolean(message.sharing);

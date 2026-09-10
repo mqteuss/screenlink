@@ -36,6 +36,7 @@ type RoomMessage =
   | { type: 'peer-signal'; fromId: string; kind: 'offer'; sdp: SessionDescription }
   | { type: 'peer-signal'; fromId: string; kind: 'answer'; sdp: SessionDescription }
   | { type: 'peer-signal'; fromId: string; kind: 'ice-candidate'; candidate: RTCIceCandidateInit }
+  | { type: 'chat-fallback'; message: ChatMessage }
   | { type: 'room-closed' }
   | { type: 'pong'; at: number }
   | { type: 'error'; code: string; message: string };
@@ -240,6 +241,33 @@ function mediaStreamWith(...tracks: Array<MediaStreamTrack | null | undefined>) 
   return new MediaStream(tracks.filter((track): track is MediaStreamTrack => Boolean(track)));
 }
 
+async function readPeerRttMs(pc: RTCPeerConnection): Promise<number | null> {
+  const report = await pc.getStats();
+  let selectedPairId = '';
+  let candidatePairRtt: number | null = null;
+  let remoteInboundRtt: number | null = null;
+
+  report.forEach(stat => {
+    if (stat.type === 'transport' && stat.selectedCandidatePairId) selectedPairId = String(stat.selectedCandidatePairId);
+  });
+  report.forEach(stat => {
+    const isSelectedPair = stat.type === 'candidate-pair' && (selectedPairId
+      ? stat.id === selectedPairId
+      : stat.selected || (stat.nominated && stat.state === 'succeeded'));
+    if (isSelectedPair) {
+      const rtt = Number(stat.currentRoundTripTime);
+      if (Number.isFinite(rtt) && rtt >= 0) candidatePairRtt = Math.max(candidatePairRtt ?? 0, rtt * 1_000);
+    }
+    if (stat.type === 'remote-inbound-rtp') {
+      const rtt = Number(stat.roundTripTime);
+      if (Number.isFinite(rtt) && rtt >= 0) remoteInboundRtt = Math.max(remoteInboundRtt ?? 0, rtt * 1_000);
+    }
+  });
+
+  const rtt = candidatePairRtt ?? remoteInboundRtt;
+  return rtt === null ? null : Math.round(rtt);
+}
+
 function ScreenTile({ stream, name, local, playbackEnabled, volume = 1, outputDeviceId = '' }: { stream: MediaStream; name: string; local?: boolean; playbackEnabled: boolean; volume?: number; outputDeviceId?: string }) {
   const ref = useRef<HTMLVideoElement>(null);
   useEffect(() => {
@@ -294,7 +322,7 @@ export default function RoomApp() {
   const [profileOpen, setProfileOpen] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [copied, setCopied] = useState<'code' | 'link' | ''>('');
-  const [latency, setLatency] = useState(0);
+  const [mediaLatency, setMediaLatency] = useState<number | null>(null);
   const [peerVersion, setPeerVersion] = useState(0);
   const [mobile] = useState(isMobileDevice);
   const [audioMenuOpen, setAudioMenuOpen] = useState(false);
@@ -474,6 +502,11 @@ export default function RoomApp() {
     const screenAudio = audio[1];
     const screenVideo = video[0];
     if (!call || !screenAudio || !screenVideo) return;
+    // Transceivers criados implicitamente ao receber uma oferta começam como recvonly.
+    // A direção precisa ser corrigida antes do createAnswer para permitir envio nos dois sentidos.
+    call.direction = 'sendrecv';
+    screenVideo.direction = 'sendrecv';
+    screenAudio.direction = 'sendrecv';
     record.callAudioSender = call.sender;
     record.screenAudioSender = screenAudio.sender;
     record.screenVideoSender = screenVideo.sender;
@@ -632,10 +665,11 @@ export default function RoomApp() {
       else record.queuedCandidates.push(message.candidate);
       return;
     }
-    if (message.type === 'pong') {
-      setLatency(Math.max(0, Date.now() - message.at));
+    if (message.type === 'chat-fallback') {
+      appendMessage(message.message);
       return;
     }
+    if (message.type === 'pong') return;
     if (message.type === 'room-closed') {
       if (sessionRef.current?.ownerKey) localStorage.removeItem(OWNER_ROOM_KEY);
       setError('O criador encerrou a sala.');
@@ -649,7 +683,7 @@ export default function RoomApp() {
         if (sessionRef.current?.ownerKey) localStorage.removeItem(OWNER_ROOM_KEY);
       }
     }
-  }, [createPeer, destroyPeer, syncPeerMedia, systemMessage, updateParticipant, updateSelfMediaState]);
+  }, [appendMessage, createPeer, destroyPeer, syncPeerMedia, systemMessage, updateParticipant, updateSelfMediaState]);
 
   useEffect(() => {
     if (!session) return;
@@ -697,6 +731,30 @@ export default function RoomApp() {
       if (socketRef.current === socket) socketRef.current = null;
     };
   }, [handleRoomMessage, maxParticipants, session?.invite.roomId, session?.invite.token, session?.ownerKey]);
+
+  useEffect(() => {
+    if (!session || mode !== 'connected') {
+      setMediaLatency(null);
+      return;
+    }
+    let cancelled = false;
+    const sample = async () => {
+      const connected = [...peersRef.current.values()].filter(peer => peer.pc.connectionState === 'connected');
+      if (!connected.length) {
+        if (!cancelled) setMediaLatency(null);
+        return;
+      }
+      const values = await Promise.all(connected.map(peer => readPeerRttMs(peer.pc).catch(() => null)));
+      const valid = values.filter((value): value is number => value !== null);
+      if (!cancelled) setMediaLatency(valid.length ? Math.max(...valid) : null);
+    };
+    void sample();
+    const timer = window.setInterval(() => void sample(), 2_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [mode, session?.invite.roomId]);
 
   const disposeMicrophonePipeline = useCallback(() => {
     const outbound = localMicrophoneTrackRef.current;
@@ -1035,7 +1093,14 @@ export default function RoomApp() {
     const message: ChatMessage = { id: `${selfIdRef.current}-${Date.now()}-${randomSecret(4)}`, senderId: selfIdRef.current, senderName: profileRef.current.name, text, sentAt: Date.now() };
     appendMessage(message);
     const payload = JSON.stringify(message);
-    for (const peer of peersRef.current.values()) if (peer.chatChannel?.readyState === 'open') peer.chatChannel.send(payload);
+    let directDeliveries = 0;
+    for (const peer of peersRef.current.values()) {
+      if (peer.chatChannel?.readyState !== 'open') continue;
+      peer.chatChannel.send(payload);
+      directDeliveries += 1;
+    }
+    const expectedDeliveries = Object.values(participantsRef.current).filter(participant => participant.connected && participant.id !== selfIdRef.current).length;
+    if (directDeliveries < expectedDeliveries) send(socketRef.current, { type: 'chat-fallback', message: { id: message.id, text: message.text, sentAt: message.sentAt } });
     setChatValue('');
   }
 
@@ -1063,7 +1128,17 @@ export default function RoomApp() {
   const isOwner = Boolean(session?.ownerKey);
   const isLeader = selfId === leaderId;
   const roomLabel = session ? session.invite.roomId.slice(0, 4).toUpperCase() : '';
-  const connectionQuality = mode !== 'connected' ? 'waiting' : latency > 450 ? 'blocked' : latency > 180 ? 'limited' : latency > 90 ? 'good' : 'excellent';
+  const remoteParticipantCount = connectedParticipants.filter(participant => participant.id !== selfId).length;
+  const connectedPeerCount = [...peersRef.current.values()].filter(peer => peer.pc.connectionState === 'connected').length;
+  const connectionQuality = mode !== 'connected' || !connectedPeerCount || mediaLatency === null
+    ? 'waiting'
+    : mediaLatency > 450 ? 'blocked' : mediaLatency > 180 ? 'limited' : mediaLatency > 90 ? 'good' : 'excellent';
+  const latencyLabel = mediaLatency === null ? '—' : String(mediaLatency);
+  const connectionStatusLabel = mode !== 'connected'
+    ? 'Conectando'
+    : connectedPeerCount
+      ? mediaLatency === null ? 'P2P' : `${latencyLabel} ms`
+      : remoteParticipantCount ? 'Conectando P2P' : 'P2P';
   const activeChat = chatOpen;
   const activeResolution = automaticQuality ? 720 : resolution;
   const activeFps = automaticQuality ? 30 : fps;
@@ -1173,13 +1248,13 @@ export default function RoomApp() {
           <p className="profile-summary"><i/>Bitrate adaptativo ativo</p>
         </section>
       )}
-      <p className="privacy-note">Voz, tela e chat P2P · nada é gravado</p>
+      <p className="privacy-note">Voz e tela P2P · chat com fallback pela sala · nada é gravado</p>
     </div>
   );
 
   const callDock = session && mode !== 'error' ? (
     <div className="host-call-dock unified-call-dock" ref={dockRef} aria-label="Controles da chamada">
-      <button className={`dock-connection-indicator ${connectionQuality}`} type="button" aria-label={`Conexão ${latency || 0} milissegundos`} data-label="Conexão"><Icon name="link"/><span className="connection-tooltip"><strong>{latency || '—'} ms</strong><small>{connectedParticipants.length} participante{connectedParticipants.length === 1 ? '' : 's'}</small></span></button>
+      <button className={`dock-connection-indicator ${connectionQuality}`} type="button" aria-label={mediaLatency === null ? 'RTT P2P aguardando medição' : `RTT P2P ${mediaLatency} milissegundos`} data-label="Conexão P2P"><Icon name="link"/><span className="connection-tooltip"><strong>{latencyLabel} ms</strong><small>RTT WebRTC · {connectedPeerCount} par{connectedPeerCount === 1 ? '' : 'es'}</small></span></button>
       <button className={playbackEnabled ? 'is-on' : ''} type="button" onClick={togglePlayback} aria-label={playbackEnabled ? 'Silenciar chamada' : 'Ouvir chamada'} data-label="Áudio"><Icon name={playbackEnabled ? 'volume' : 'volumeOff'}/></button>
       <div className="dock-split-control">
         <button className={microphoneEnabled ? 'is-on' : ''} type="button" onClick={() => void toggleMicrophone()} aria-label={microphoneEnabled ? 'Silenciar microfone' : 'Ativar microfone'} data-label="Microfone"><Icon name={microphoneEnabled ? 'microphone' : 'microphoneOff'}/></button>
@@ -1213,7 +1288,7 @@ export default function RoomApp() {
       {session && mode === 'connected' && connectedParticipants.length ? (
         <div className="stage-avatars">{connectedParticipants.map(participant => <Avatar key={participant.id} avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} size="large"/>)}</div>
       ) : <div className="stage-echo"><Avatar avatar="echo" name="Echo" size="large"/></div>}
-      <span className="eyebrow">Voz, tela e chat P2P</span>
+      <span className="eyebrow">Voz e tela P2P · chat resiliente</span>
       <h1>{!session ? 'Inicie uma chamada' : mode === 'connecting' ? 'Entrando na chamada' : mode === 'error' ? 'Sala indisponível' : 'Chamada em andamento'}</h1>
       <p>{!session ? 'Crie uma sala ou entre com um código. Depois, qualquer pessoa no computador pode compartilhar a própria tela.' : mode === 'connecting' ? 'Reconectando à sala sem interromper quem já está aqui…' : mode === 'error' ? error : 'A conversa continua normalmente mesmo quando nenhuma tela está sendo compartilhada.'}</p>
       {!session && <button className="primary-action" type="button" onClick={() => void createRoom()}><Icon name="users"/> Iniciar chamada</button>}
@@ -1226,7 +1301,7 @@ export default function RoomApp() {
     <div className={`app room-app unified-room-app ${mobile ? 'viewer-mode is-mobile-room' : ''} ${activeChat ? 'is-chat-open' : ''}`}>
       <header className="topbar">
         <div className="brand"><span className="unified-brand-mark"><Icon name="screen"/></span><strong>ScreenLink</strong></div>
-        <div className={`status-pill room-status-${connectionQuality}`}><i/>{session ? mode === 'connected' ? `${latency || '—'} ms` : 'Conectando' : 'Pronto'}</div>
+        <div className={`status-pill room-status-${connectionQuality}`}><i/>{session ? connectionStatusLabel : 'Pronto'}</div>
       </header>
       <main className="host-main unified-room-main">
           <aside className={`unified-chat-sidebar ${activeChat ? 'is-open' : 'is-closed'}`} aria-label="Chat da chamada" aria-hidden={!activeChat}>
