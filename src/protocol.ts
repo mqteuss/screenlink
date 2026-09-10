@@ -27,6 +27,7 @@ export type Invite = { roomId: string; token: string };
 export type RoomProfile = {
   name: string;
   avatar: string;
+  status: string;
   device: 'desktop' | 'mobile';
 };
 
@@ -42,6 +43,8 @@ export type RoomServerMessage =
   | {
       type: 'room-ready';
       roomId: string;
+      joinCode: string;
+      invite: Invite;
       selfId: string;
       leaderId: string;
       maxParticipants: number;

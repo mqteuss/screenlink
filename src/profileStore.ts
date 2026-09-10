@@ -1,6 +1,7 @@
 export type StoredProfile = {
   name: string;
   avatar: string;
+  status: string;
 };
 
 type ScreenLinkProfileBridge = {

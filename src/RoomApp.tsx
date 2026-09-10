@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import QRCode from 'qrcode';
 import { createPrivateRoom, parseInvite, signalUrl, type IceServerConfig, type Invite, type RoomParticipant, type RoomProfile, type SessionDescription } from './protocol';
 import { loadStoredProfile, prepareAvatar, profileStorageKind, saveStoredProfile } from './profileStore';
 import './room.css';
 
 type RoomMode = 'landing' | 'connecting' | 'connected' | 'error';
-type IconName = 'screen' | 'microphone' | 'microphoneOff' | 'volume' | 'volumeOff' | 'chat' | 'send' | 'hangup' | 'link' | 'copy' | 'settings' | 'users' | 'crown' | 'close' | 'chevron' | 'chevronDown';
-type ExitAction = 'leave' | 'close';
-type Session = { invite: Invite; ownerKey?: string; participantId?: string; maxParticipants?: number };
+type IconName = 'screen' | 'microphone' | 'microphoneOff' | 'volume' | 'volumeOff' | 'chat' | 'send' | 'hangup' | 'link' | 'copy' | 'settings' | 'users' | 'crown' | 'close' | 'chevron' | 'chevronDown' | 'smile' | 'qr';
+type Session = { invite: Invite; joinCode?: string; joinByCode?: boolean; ownerKey?: string; participantId?: string; maxParticipants?: number };
+type RoomEntry = { kind: 'invite'; invite: Invite } | { kind: 'code'; code: string };
 type ChatMessage = { id: string; senderId: string; senderName: string; text: string; sentAt: number; system?: boolean };
 type Resolution = 360 | 480 | 720 | 1080;
 type FrameRate = 15 | 30 | 45 | 60;
@@ -29,7 +30,7 @@ type PeerRecord = {
 };
 
 type RoomMessage =
-  | { type: 'room-ready'; roomId: string; peerId?: string; selfId: string; leaderId: string; maxParticipants?: number; iceServers: IceServerConfig[]; participants: RoomParticipant[]; resumed?: boolean }
+  | { type: 'room-ready'; roomId: string; joinCode: string; invite: Invite; peerId?: string; selfId: string; leaderId: string; maxParticipants?: number; iceServers: IceServerConfig[]; participants: RoomParticipant[]; resumed?: boolean }
   | { type: 'participant-joined'; participant: RoomParticipant }
   | { type: 'participant-left'; peerId: string }
   | { type: 'participant-state'; participant: RoomParticipant }
@@ -49,6 +50,7 @@ const CHAT_LIMIT = 160;
 const RESOLUTIONS: Resolution[] = [360, 480, 720, 1080];
 const FRAME_RATES: FrameRate[] = [15, 30, 45, 60];
 const PARTICIPANT_LIMITS = [2, 3, 4, 5, 6, 7, 8];
+const CHAT_EMOJIS = ['😀', '😂', '🥹', '😍', '😎', '🤔', '😅', '😭', '😡', '👍', '👎', '👏', '🙌', '🙏', '🤝', '💙', '🔥', '✨', '🎉', '🎮', '👀', '✅', '❌', '🚀'];
 const PREMIUM_PARTICLES = [
   ['11%', '26%', '.8px', '15.2s', '-2.6s', '.55px'],
   ['23%', '67%', '1.1px', '17.8s', '-11.4s', '.8px'],
@@ -93,7 +95,9 @@ function Icon({ name }: { name: IconName }) {
     crown: <path d="m3 7 4.5 4L12 5l4.5 6L21 7l-2 11H5L3 7Z"/>,
     close: <path d="m6 6 12 12M18 6 6 18"/>,
     chevron: <path d="m9 6 6 6-6 6"/>,
-    chevronDown: <path d="m6 9 6 6 6-6"/>
+    chevronDown: <path d="m6 9 6 6 6-6"/>,
+    smile: <><circle cx="12" cy="12" r="9"/><path d="M8.5 14.5c2 2 5 2 7 0M9 9.5h.01M15 9.5h.01"/></>,
+    qr: <><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM18 14h3M21 14v3M14 19h3v2M19 18h2v3"/></>
   };
   return <svg className={`room-icon icon icon-${name}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
@@ -115,9 +119,9 @@ function MascotMark() {
   );
 }
 
-function Avatar({ avatar, name, speaking = false, size = 'normal' }: { avatar: string; name: string; speaking?: boolean; size?: 'small' | 'normal' | 'large' }) {
+function Avatar({ avatar, name, speaking = false, leader = false, size = 'normal' }: { avatar: string; name: string; speaking?: boolean; leader?: boolean; size?: 'small' | 'normal' | 'large' }) {
   if (/^data:image\/(?:jpeg|png|webp);base64,/i.test(avatar)) {
-    return <span className={`preset-avatar avatar-${size} custom-avatar ${speaking ? 'is-speaking' : ''}`} title={name}><img src={avatar} alt="" draggable={false}/></span>;
+    return <span className={`preset-avatar avatar-${size} custom-avatar ${speaking ? 'is-speaking' : ''}`} title={name}><img src={avatar} alt="" draggable={false}/>{leader && <span className="avatar-crown" aria-label="Líder da sala"><Icon name="crown"/></span>}</span>;
   }
   const preset = AVATARS.find(item => item.id === avatar) ?? AVATARS[0];
   const gradientId = `avatar-bg-${preset.id}`;
@@ -133,6 +137,7 @@ function Avatar({ avatar, name, speaking = false, size = 'normal' }: { avatar: s
         {preset.face === 'bear' && <><circle cx="18" cy="20" r="8" fill="#784b52"/><circle cx="46" cy="20" r="8" fill="#784b52"/><circle cx="32" cy="34" r="20" fill="#a96f70"/><circle cx="25" cy="31" r="3"/><circle cx="39" cy="31" r="3"/><ellipse cx="32" cy="40" rx="7" ry="5" fill="#eed0bc"/></>}
         {preset.face === 'owl' && <><path d="M16 18c4.7-4.7 10.8-4.8 16-1 5.2-3.8 11.3-3.7 16 1 4.3 4.3 5.7 12.9 3.2 22.1C48.8 49 41.8 54 32 54s-16.8-5-19.2-13.9C10.3 30.9 11.7 22.3 16 18Z" fill="rgba(27,40,82,.72)"/><circle cx="24" cy="31" r="9" fill="#e8f0ff"/><circle cx="40" cy="31" r="9" fill="#e8f0ff"/><circle cx="24" cy="31" r="3"/><circle cx="40" cy="31" r="3"/><path d="m29 40 3 4 3-4" fill="#ffd080"/></>}
       </svg>
+      {leader && <span className="avatar-crown" aria-label="Líder da sala"><Icon name="crown"/></span>}
     </span>
   );
 }
@@ -180,6 +185,10 @@ function normalizeName(value: string) {
   return value.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 28) || 'Você';
 }
 
+function normalizeStatus(value: string) {
+  return value.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 64) || 'Disponível';
+}
+
 function isMobileDevice() {
   return window.matchMedia('(max-width: 760px), (pointer: coarse) and (max-width: 980px)').matches;
 }
@@ -190,10 +199,11 @@ function loadProfile(): RoomProfile {
     return {
       name: normalizeName(String(stored.name || 'Você')),
       avatar: normalizeAvatar(stored.avatar),
+      status: normalizeStatus(String(stored.status || 'Disponível')),
       device: isMobileDevice() ? 'mobile' : 'desktop'
     };
   } catch {
-    return { name: 'Você', avatar: 'orbit', device: isMobileDevice() ? 'mobile' : 'desktop' };
+    return { name: 'Você', avatar: 'orbit', status: 'Disponível', device: isMobileDevice() ? 'mobile' : 'desktop' };
   }
 }
 
@@ -222,16 +232,21 @@ function groupInviteUrl(invite: Invite) {
   return url.toString();
 }
 
-function parseRoomEntry(value: string): Invite | null {
+function parseRoomEntry(value: string): RoomEntry | null {
   const trimmed = value.trim();
   try {
-    if (/^https?:\/\//i.test(trimmed)) return parseInvite(new URL(trimmed).hash);
+    if (/^https?:\/\//i.test(trimmed)) {
+      const invite = parseInvite(new URL(trimmed).hash);
+      return invite ? { kind: 'invite', invite } : null;
+    }
   } catch {
     return null;
   }
+  const shortCode = trimmed.toUpperCase().replace(/\s+/g, '');
+  if (/^[A-Z2-9]{4}$/.test(shortCode)) return { kind: 'code', code: shortCode };
   const [roomId, token, extra] = trimmed.split('.');
   if (extra || !/^[A-Za-z0-9_-]{12,64}$/.test(roomId || '') || !/^[A-Za-z0-9_-]{32,128}$/.test(token || '')) return null;
-  return { roomId, token };
+  return { kind: 'invite', invite: { roomId, token } };
 }
 
 function send(socket: WebSocket | null, payload: object) {
@@ -288,6 +303,7 @@ export default function RoomApp() {
   const [profile, setProfile] = useState<RoomProfile>(() => loadProfile());
   const profileRef = useRef(profile);
   const [profileNameDraft, setProfileNameDraft] = useState(profile.name);
+  const [profileStatusDraft, setProfileStatusDraft] = useState(profile.status);
   const [profileStorageReady, setProfileStorageReady] = useState(false);
   const [profileSaveState, setProfileSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [avatarUploading, setAvatarUploading] = useState(false);
@@ -317,8 +333,12 @@ export default function RoomApp() {
   const chatMessagesRef = useRef<ChatMessage[]>([]);
   const seenMessageIdsRef = useRef(new Set<string>());
   const [chatValue, setChatValue] = useState('');
+  const [emojiOpen, setEmojiOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
+  const [qrOpen, setQrOpen] = useState(false);
+  const [qrCode, setQrCode] = useState('');
+  const [controlsOpen, setControlsOpen] = useState(false);
   const [copied, setCopied] = useState<'code' | 'link' | ''>('');
   const [mediaLatency, setMediaLatency] = useState<number | null>(null);
   const [peerVersion, setPeerVersion] = useState(0);
@@ -326,7 +346,6 @@ export default function RoomApp() {
   const [audioMenuOpen, setAudioMenuOpen] = useState(false);
   const [screenMenuOpen, setScreenMenuOpen] = useState(false);
   const [leaveMenuOpen, setLeaveMenuOpen] = useState(false);
-  const [pendingExitAction, setPendingExitAction] = useState<ExitAction | null>(null);
   const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
   const [audioSettings, setAudioSettings] = useState<AudioSettings>({ inputDeviceId: '', outputDeviceId: '', inputVolume: 100, outputVolume: 100, echoCancellation: true, noiseSuppression: true, autoGainControl: true });
 
@@ -345,6 +364,8 @@ export default function RoomApp() {
   const profileBarRef = useRef<HTMLButtonElement>(null);
   const profilePopoverRef = useRef<HTMLDivElement>(null);
   const chatLogRef = useRef<HTMLDivElement>(null);
+  const chatInputRef = useRef<HTMLTextAreaElement>(null);
+  const emojiPickerRef = useRef<HTMLDivElement>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const disposedRef = useRef(false);
 
@@ -368,11 +389,13 @@ export default function RoomApp() {
       const restored = {
         ...profileRef.current,
         name: normalizeName(stored.name),
-        avatar: normalizeAvatar(stored.avatar)
+        avatar: normalizeAvatar(stored.avatar),
+        status: normalizeStatus(stored.status)
       };
       profileRef.current = restored;
       setProfile(restored);
       setProfileNameDraft(restored.name);
+      setProfileStatusDraft(restored.status);
     }).catch(() => undefined).finally(() => {
       if (!cancelled) setProfileStorageReady(true);
     });
@@ -383,7 +406,7 @@ export default function RoomApp() {
     if (!profileStorageReady) return;
     setProfileSaveState('saving');
     const timer = window.setTimeout(() => {
-      void saveStoredProfile({ name: profile.name, avatar: profile.avatar })
+      void saveStoredProfile({ name: profile.name, avatar: profile.avatar, status: profile.status })
         .then(() => setProfileSaveState('saved'))
         .catch(() => setProfileSaveState('error'));
     }, 350);
@@ -402,7 +425,6 @@ export default function RoomApp() {
         setAudioMenuOpen(false);
         setScreenMenuOpen(false);
         setLeaveMenuOpen(false);
-        setPendingExitAction(null);
       }
     };
     document.addEventListener('pointerdown', dismiss);
@@ -410,21 +432,43 @@ export default function RoomApp() {
   }, [audioMenuOpen, leaveMenuOpen, screenMenuOpen]);
 
   useEffect(() => {
+    if (!emojiOpen) return;
+    const dismiss = (event: PointerEvent) => {
+      if (!emojiPickerRef.current?.contains(event.target as Node)) setEmojiOpen(false);
+    };
+    document.addEventListener('pointerdown', dismiss);
+    return () => document.removeEventListener('pointerdown', dismiss);
+  }, [emojiOpen]);
+
+  useEffect(() => {
+    if (!session?.invite.token) {
+      setQrCode('');
+      setQrOpen(false);
+      return;
+    }
+    let cancelled = false;
+    void QRCode.toDataURL(groupInviteUrl(session.invite), {
+      width: 720,
+      margin: 2,
+      color: { dark: '#071013', light: '#f7fbfc' },
+      errorCorrectionLevel: 'M'
+    }).then(value => { if (!cancelled) setQrCode(value); }).catch(() => { if (!cancelled) setQrCode(''); });
+    return () => { cancelled = true; };
+  }, [session?.invite.roomId, session?.invite.token]);
+
+  useEffect(() => {
     if (!profileOpen) return;
     const dismiss = (event: PointerEvent) => {
       const target = event.target as Node;
       if (!profilePopoverRef.current?.contains(target) && !profileBarRef.current?.contains(target)) {
         commitProfileName();
+        commitProfileStatus();
         setProfileOpen(false);
       }
     };
     document.addEventListener('pointerdown', dismiss);
     return () => document.removeEventListener('pointerdown', dismiss);
   }, [profileOpen]);
-
-  useEffect(() => {
-    if (!chatOpen && profileOpen) setProfileOpen(false);
-  }, [chatOpen, profileOpen]);
 
   useLayoutEffect(() => {
     const log = chatLogRef.current;
@@ -620,11 +664,14 @@ export default function RoomApp() {
       setError('');
       const activeSession = sessionRef.current;
       if (activeSession) {
-        const nextSession = { ...activeSession, participantId: message.selfId };
+        const nextSession = { ...activeSession, invite: message.invite, joinCode: message.joinCode, joinByCode: false, participantId: message.selfId };
         sessionRef.current = nextSession;
         setSession(nextSession);
         if (nextSession.ownerKey) localStorage.setItem(OWNER_ROOM_KEY, JSON.stringify(nextSession));
-        else sessionStorage.setItem(`${PEER_KEY_PREFIX}${activeSession.invite.roomId}`, message.selfId);
+        else {
+          sessionStorage.setItem(`${PEER_KEY_PREFIX}${message.roomId}`, message.selfId);
+          history.replaceState(null, '', `${location.pathname}#${new URLSearchParams({ room: message.invite.roomId, key: message.invite.token })}`);
+        }
       }
       for (const participant of message.participants) {
         if (participant.id !== message.selfId && participant.connected) await createPeer(participant.id, true);
@@ -716,6 +763,9 @@ export default function RoomApp() {
         if (!current) return;
         if (current.ownerKey) {
           send(socket, { type: 'create-group-room', ...current.invite, ownerKey: current.ownerKey, participantId: current.participantId, profile: profileRef.current, maxParticipants: current.maxParticipants ?? maxParticipants });
+        } else if (current.joinByCode && current.joinCode) {
+          const participantId = current.participantId || sessionStorage.getItem(`${PEER_KEY_PREFIX}${current.joinCode}`) || undefined;
+          send(socket, { type: 'join-group-room-code', code: current.joinCode, participantId, profile: profileRef.current });
         } else {
           const participantId = current.participantId || sessionStorage.getItem(`${PEER_KEY_PREFIX}${current.invite.roomId}`) || undefined;
           send(socket, { type: 'join-group-room', ...current.invite, participantId, profile: profileRef.current });
@@ -743,7 +793,9 @@ export default function RoomApp() {
       socket?.close(1000, 'Session changed');
       if (socketRef.current === socket) socketRef.current = null;
     };
-  }, [handleRoomMessage, maxParticipants, session?.invite.roomId, session?.invite.token, session?.ownerKey]);
+  // Os dados da sessão podem ser enriquecidos após entrar por código curto. A conexão
+  // deve sobreviver a essa atualização; ela só nasce ou termina com a própria sessão.
+  }, [handleRoomMessage, Boolean(session)]);
 
   useEffect(() => {
     if (!session || mode !== 'connected') {
@@ -878,6 +930,10 @@ export default function RoomApp() {
       stopScreenShare();
       return;
     }
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      setError('Este navegador não oferece compartilhamento de tela. No celular, use um navegador que disponibilize essa permissão.');
+      return;
+    }
     try {
       const activeResolution = automaticQuality ? 720 : resolution;
       const activeFps = automaticQuality ? 30 : fps;
@@ -903,8 +959,9 @@ export default function RoomApp() {
       setSharing(true);
       updateSelfMediaState({ sharing: true });
       video.addEventListener('ended', stopScreenShare, { once: true });
-    } catch {
-      // Cancelar o seletor não altera a chamada.
+    } catch (screenError) {
+      if (screenError instanceof DOMException && screenError.name === 'NotAllowedError') return;
+      setError('Não foi possível iniciar o compartilhamento. Tente escolher novamente a tela, janela ou aba.');
     }
   }, [automaticQuality, fps, resolution, stopScreenShare, updateSelfMediaState]);
 
@@ -956,7 +1013,7 @@ export default function RoomApp() {
   }, [destroyPeer, disposeMicrophonePipeline]);
 
   function updateProfile(next: Partial<RoomProfile>) {
-    const updated = { ...profileRef.current, ...next, name: normalizeName(next.name ?? profileRef.current.name), avatar: normalizeAvatar(next.avatar ?? profileRef.current.avatar), device: mobile ? 'mobile' : 'desktop' } as RoomProfile;
+    const updated = { ...profileRef.current, ...next, name: normalizeName(next.name ?? profileRef.current.name), avatar: normalizeAvatar(next.avatar ?? profileRef.current.avatar), status: normalizeStatus(next.status ?? profileRef.current.status), device: mobile ? 'mobile' : 'desktop' } as RoomProfile;
     profileRef.current = updated;
     setProfile(updated);
     const id = selfIdRef.current;
@@ -970,6 +1027,12 @@ export default function RoomApp() {
     if (name !== profileRef.current.name) updateProfile({ name });
   }
 
+  function commitProfileStatus() {
+    const status = normalizeStatus(profileStatusDraft || profileRef.current.status);
+    setProfileStatusDraft(status);
+    if (status !== profileRef.current.status) updateProfile({ status });
+  }
+
   async function uploadAvatar(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = '';
@@ -979,7 +1042,7 @@ export default function RoomApp() {
     try {
       const avatar = await prepareAvatar(file);
       updateProfile({ avatar });
-      await saveStoredProfile({ name: profileRef.current.name, avatar });
+      await saveStoredProfile({ name: profileRef.current.name, avatar, status: profileRef.current.status });
       setProfileSaveState('saved');
     } catch (avatarError) {
       setProfileSaveState('error');
@@ -1006,14 +1069,19 @@ export default function RoomApp() {
 
   async function joinRoom(event: FormEvent) {
     event.preventDefault();
-    const invite = parseRoomEntry(joinValue);
-    if (!invite) {
+    const entry = parseRoomEntry(joinValue);
+    if (!entry) {
       setError('Cole um código ou link de sala válido.');
       return;
     }
     setError('');
-    history.replaceState(null, '', `${location.pathname}#${new URLSearchParams({ room: invite.roomId, key: invite.token })}`);
-    setSession({ invite });
+    if (entry.kind === 'invite') {
+      history.replaceState(null, '', `${location.pathname}#${new URLSearchParams({ room: entry.invite.roomId, key: entry.invite.token })}`);
+      setSession({ invite: entry.invite });
+    } else {
+      history.replaceState(null, '', location.pathname);
+      setSession({ invite: { roomId: entry.code, token: '' }, joinCode: entry.code, joinByCode: true });
+    }
     setMode('connecting');
     void acquireMicrophone();
   }
@@ -1035,7 +1103,8 @@ export default function RoomApp() {
     setSession(null);
     setMode('landing');
     setLeaveMenuOpen(false);
-    setPendingExitAction(null);
+    setControlsOpen(false);
+    setQrOpen(false);
     history.replaceState(null, '', location.pathname);
   }
 
@@ -1122,6 +1191,21 @@ export default function RoomApp() {
     const expectedDeliveries = Object.values(participantsRef.current).filter(participant => participant.connected && participant.id !== selfIdRef.current).length;
     if (directDeliveries < expectedDeliveries) send(socketRef.current, { type: 'chat-fallback', message: { id: message.id, text: message.text, sentAt: message.sentAt } });
     setChatValue('');
+    setEmojiOpen(false);
+  }
+
+  function insertEmoji(emoji: string) {
+    const input = chatInputRef.current;
+    const start = input?.selectionStart ?? chatValue.length;
+    const end = input?.selectionEnd ?? start;
+    const next = `${chatValue.slice(0, start)}${emoji}${chatValue.slice(end)}`.slice(0, 1_000);
+    setChatValue(next);
+    setEmojiOpen(false);
+    window.requestAnimationFrame(() => {
+      input?.focus();
+      const cursor = Math.min(start + emoji.length, next.length);
+      input?.setSelectionRange(cursor, cursor);
+    });
   }
 
   function toggleChatSidebar() {
@@ -1129,14 +1213,33 @@ export default function RoomApp() {
     setAudioMenuOpen(false);
     setScreenMenuOpen(false);
     setLeaveMenuOpen(false);
-    setPendingExitAction(null);
+    setControlsOpen(false);
+    setEmojiOpen(false);
     setChatOpen(!chatOpen);
   }
 
   async function copyValue(kind: 'code' | 'link') {
     if (!session) return;
-    const value = kind === 'code' ? roomCode(session.invite) : groupInviteUrl(session.invite);
-    await navigator.clipboard.writeText(value).catch(() => undefined);
+    const value = kind === 'code' ? (session.joinCode || session.invite.roomId.slice(0, 4).toUpperCase()) : groupInviteUrl(session.invite);
+    let copiedSuccessfully = false;
+    try {
+      await navigator.clipboard.writeText(value);
+      copiedSuccessfully = true;
+    } catch {
+      const fallback = document.createElement('textarea');
+      fallback.value = value;
+      fallback.setAttribute('readonly', '');
+      fallback.style.position = 'fixed';
+      fallback.style.opacity = '0';
+      document.body.append(fallback);
+      fallback.select();
+      copiedSuccessfully = document.execCommand('copy');
+      fallback.remove();
+    }
+    if (!copiedSuccessfully) {
+      setError('Não foi possível copiar automaticamente. Selecione o link e copie manualmente.');
+      return;
+    }
     setCopied(kind);
     window.setTimeout(() => setCopied(''), 1_500);
   }
@@ -1147,7 +1250,7 @@ export default function RoomApp() {
   const localScreen = localScreenStreamRef.current;
   const isOwner = Boolean(session?.ownerKey);
   const isLeader = selfId === leaderId;
-  const roomLabel = session ? session.invite.roomId.slice(0, 4).toUpperCase() : '';
+  const roomLabel = session ? (session.joinCode || session.invite.roomId.slice(0, 4)).toUpperCase() : '';
   const remoteParticipantCount = connectedParticipants.filter(participant => participant.id !== selfId).length;
   const connectedPeerCount = [...peersRef.current.values()].filter(peer => peer.pc.connectionState === 'connected').length;
   const connectionQuality = mode !== 'connected' || !connectedPeerCount || mediaLatency === null
@@ -1177,7 +1280,11 @@ export default function RoomApp() {
         )) : <div className="chat-empty"><Icon name="chat"/><strong>A conversa começa aqui</strong><span>As mensagens são temporárias e somem ao encerrar a chamada.</span></div>}
       </div>
       <form className="chat-composer" onSubmit={sendChat}>
-        <textarea value={chatValue} onChange={event => setChatValue(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={session ? 'Escrever mensagem…' : 'Entre em uma chamada para conversar'} maxLength={1000} disabled={!session}/>
+        <div className="emoji-picker-anchor" ref={emojiPickerRef}>
+          <button className={emojiOpen ? 'is-open' : ''} type="button" onClick={() => setEmojiOpen(open => !open)} disabled={!session} aria-expanded={emojiOpen} aria-label="Escolher emoji"><Icon name="smile"/></button>
+          {emojiOpen && <div className="emoji-picker" role="listbox" aria-label="Emojis">{CHAT_EMOJIS.map(emoji => <button key={emoji} type="button" role="option" aria-label={`Emoji ${emoji}`} onClick={() => insertEmoji(emoji)}>{emoji}</button>)}</div>}
+        </div>
+        <textarea ref={chatInputRef} value={chatValue} onChange={event => setChatValue(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={session ? 'Escrever mensagem…' : 'Entre em uma chamada para conversar'} maxLength={1000} disabled={!session}/>
         <button type="submit" disabled={!chatValue.trim() || !session} aria-label="Enviar mensagem"><Icon name="send"/></button>
       </form>
     </div>
@@ -1221,23 +1328,12 @@ export default function RoomApp() {
   ) : null;
 
   const exitPopover = leaveMenuOpen ? (
-    <section className="dock-popover exit-popover" aria-label="Opções para sair da chamada">
-      {pendingExitAction ? (
-        <>
-          <header><strong>{pendingExitAction === 'close' ? 'Encerrar a sala?' : 'Sair da chamada?'}</strong><small>CONFIRMAÇÃO</small></header>
-          <p>{pendingExitAction === 'close' ? 'A chamada terminará para todas as pessoas.' : 'A sala continuará ativa para quem permanecer.'}</p>
-          <div className="exit-confirm-actions">
-            <button type="button" onClick={() => setPendingExitAction(null)}>Cancelar</button>
-            <button className="is-danger" type="button" onClick={pendingExitAction === 'close' ? closeRoom : leaveRoom}>{pendingExitAction === 'close' ? 'Encerrar sala' : 'Sair agora'}</button>
-          </div>
-        </>
-      ) : (
-        <>
-          <header><strong>Sair da chamada</strong><small>ESCOLHA UMA AÇÃO</small></header>
-          <button type="button" onClick={() => setPendingExitAction('leave')}><Icon name="hangup"/><span><strong>Sair da chamada</strong><small>A sala continua para os demais</small></span></button>
-          {isOwner && <button className="is-danger" type="button" onClick={() => setPendingExitAction('close')}><Icon name="close"/><span><strong>Encerrar sala</strong><small>Desconecta todas as pessoas</small></span></button>}
-        </>
-      )}
+    <section className="dock-popover audio-popover exit-popover" aria-label="Opções para sair da chamada">
+      <header><strong>Sair da chamada</strong><small>AÇÕES DA SALA</small></header>
+      <div className="exit-options">
+        <button type="button" onClick={leaveRoom}><Icon name="hangup"/><span><strong>Sair da chamada</strong><small>A sala continua para quem permanecer</small></span></button>
+        {isOwner && <button className="is-danger" type="button" onClick={closeRoom}><Icon name="close"/><span><strong>Encerrar sala</strong><small>Desconecta todas as pessoas agora</small></span></button>}
+      </div>
     </section>
   ) : null;
 
@@ -1252,11 +1348,10 @@ export default function RoomApp() {
       ) : (
         <section className="panel-section unified-invite-section">
           <div className="section-heading"><h3>Convite da chamada</h3><small>SALA {roomLabel}</small></div>
-          <div className="invite-row"><input readOnly value={roomCode(session.invite)} aria-label="Código da chamada"/><button type="button" onClick={() => void copyValue('code')} aria-label="Copiar código"><Icon name="copy"/></button></div>
-          <div className="invite-actions"><button type="button" onClick={() => void copyValue('link')}><Icon name="link"/>{copied === 'link' ? 'Link copiado' : 'Copiar link'}</button></div>
+          <div className="invite-code-display"><span>Código curto</span><strong>{roomLabel || '••••'}</strong></div>
+          <div className="invite-actions"><button type="button" onClick={() => void copyValue('link')}><Icon name="link"/>{copied === 'link' ? 'Link copiado' : 'Copiar link'}</button><button type="button" onClick={() => setQrOpen(true)} disabled={!qrCode}><Icon name="qr"/>QR Code</button></div>
         </section>
       )}
-      {!mobile && (
         <section className="panel-section quality-section">
           <div className="section-heading"><h3>Qualidade do vídeo</h3><small>{automaticQuality ? 'AUTOMÁTICA' : 'MANUAL'}</small></div>
           <button className={`toggle-row ${automaticQuality ? 'is-active' : ''}`} type="button" role="switch" aria-checked={automaticQuality} onClick={() => { const next = !automaticQuality; setAutomaticQuality(next); if (next) void applyVideoProfile(720, 30); }}><Icon name="settings"/><span className="toggle-row-copy"><strong>Ajuste automático</strong><small>{activeResolution}p · até {activeFps} FPS</small></span><span className="toggle-row-switch"><i/></span></button>
@@ -1267,7 +1362,6 @@ export default function RoomApp() {
           </div>
           <p className="profile-summary"><i/>Bitrate adaptativo ativo</p>
         </section>
-      )}
       <p className="privacy-note">Voz e tela P2P · chat com fallback pela sala · nada é gravado</p>
     </div>
   );
@@ -1278,15 +1372,16 @@ export default function RoomApp() {
       <button className={playbackEnabled ? 'is-on' : ''} type="button" onClick={togglePlayback} aria-label={playbackEnabled ? 'Silenciar chamada' : 'Ouvir chamada'} data-label="Áudio"><Icon name={playbackEnabled ? 'volume' : 'volumeOff'}/></button>
       <div className="dock-split-control">
         <button className={microphoneEnabled ? 'is-on' : ''} type="button" onClick={() => void toggleMicrophone()} aria-label={microphoneEnabled ? 'Silenciar microfone' : 'Ativar microfone'} data-label="Microfone"><Icon name={microphoneEnabled ? 'microphone' : 'microphoneOff'}/></button>
-        <button className={`dock-chevron ${audioMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { setAudioMenuOpen(open => !open); setScreenMenuOpen(false); setLeaveMenuOpen(false); setPendingExitAction(null); }} aria-expanded={audioMenuOpen} aria-label="Configurações de áudio" data-label="Ajustes"><Icon name="chevronDown"/></button>
+        <button className={`dock-chevron ${audioMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { setAudioMenuOpen(open => !open); setScreenMenuOpen(false); setLeaveMenuOpen(false); }} aria-expanded={audioMenuOpen} aria-label="Configurações de áudio" data-label="Ajustes"><Icon name="chevronDown"/></button>
       </div>
-      {!mobile && <div className="dock-split-control screen-split-control">
+      <div className="dock-split-control screen-split-control">
         <button className={sharing ? 'is-on' : ''} type="button" onClick={() => void toggleScreenShare()} aria-label={sharing ? 'Parar compartilhamento' : 'Compartilhar tela'} aria-pressed={sharing} data-label={sharing ? 'Parar tela' : 'Compartilhar'}><Icon name="screen"/></button>
-        <button className={`dock-chevron ${screenMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { setScreenMenuOpen(open => !open); setAudioMenuOpen(false); setLeaveMenuOpen(false); setPendingExitAction(null); }} aria-expanded={screenMenuOpen} aria-label="Configurações da tela" data-label="Ajustes"><Icon name="chevronDown"/></button>
-      </div>}
+        <button className={`dock-chevron ${screenMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { setScreenMenuOpen(open => !open); setAudioMenuOpen(false); setLeaveMenuOpen(false); }} aria-expanded={screenMenuOpen} aria-label="Configurações da tela" data-label="Ajustes"><Icon name="chevronDown"/></button>
+      </div>
       <button className={activeChat ? 'is-on' : ''} type="button" onClick={toggleChatSidebar} aria-label={activeChat ? 'Fechar chat' : 'Abrir chat'} data-label="Chat"><Icon name="chat"/></button>
+      {mobile && <button className={controlsOpen ? 'is-on mobile-controls-trigger' : 'mobile-controls-trigger'} type="button" onClick={() => { setControlsOpen(open => !open); setChatOpen(false); setProfileOpen(false); setAudioMenuOpen(false); setScreenMenuOpen(false); setLeaveMenuOpen(false); }} aria-expanded={controlsOpen} aria-label="Abrir controles" data-label="Controles"><Icon name="settings"/></button>}
       <span className="dock-divider"/>
-      <button className="hangup" type="button" onClick={() => { setLeaveMenuOpen(open => !open); setPendingExitAction(null); setAudioMenuOpen(false); setScreenMenuOpen(false); }} aria-expanded={leaveMenuOpen} aria-label="Opções para sair da chamada" data-label="Sair"><Icon name="hangup"/></button>
+      <button className="hangup" type="button" onClick={() => { setLeaveMenuOpen(open => !open); setAudioMenuOpen(false); setScreenMenuOpen(false); }} aria-expanded={leaveMenuOpen} aria-label="Opções para sair da chamada" data-label="Sair"><Icon name="hangup"/></button>
       {audioPopover}
       {screenPopover}
       {exitPopover}
@@ -1306,19 +1401,19 @@ export default function RoomApp() {
   ) : (
     <div className="stage-empty unified-stage-empty">
       {session && mode === 'connected' && connectedParticipants.length ? (
-        <div className="stage-avatars">{connectedParticipants.map(participant => <Avatar key={participant.id} avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} size="large"/>)}</div>
+        <div className="stage-identities">{connectedParticipants.map(participant => <div className="stage-identity" key={participant.id}><Avatar avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} leader={participant.id === leaderId} size="large"/><strong>{participant.id === selfId ? 'Você' : participant.name}</strong><small>{participant.status}</small></div>)}</div>
       ) : <div className="stage-echo"><Avatar avatar="echo" name="Echo" size="large"/></div>}
       <span className="eyebrow">Voz e tela P2P · chat resiliente</span>
       <h1>{!session ? 'Inicie uma chamada' : mode === 'connecting' ? 'Entrando na chamada' : mode === 'error' ? 'Sala indisponível' : 'Chamada em andamento'}</h1>
       <p>{!session ? 'Crie uma sala ou entre com um código. Depois, qualquer pessoa no computador pode compartilhar a própria tela.' : mode === 'connecting' ? 'Reconectando à sala sem interromper quem já está aqui…' : mode === 'error' ? error : 'A conversa continua normalmente mesmo quando nenhuma tela está sendo compartilhada.'}</p>
-      {!session && <button className="primary-action" type="button" onClick={() => void createRoom()}><Icon name="users"/> Iniciar chamada</button>}
+      {!session && <div className="stage-entry-actions"><button className="primary-action" type="button" onClick={() => void createRoom()}><Icon name="users"/> Iniciar chamada</button>{mobile && <button className="secondary-action" type="button" onClick={() => { setControlsOpen(true); setChatOpen(false); }}><Icon name="link"/> Entrar com código</button>}</div>}
       {mode === 'error' && <button className="primary-action" type="button" onClick={leaveRoom}>Voltar</button>}
       <small className="stage-note">Voz, tela e chat temporários · nada é gravado</small>
     </div>
   );
 
   return (
-    <div className={`app room-app unified-room-app ${mobile ? 'viewer-mode is-mobile-room' : ''} ${activeChat ? 'is-chat-open' : ''}`}>
+    <div className={`app room-app unified-room-app ${mobile ? 'viewer-mode is-mobile-room' : ''} ${activeChat ? 'is-chat-open' : ''} ${controlsOpen ? 'is-controls-open' : ''}`}>
       <header className="topbar">
         <div className="brand"><span className="unified-brand-mark"><Icon name="screen"/></span><strong>ScreenLink</strong></div>
         <div className={`status-pill room-status-${connectionQuality}`}><i/>{session ? connectionStatusLabel : 'Pronto'}</div>
@@ -1331,32 +1426,35 @@ export default function RoomApp() {
             </header>
             {chatPanel}
             <button ref={profileBarRef} className="unified-profile-bar" type="button" onClick={() => setProfileOpen(open => !open)} aria-expanded={profileOpen} aria-label={profileOpen ? 'Fechar perfil' : 'Abrir perfil'}>
-              <Avatar avatar={profile.avatar} name={profile.name} speaking={speakingIds.has(selfId)} size="small"/>
-              <span><strong>{profile.name}</strong><small>{session ? microphoneEnabled ? 'Microfone ativo' : 'Microfone desligado' : 'Pronto para entrar'}</small></span>
+              <Avatar avatar={profile.avatar} name={profile.name} speaking={speakingIds.has(selfId)} leader={Boolean(selfId && selfId === leaderId)} size="small"/>
+              <span><strong>{profile.name}</strong><small>{profile.status}</small></span>
               <Icon name="settings"/>
             </button>
           </aside>
         <section className={`share-stage unified-room-stage ${sharingParticipants.length ? 'has-screens' : ''}`}>
           {stageContent}
           {session && !sharingParticipants.length && mode === 'connected' && (
-            <div className="participant-rail">{connectedParticipants.map(participant => <div key={participant.id} className={speakingIds.has(participant.id) ? 'is-speaking' : ''}><Avatar avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} size="small"/><span>{participant.id === selfId ? 'Você' : participant.name}</span></div>)}</div>
+            <div className="participant-rail">{connectedParticipants.map(participant => <div key={participant.id} className={speakingIds.has(participant.id) ? 'is-speaking' : ''}><Avatar avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} leader={participant.id === leaderId} size="small"/><span><strong>{participant.id === selfId ? 'Você' : participant.name}</strong><small>{participant.status}</small></span></div>)}</div>
           )}
           {callDock}
         </section>
-        <aside className="control-panel unified-control-panel">
-          <div className="panel-header"><div><h2>Controles</h2></div><span className="audience-count">{connectedParticipants.length}/{maxParticipants}</span></div>
+        <aside className={`control-panel unified-control-panel ${controlsOpen ? 'is-open' : ''}`} aria-hidden={mobile && !controlsOpen}>
+          <div className="panel-header"><div><h2>Controles</h2></div><span className="audience-count">{connectedParticipants.length}/{maxParticipants}</span>{mobile && <button className="mobile-panel-close" type="button" onClick={() => setControlsOpen(false)} aria-label="Fechar controles"><Icon name="close"/></button>}</div>
+          {mobile && <button className="mobile-control-profile" type="button" onClick={() => { setProfileOpen(true); setControlsOpen(false); }}><Avatar avatar={profile.avatar} name={profile.name} leader={Boolean(selfId && selfId === leaderId)} size="small"/><span><strong>{profile.name}</strong><small>{profile.status}</small></span><Icon name="settings"/></button>}
           <div className="panel-view">{callPanel}</div>
         </aside>
       </main>
       {profileOpen && (
         <div ref={profilePopoverRef} className="room-popover profile-popover unified-profile-popover">
-          <header><div><span className="eyebrow">SEU PERFIL</span><h3>Como você aparece</h3></div><button type="button" onClick={() => { commitProfileName(); setProfileOpen(false); }} aria-label="Fechar perfil"><Icon name="close"/></button></header>
+          <header><div><span className="eyebrow">SEU PERFIL</span><h3>Como você aparece</h3></div><button type="button" onClick={() => { commitProfileName(); commitProfileStatus(); setProfileOpen(false); }} aria-label="Fechar perfil"><Icon name="close"/></button></header>
           <label htmlFor="profile-name">Nome</label><input id="profile-name" value={profileNameDraft} onChange={event => setProfileNameDraft(event.target.value)} onBlur={commitProfileName} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { setProfileNameDraft(profileRef.current.name); event.currentTarget.blur(); } }} maxLength={28}/>
+          <label htmlFor="profile-status">Mensagem de status</label><input id="profile-status" value={profileStatusDraft} onChange={event => setProfileStatusDraft(event.target.value)} onBlur={commitProfileStatus} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { setProfileStatusDraft(profileRef.current.status); event.currentTarget.blur(); } }} maxLength={64} placeholder="Disponível"/>
           <div className="profile-photo-heading"><label>Foto</label><small>{profileSaveState === 'saving' ? 'SALVANDO…' : profileSaveState === 'saved' ? profileStorageKind() === 'sqlite' ? 'SALVO NO SQLITE LOCAL' : 'SALVO NESTE NAVEGADOR' : profileSaveState === 'error' ? 'ERRO AO SALVAR' : 'ARMAZENAMENTO LOCAL'}</small></div>
           <div className="profile-photo-actions"><Avatar avatar={profile.avatar} name={profile.name} size="normal"/><label className="profile-photo-upload">{avatarUploading ? 'Preparando…' : 'Escolher foto'}<input type="file" accept="image/*" onChange={event => void uploadAvatar(event)} disabled={avatarUploading}/></label>{profile.avatar.startsWith('data:image/') && <button type="button" onClick={removeCustomAvatar}>Remover</button>}</div>
           <label>Avatares do app</label><div className="avatar-picker">{AVATARS.map(avatar => <button className={profile.avatar === avatar.id ? 'selected' : ''} type="button" key={avatar.id} onClick={() => updateProfile({ avatar: avatar.id })}><Avatar avatar={avatar.id} name={avatar.label}/><span>{avatar.label}</span></button>)}</div>
         </div>
       )}
+      {qrOpen && <div className="modal-backdrop" role="presentation" onPointerDown={event => { if (event.target === event.currentTarget) setQrOpen(false); }}><section className="qr-modal" role="dialog" aria-modal="true" aria-labelledby="room-qr-title"><span className="eyebrow">SALA {roomLabel}</span><h2 id="room-qr-title">Entrar pelo QR Code</h2><p>Aponte a câmera do celular para abrir o convite completo.</p>{qrCode ? <img src={qrCode} alt={`QR Code da sala ${roomLabel}`}/> : <div className="qr-loading">Gerando QR Code…</div>}<button type="button" onClick={() => setQrOpen(false)}>Fechar</button></section></div>}
       {error && mode !== 'error' && <button className="call-error" type="button" onClick={() => setError('')}>{error}<Icon name="close"/></button>}
     </div>
   );

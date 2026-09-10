@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocket } from 'ws';
 
 const PROJECT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const roomCss = await readFile(path.join(PROJECT_DIR, 'src', 'room.css'), 'utf8');
+assert.match(roomCss, /\.unified-room-stage \.screen-tile video\s*\{[^}]*opacity:\s*1;/, 'The active screen tile must override the legacy hidden-video opacity.');
 const PORT = 19_000 + Math.floor(Math.random() * 1_000);
 const HTTP_URL = `http://127.0.0.1:${PORT}`;
 const WS_URL = `ws://127.0.0.1:${PORT}/ws`;
@@ -211,11 +214,14 @@ try {
     token,
     ownerKey,
     maxParticipants: 8,
-    profile: { name: 'Criador', avatar: 'orbit', device: 'desktop' }
+    profile: { name: 'Criador', avatar: 'orbit', status: 'Pronto para jogar', device: 'desktop' }
   });
   const ownerSession = await ownerReady;
   assert.equal(ownerSession.leaderId, ownerSession.selfId);
   assert.equal(ownerSession.participants.length, 1);
+  assert.match(ownerSession.joinCode, /^[A-Z2-9]{4}$/);
+  assert.deepEqual(ownerSession.invite, { roomId, token });
+  assert.equal(ownerSession.participants[0].status, 'Pronto para jogar');
 
   const memberReady = nextMessage(roomMember, 'room-ready');
   const ownerSawMember = nextMessage(roomOwner, 'participant-joined');
@@ -223,7 +229,7 @@ try {
     type: 'join-group-room',
     roomId,
     token,
-    profile: { name: 'Membro 1', avatar: 'nova', device: 'desktop' }
+    profile: { name: 'Membro 1', avatar: 'nova', status: 'Ouvindo', device: 'desktop' }
   });
   const memberSession = await memberReady;
   assert.equal((await ownerSawMember).participant.id, memberSession.selfId);
@@ -232,13 +238,13 @@ try {
   const memberTwoReady = nextMessage(roomMemberTwo, 'room-ready');
   const ownerSawMemberTwo = nextMessage(roomOwner, 'participant-joined');
   send(roomMemberTwo, {
-    type: 'join-group-room',
-    roomId,
-    token,
-    profile: { name: 'Membro 2', avatar: 'pixel', device: 'mobile' }
+    type: 'join-group-room-code',
+    code: ownerSession.joinCode,
+    profile: { name: 'Membro 2', avatar: 'pixel', status: 'No celular', device: 'mobile' }
   });
   const memberTwoSession = await memberTwoReady;
   assert.equal((await ownerSawMemberTwo).participant.id, memberTwoSession.selfId);
+  assert.deepEqual(memberTwoSession.invite, { roomId, token });
 
   const memberSignal = nextMessage(roomMember, 'peer-signal');
   send(roomMemberTwo, { type: 'peer-signal', targetId: memberSession.selfId, kind: 'offer', sdp: { type: 'offer', sdp: 'v=0\r\n' } });
@@ -259,13 +265,14 @@ try {
   const ownerState = nextMessage(roomOwner, 'participant-state');
   send(roomMember, {
     type: 'participant-state',
-    profile: { name: 'Membro 1', avatar: 'nova', device: 'desktop' },
+    profile: { name: 'Membro 1', avatar: 'nova', status: 'Compartilhando agora', device: 'desktop' },
     sharing: true,
     microphoneEnabled: true
   });
   const sharedState = await ownerState;
   assert.equal(sharedState.participant.sharing, true);
   assert.equal(sharedState.participant.microphoneEnabled, true);
+  assert.equal(sharedState.participant.status, 'Compartilhando agora');
 
   const promoted = nextMessage(roomMember, 'leader-changed');
   roomOwner.terminate();
@@ -282,7 +289,7 @@ try {
     ownerKey,
     participantId: ownerSession.selfId,
     maxParticipants: 8,
-    profile: { name: 'Criador', avatar: 'orbit', device: 'desktop' }
+    profile: { name: 'Criador', avatar: 'orbit', status: 'Voltei', device: 'desktop' }
   });
   const reclaimedSession = await reclaimedReady;
   assert.equal(reclaimedSession.selfId, ownerSession.selfId);

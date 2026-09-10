@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import { networkInterfaces } from 'node:os';
 import path from 'node:path';
@@ -112,9 +112,9 @@ const rooms = new Map();
 const clients = new WeakMap();
 
 /**
- * @typedef {{name: string, avatar: string, device: 'desktop' | 'mobile'}} GroupProfile
+ * @typedef {{name: string, avatar: string, status: string, device: 'desktop' | 'mobile'}} GroupProfile
  * @typedef {{id: string, socket: WebSocket | null, profile: GroupProfile, joinedAt: number, sharing: boolean, microphoneEnabled: boolean, isOwner: boolean, expiryTimer: NodeJS.Timeout | null}} GroupParticipant
- * @typedef {{tokenHash: Buffer, ownerKeyHash: Buffer, ownerId: string, leaderId: string, participants: Map<string, GroupParticipant>, maxParticipants: number, expiryTimer: NodeJS.Timeout | null}} GroupRoom
+ * @typedef {{token: string, tokenHash: Buffer, joinCode: string, ownerKeyHash: Buffer, ownerId: string, leaderId: string, participants: Map<string, GroupParticipant>, maxParticipants: number, expiryTimer: NodeJS.Timeout | null}} GroupRoom
  */
 /** @type {Map<string, GroupRoom>} */
 const groupRooms = new Map();
@@ -146,6 +146,21 @@ function validToken(value) {
   return typeof value === 'string' && /^[A-Za-z0-9_-]{32,128}$/.test(value);
 }
 
+function validJoinCode(value) {
+  return typeof value === 'string' && /^[A-Z2-9]{4}$/.test(value.trim().toUpperCase());
+}
+
+const JOIN_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+function allocateJoinCode() {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const bytes = randomBytes(4);
+    const code = Array.from(bytes, byte => JOIN_CODE_ALPHABET[byte % JOIN_CODE_ALPHABET.length]).join('');
+    if (![...groupRooms.values()].some(room => room.joinCode === code)) return code;
+  }
+  throw new Error('Não foi possível reservar um código curto para a sala.');
+}
+
 function validPeerId(value) {
   return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
@@ -157,8 +172,9 @@ function normalizeProfile(value) {
   const isPreset = /^[a-z0-9-]{1,24}$/i.test(avatarValue);
   const isLocalPhoto = /^data:image\/(?:jpeg|png|webp);base64,[a-z0-9+/=]+$/i.test(avatarValue) && avatarValue.length <= 120_000;
   const avatar = isPreset || isLocalPhoto ? avatarValue : 'orbit';
+  const status = String(source.status || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 64) || 'Disponível';
   const device = source.device === 'mobile' ? 'mobile' : 'desktop';
-  return { name, avatar, device };
+  return { name, avatar, status, device };
 }
 
 function publicParticipant(participant) {
@@ -166,6 +182,7 @@ function publicParticipant(participant) {
     id: participant.id,
     name: participant.profile.name,
     avatar: participant.profile.avatar,
+    status: participant.profile.status,
     device: participant.profile.device,
     joinedAt: participant.joinedAt,
     sharing: participant.sharing,
@@ -246,6 +263,8 @@ function attachGroupParticipant(roomId, room, participant, socket, profile, resu
   sendJson(socket, {
     type: 'room-ready',
     roomId,
+    joinCode: room.joinCode,
+    invite: { roomId, token: room.token },
     selfId: participant.id,
     leaderId: room.leaderId || participant.id,
     maxParticipants: room.maxParticipants,
@@ -517,7 +536,9 @@ websocketServer.on('connection', socket => {
         expiryTimer: null
       };
       room = {
+        token: message.token,
         tokenHash: tokenHash(message.token),
+        joinCode: allocateJoinCode(),
         ownerKeyHash: tokenHash(message.ownerKey),
         ownerId,
         leaderId: ownerId,
@@ -530,17 +551,23 @@ websocketServer.on('connection', socket => {
       return;
     }
 
-    if (message.type === 'join-group-room') {
+    if (message.type === 'join-group-room' || message.type === 'join-group-room-code') {
       if (clients.has(socket) || groupClients.has(socket)) {
         fail(socket, 'ALREADY_JOINED', 'Este dispositivo já está em uma sala.');
         return;
       }
-      if (!validRoomId(message.roomId) || !validToken(message.token)) {
+      const joiningByCode = message.type === 'join-group-room-code';
+      const normalizedCode = String(message.code || '').trim().toUpperCase();
+      if (joiningByCode ? !validJoinCode(normalizedCode) : !validRoomId(message.roomId) || !validToken(message.token)) {
         fail(socket, 'BAD_ROOM', 'O código da sala não é válido.');
         return;
       }
-      const room = groupRooms.get(message.roomId);
-      if (!room || !tokenMatches(room.tokenHash, message.token)) {
+      const roomEntry = joiningByCode
+        ? [...groupRooms.entries()].find(([, candidate]) => candidate.joinCode === normalizedCode)
+        : [message.roomId, groupRooms.get(message.roomId)];
+      const roomId = roomEntry?.[0];
+      const room = roomEntry?.[1];
+      if (!room || !roomId || (!joiningByCode && !tokenMatches(room.tokenHash, message.token))) {
         fail(socket, 'ROOM_NOT_FOUND', 'A sala não existe mais ou o código está incorreto.');
         return;
       }
@@ -565,7 +592,7 @@ websocketServer.on('connection', socket => {
         };
         room.participants.set(participant.id, participant);
       }
-      attachGroupParticipant(message.roomId, room, participant, socket, message.profile, resumed);
+      attachGroupParticipant(roomId, room, participant, socket, message.profile, resumed);
       return;
     }
 

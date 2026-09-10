@@ -15,6 +15,10 @@ function normalizeAvatar(value) {
   return 'orbit';
 }
 
+function normalizeStatus(value) {
+  return String(value || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 64) || 'Disponível';
+}
+
 export function createProfileStore(userDataDirectory) {
   mkdirSync(userDataDirectory, { recursive: true });
   const databasePath = path.join(userDataDirectory, 'screenlink.sqlite');
@@ -25,17 +29,24 @@ export function createProfileStore(userDataDirectory) {
       id INTEGER PRIMARY KEY CHECK (id = 1),
       name TEXT NOT NULL,
       avatar TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'Disponível',
       updated_at INTEGER NOT NULL
     );
   `);
 
-  const read = database.prepare('SELECT name, avatar FROM local_profile WHERE id = 1');
+  const columns = database.prepare('PRAGMA table_info(local_profile)').all();
+  if (!columns.some(column => column.name === 'status')) {
+    database.exec("ALTER TABLE local_profile ADD COLUMN status TEXT NOT NULL DEFAULT 'Disponível'");
+  }
+
+  const read = database.prepare('SELECT name, avatar, status FROM local_profile WHERE id = 1');
   const write = database.prepare(`
-    INSERT INTO local_profile (id, name, avatar, updated_at)
-    VALUES (1, ?, ?, ?)
+    INSERT INTO local_profile (id, name, avatar, status, updated_at)
+    VALUES (1, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       avatar = excluded.avatar,
+      status = excluded.status,
       updated_at = excluded.updated_at
   `);
 
@@ -43,10 +54,10 @@ export function createProfileStore(userDataDirectory) {
     databasePath,
     load() {
       const row = read.get();
-      return row ? { name: normalizeName(row.name), avatar: normalizeAvatar(row.avatar) } : null;
+      return row ? { name: normalizeName(row.name), avatar: normalizeAvatar(row.avatar), status: normalizeStatus(row.status) } : null;
     },
     save(profile) {
-      write.run(normalizeName(profile?.name), normalizeAvatar(profile?.avatar), Date.now());
+      write.run(normalizeName(profile?.name), normalizeAvatar(profile?.avatar), normalizeStatus(profile?.status), Date.now());
     },
     close() {
       database.close();
