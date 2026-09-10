@@ -669,10 +669,21 @@ function ScreenLinkMascot() {
   );
 }
 
+function ScreenLinkMark() {
+  return (
+    <svg className="brand-mark" viewBox="0 0 48 48" aria-hidden="true" fill="none">
+      <rect x="5.5" y="7" width="37" height="29" rx="7" />
+      <path d="M17 42h14M24 36v6" />
+      <path d="M21.5 18.5h-2.25a5.5 5.5 0 0 0 0 11h5.5a5.5 5.5 0 0 0 4.78-2.77" />
+      <path d="M26.5 29.5h2.25a5.5 5.5 0 0 0 0-11h-5.5a5.5 5.5 0 0 0-4.78 2.77" />
+    </svg>
+  );
+}
+
 function Header({ status, live = false }: { status: string; live?: boolean }) {
   return (
     <header className="topbar">
-      <div className="brand"><span className="brand-mark"><span /></span><strong>ScreenLink</strong></div>
+      <div className="brand"><ScreenLinkMark /><strong>ScreenLink</strong></div>
       {!live && <div className="status-pill"><i />{status}</div>}
     </header>
   );

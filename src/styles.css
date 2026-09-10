@@ -51,8 +51,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .app:not(.viewer-mode) .topbar { border-bottom: 0; background: #070707; }
 .brand { display: flex; align-items: center; gap: .7rem; font-family: "Segoe UI Variable Text", "Segoe UI Variable", "Aptos", "Segoe UI", sans-serif; }
 .brand strong { font-size: .98rem; font-weight: 550; letter-spacing: -.015em; }
-.brand-mark { width: 1.35rem; height: 1.35rem; border: 1px solid #777; border-radius: .32rem; display: grid; place-items: center; }
-.brand-mark span { width: .48rem; height: .48rem; border-radius: .1rem; background: #eee; transition: background var(--fast) var(--ease-out); }
+.brand-mark { width: 1.48rem; height: 1.48rem; display: block; color: #ececec; stroke: currentColor; stroke-width: 3.4; stroke-linecap: round; stroke-linejoin: round; transition: color var(--standard), transform var(--standard) var(--ease-out); }
+.brand:hover .brand-mark { color: #fff; transform: translateY(-1px); }
 .status-pill { min-height: 2rem; padding: 0 .8rem; border-radius: 999px; display: flex; align-items: center; gap: .5rem; color: #bdbdbd; background: #10171b; font-size: .875rem; font-weight: 520; }
 .status-pill i { width: .42rem; height: .42rem; border-radius: 50%; background: #727272; }
 
@@ -566,7 +566,7 @@ h1, h2, p { margin-top: 0; }
   .topbar { min-height: 3.5rem; padding-right: max(1rem, env(safe-area-inset-right)); padding-left: max(1rem, env(safe-area-inset-left)); }
   .brand { gap: .55rem; }
   .brand strong { font-size: .94rem; }
-  .brand-mark { width: 1.25rem; height: 1.25rem; }
+  .brand-mark { width: 1.38rem; height: 1.38rem; }
   .status-pill { min-height: 2rem; padding: 0 .7rem; font-size: .82rem; }
   .share-stage { min-height: 32rem; align-items: center; }
   .stage-empty { width: 100%; padding: 2rem 1.25rem; }
