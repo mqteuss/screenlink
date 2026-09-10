@@ -1,14 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { createPrivateRoom, parseInvite, signalUrl, type IceServerConfig, type Invite, type RoomParticipant, type RoomProfile, type SessionDescription } from './protocol';
+import { loadStoredProfile, prepareAvatar, profileStorageKind, saveStoredProfile } from './profileStore';
 import './room.css';
 
 type RoomMode = 'landing' | 'connecting' | 'connected' | 'error';
-type IconName = 'screen' | 'microphone' | 'microphoneOff' | 'volume' | 'volumeOff' | 'chat' | 'hangup' | 'link' | 'copy' | 'settings' | 'users' | 'crown' | 'close' | 'chevron';
+type IconName = 'screen' | 'microphone' | 'microphoneOff' | 'volume' | 'volumeOff' | 'chat' | 'send' | 'hangup' | 'link' | 'copy' | 'settings' | 'users' | 'crown' | 'close' | 'chevron' | 'chevronDown';
+type ExitAction = 'leave' | 'close';
 type Session = { invite: Invite; ownerKey?: string; participantId?: string; maxParticipants?: number };
 type ChatMessage = { id: string; senderId: string; senderName: string; text: string; sentAt: number; system?: boolean };
 type Resolution = 360 | 480 | 720 | 1080;
 type FrameRate = 15 | 30 | 45 | 60;
-type PanelSection = 'call' | 'chat';
 type AudioSettings = { inputDeviceId: string; outputDeviceId: string; inputVolume: number; outputVolume: number; echoCancellation: boolean; noiseSuppression: boolean; autoGainControl: boolean };
 
 type PeerRecord = {
@@ -46,6 +47,17 @@ const CHAT_LIMIT = 160;
 const RESOLUTIONS: Resolution[] = [360, 480, 720, 1080];
 const FRAME_RATES: FrameRate[] = [15, 30, 45, 60];
 const PARTICIPANT_LIMITS = [2, 3, 4, 5, 6, 7, 8];
+const PREMIUM_PARTICLES = [
+  ['11%', '26%', '.8px', '15.2s', '-2.6s', '.55px'],
+  ['23%', '67%', '1.1px', '17.8s', '-11.4s', '.8px'],
+  ['34%', '39%', '.65px', '13.9s', '-7.1s', '.45px'],
+  ['47%', '74%', '.9px', '19.3s', '-3.8s', '.7px'],
+  ['58%', '20%', '1px', '16.6s', '-13.2s', '.6px'],
+  ['69%', '53%', '.7px', '14.7s', '-5.4s', '.5px'],
+  ['79%', '31%', '1.15px', '20.1s', '-16.8s', '.85px'],
+  ['89%', '70%', '.72px', '18.4s', '-9.7s', '.55px'],
+  ['96%', '44%', '.55px', '15.8s', '-1.9s', '.4px']
+] as const;
 const VIDEO_PRESETS: Record<Resolution, { width: number; height: number; bitrate: number }> = {
   360: { width: 640, height: 360, bitrate: 900_000 },
   480: { width: 854, height: 480, bitrate: 1_600_000 },
@@ -70,21 +82,23 @@ function Icon({ name }: { name: IconName }) {
     volume: <><path d="M5 10v4h4l5 4V6l-5 4H5Z"/><path d="M17 9a4 4 0 0 1 0 6M19.5 6.5a7.5 7.5 0 0 1 0 11"/></>,
     volumeOff: <><path d="M5 10v4h4l5 4V6l-5 4H5ZM17 9l5 6M22 9l-5 6"/></>,
     chat: <path d="M4 5.5h16v11H9l-5 3v-14Z"/>,
-    hangup: <path d="M5 15.5c4.7-3.7 9.3-3.7 14 0M7.3 13.9 5 17m11.7-3.1L19 17"/>,
+    send: <><path d="M12 20V5"/><path d="m6.5 10.5 5.5-5.5 5.5 5.5"/></>,
+    hangup: <path d="M4.2 15.1c4.9-4.4 10.7-4.4 15.6 0 .7.6.7 1.7.1 2.3l-1.3 1.3c-.5.5-1.3.6-1.9.2l-2.2-1.5c-.4-.3-.7-.8-.6-1.3l.1-1.1a10.8 10.8 0 0 0-4 0l.1 1.1c.1.5-.2 1-.6 1.3l-2.2 1.5c-.6.4-1.4.3-1.9-.2l-1.3-1.3c-.6-.6-.6-1.7.1-2.3Z"/>,
     link: <><path d="M9.5 14.5 14.5 9"/><path d="M7.5 17H6a4 4 0 0 1 0-8h4M16.5 7H18a4 4 0 0 1 0 8h-4"/></>,
     copy: <><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></>,
     settings: <><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9 7 7M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></>,
     users: <><circle cx="9" cy="9" r="3"/><path d="M3.5 20c.4-4 2.2-6 5.5-6s5.1 2 5.5 6M16 6.5a3 3 0 0 1 0 5.8M16.5 14c2.5.5 3.7 2.4 4 5"/></>,
     crown: <path d="m3 7 4.5 4L12 5l4.5 6L21 7l-2 11H5L3 7Z"/>,
     close: <path d="m6 6 12 12M18 6 6 18"/>,
-    chevron: <path d="m9 6 6 6-6 6"/>
+    chevron: <path d="m9 6 6 6-6 6"/>,
+    chevronDown: <path d="m6 9 6 6 6-6"/>
   };
   return <svg className={`room-icon icon icon-${name}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
 
-function SegmentedSelector<T extends number>({ label, suffix, options, value, disabled = false, premium, onChange }: { label: string; suffix: string; options: T[]; value: T; disabled?: boolean; premium?: T; onChange: (value: T) => void }) {
+function SegmentedSelector<T extends number>({ label, suffix, options, value, disabled = false, premium, fullWidth = false, onChange }: { label: string; suffix: string; options: T[]; value: T; disabled?: boolean; premium?: T; fullWidth?: boolean; onChange: (value: T) => void }) {
   const activeIndex = Math.max(0, options.indexOf(value));
-  return <fieldset className="profile-fieldset"><legend><span>{label}</span><small>{suffix}</small></legend><div className={`segmented-control ${premium === value ? 'is-premium-selected' : ''}`} style={{ '--active-index': activeIndex, '--option-count': options.length } as React.CSSProperties}>{options.map(option => <button key={option} className={`${option === value ? 'is-active' : ''} ${option === premium ? 'is-premium' : ''}`} type="button" disabled={disabled} onClick={() => onChange(option)}>{option}{label === 'Resolução' ? 'p' : ''}</button>)}</div></fieldset>;
+  return <fieldset className={`profile-fieldset ${fullWidth ? 'is-full-width' : ''}`}><legend><span>{label}</span><small>{suffix}</small></legend><div className={`segmented-control ${premium === value ? 'is-premium-selected' : ''}`} style={{ '--active-index': activeIndex, '--option-count': options.length } as React.CSSProperties}>{premium === value && <span className="premium-particles" aria-hidden="true">{PREMIUM_PARTICLES.map(([x, y, size, duration, delay, jitter], index) => <i key={index} style={{ '--particle-x': x, '--particle-y': y, '--particle-size': size, '--particle-duration': duration, '--particle-delay': delay, '--particle-jitter': jitter } as React.CSSProperties}/>)}</span>}{options.map(option => <button key={option} className={`${option === value ? 'is-active' : ''} ${option === premium ? 'is-premium' : ''}`} type="button" disabled={disabled} onClick={() => onChange(option)}>{option}{label === 'Resolução' ? 'p' : ''}</button>)}</div></fieldset>;
 }
 
 function MascotMark() {
@@ -100,6 +114,9 @@ function MascotMark() {
 }
 
 function Avatar({ avatar, name, speaking = false, size = 'normal' }: { avatar: string; name: string; speaking?: boolean; size?: 'small' | 'normal' | 'large' }) {
+  if (/^data:image\/(?:jpeg|png|webp);base64,/i.test(avatar)) {
+    return <span className={`preset-avatar avatar-${size} custom-avatar ${speaking ? 'is-speaking' : ''}`} title={name}><img src={avatar} alt="" draggable={false}/></span>;
+  }
   const preset = AVATARS.find(item => item.id === avatar) ?? AVATARS[0];
   const gradientId = `avatar-bg-${preset.id}`;
   return (
@@ -112,27 +129,53 @@ function Avatar({ avatar, name, speaking = false, size = 'normal' }: { avatar: s
         {preset.face === 'frog' && <><circle cx="21" cy="23" r="9" fill="#d9f3b8"/><circle cx="43" cy="23" r="9" fill="#d9f3b8"/><ellipse cx="32" cy="36" rx="21" ry="17" fill="#7db779"/><circle cx="21" cy="23" r="3"/><circle cx="43" cy="23" r="3"/><path d="M24 41c5 3 11 3 16 0" fill="none" stroke="#173c35" strokeWidth="2.5" strokeLinecap="round"/></>}
         {preset.face === 'cat' && <><path d="m14 23 5-13 10 9h6l10-9 5 13-4 29H18l-4-29Z" fill="rgba(45,32,81,.76)"/><path d="M23 31h5M36 31h5M28 42c3 2 5 2 8 0" fill="none" stroke="#fff" strokeWidth="2.6" strokeLinecap="round"/></>}
         {preset.face === 'bear' && <><circle cx="18" cy="20" r="8" fill="#784b52"/><circle cx="46" cy="20" r="8" fill="#784b52"/><circle cx="32" cy="34" r="20" fill="#a96f70"/><circle cx="25" cy="31" r="3"/><circle cx="39" cy="31" r="3"/><ellipse cx="32" cy="40" rx="7" ry="5" fill="#eed0bc"/></>}
-        {preset.face === 'owl' && <><path d="M12 20 23 12l9 7 9-7 11 8-5 31H17l-5-31Z" fill="rgba(27,40,82,.72)"/><circle cx="24" cy="31" r="9" fill="#e8f0ff"/><circle cx="40" cy="31" r="9" fill="#e8f0ff"/><circle cx="24" cy="31" r="3"/><circle cx="40" cy="31" r="3"/><path d="m29 40 3 4 3-4" fill="#ffd080"/></>}
+        {preset.face === 'owl' && <><path d="M16 18c4.7-4.7 10.8-4.8 16-1 5.2-3.8 11.3-3.7 16 1 4.3 4.3 5.7 12.9 3.2 22.1C48.8 49 41.8 54 32 54s-16.8-5-19.2-13.9C10.3 30.9 11.7 22.3 16 18Z" fill="rgba(27,40,82,.72)"/><circle cx="24" cy="31" r="9" fill="#e8f0ff"/><circle cx="40" cy="31" r="9" fill="#e8f0ff"/><circle cx="24" cy="31" r="3"/><circle cx="40" cy="31" r="3"/><path d="m29 40 3 4 3-4" fill="#ffd080"/></>}
       </svg>
     </span>
   );
 }
 
+function normalizeAvatar(value: unknown) {
+  const avatar = String(value || '');
+  if (AVATARS.some(item => item.id === avatar)) return avatar;
+  if (/^data:image\/(?:jpeg|png|webp);base64,[a-z0-9+/=]+$/i.test(avatar) && avatar.length <= 32_000) return avatar;
+  return 'orbit';
+}
+
 function RoomDevicePicker({ label, input = false, devices, value, onChange }: { label: string; input?: boolean; devices: MediaDeviceInfo[]; value: string; onChange: (deviceId: string) => void }) {
   const kind = input ? 'audioinput' : 'audiooutput';
   const [open, setOpen] = useState(false);
+  const pickerRef = useRef<HTMLDivElement>(null);
+  const closeTimerRef = useRef<number | null>(null);
   const available = devices.filter(device => device.kind === kind);
   const selected = available.find(device => device.deviceId === value);
-  return <div className={`room-device-picker ${open ? 'is-open' : ''}`}>
-    <button type="button" className="room-device-trigger" onClick={() => setOpen(current => !current)} aria-expanded={open}>
+  const openPicker = () => {
+    if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
+    setOpen(true);
+  };
+  const scheduleClose = () => {
+    if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = window.setTimeout(() => setOpen(false), 240);
+  };
+  useEffect(() => {
+    if (!open) return;
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      if (!pickerRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener('pointerdown', closeOnOutsideClick);
+    return () => document.removeEventListener('pointerdown', closeOnOutsideClick);
+  }, [open]);
+  useEffect(() => () => { if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current); }, []);
+  return <div ref={pickerRef} className={`room-device-picker ${open ? 'is-open' : ''}`} onPointerEnter={openPicker} onPointerLeave={scheduleClose}>
+    <button type="button" className="room-device-trigger" onClick={openPicker} aria-expanded={open}>
       <Icon name={kind === 'audioinput' ? 'microphone' : 'volume'}/><span><strong>{label}</strong><small>{selected?.label || 'Padrão do sistema'}</small></span><Icon name="chevron"/>
     </button>
-    {open && <div className="room-device-options" role="listbox" aria-label={label}>{[{ deviceId: '', label: 'Padrão do sistema' }, ...available].map((device, index) => <button key={`${device.deviceId || 'default'}-${index}`} type="button" role="option" aria-selected={device.deviceId === value} onClick={() => { onChange(device.deviceId); setOpen(false); }}><Icon name={kind === 'audioinput' ? 'microphone' : 'volume'}/><span>{device.label || `${label} ${index + 1}`}</span>{device.deviceId === value && <b>✓</b>}</button>)}</div>}
+    {open && <div className="room-device-options" role="listbox" aria-label={label} onPointerEnter={openPicker} onPointerLeave={scheduleClose}>{[{ deviceId: '', label: 'Padrão do sistema' }, ...available].map((device, index) => <button key={`${device.deviceId || 'default'}-${index}`} type="button" role="option" aria-selected={device.deviceId === value} onClick={() => { onChange(device.deviceId); setOpen(false); }}><Icon name={kind === 'audioinput' ? 'microphone' : 'volume'}/><span>{device.label || `${label} ${index + 1}`}</span>{device.deviceId === value && <b>✓</b>}</button>)}</div>}
   </div>;
 }
 
 function normalizeName(value: string) {
-  return value.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 28) || 'Participante';
+  return value.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 28) || 'Você';
 }
 
 function isMobileDevice() {
@@ -144,7 +187,7 @@ function loadProfile(): RoomProfile {
     const stored = JSON.parse(localStorage.getItem(PROFILE_KEY) || '{}') as Partial<RoomProfile>;
     return {
       name: normalizeName(String(stored.name || 'Você')),
-      avatar: AVATARS.some(item => item.id === stored.avatar) ? String(stored.avatar) : 'orbit',
+      avatar: normalizeAvatar(stored.avatar),
       device: isMobileDevice() ? 'mobile' : 'desktop'
     };
   } catch {
@@ -218,6 +261,10 @@ export default function RoomApp() {
   const initialOwner = useMemo(() => initialInvite ? null : loadOwnerSession(), [initialInvite]);
   const [profile, setProfile] = useState<RoomProfile>(() => loadProfile());
   const profileRef = useRef(profile);
+  const [profileNameDraft, setProfileNameDraft] = useState(profile.name);
+  const [profileStorageReady, setProfileStorageReady] = useState(false);
+  const [profileSaveState, setProfileSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [avatarUploading, setAvatarUploading] = useState(false);
   const [session, setSession] = useState<Session | null>(() => initialInvite ? { invite: initialInvite } : initialOwner);
   const sessionRef = useRef(session);
   const [mode, setMode] = useState<RoomMode>(session ? 'connecting' : 'landing');
@@ -228,7 +275,6 @@ export default function RoomApp() {
   const [selfId, setSelfId] = useState('');
   const selfIdRef = useRef('');
   const [leaderId, setLeaderId] = useState('');
-  const [panelSection, setPanelSection] = useState<PanelSection>('call');
   const [resolution, setResolution] = useState<Resolution>(720);
   const [fps, setFps] = useState<FrameRate>(30);
   const [automaticQuality, setAutomaticQuality] = useState(true);
@@ -240,7 +286,7 @@ export default function RoomApp() {
   const [playbackEnabled, setPlaybackEnabled] = useState(true);
   const playbackEnabledRef = useRef(true);
   const [speakingIds, setSpeakingIds] = useState<Set<string>>(() => new Set());
-  const [chatOpen, setChatOpen] = useState(false);
+  const [chatOpen, setChatOpen] = useState(() => !isMobileDevice());
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const chatMessagesRef = useRef<ChatMessage[]>([]);
   const seenMessageIdsRef = useRef(new Set<string>());
@@ -253,6 +299,8 @@ export default function RoomApp() {
   const [mobile] = useState(isMobileDevice);
   const [audioMenuOpen, setAudioMenuOpen] = useState(false);
   const [screenMenuOpen, setScreenMenuOpen] = useState(false);
+  const [leaveMenuOpen, setLeaveMenuOpen] = useState(false);
+  const [pendingExitAction, setPendingExitAction] = useState<ExitAction | null>(null);
   const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
   const [audioSettings, setAudioSettings] = useState<AudioSettings>({ inputDeviceId: '', outputDeviceId: '', inputVolume: 100, outputVolume: 100, echoCancellation: true, noiseSuppression: true, autoGainControl: true });
 
@@ -268,10 +316,17 @@ export default function RoomApp() {
   const microphoneSourceStreamRef = useRef<MediaStream | null>(null);
   const audioSettingsRef = useRef(audioSettings);
   const dockRef = useRef<HTMLDivElement>(null);
+  const profileBarRef = useRef<HTMLButtonElement>(null);
+  const profilePopoverRef = useRef<HTMLDivElement>(null);
+  const chatLogRef = useRef<HTMLDivElement>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const disposedRef = useRef(false);
 
-  useEffect(() => { profileRef.current = profile; localStorage.setItem(PROFILE_KEY, JSON.stringify(profile)); }, [profile]);
+  useEffect(() => {
+    profileRef.current = profile;
+    const localAvatar = AVATARS.some(item => item.id === profile.avatar) ? profile.avatar : 'orbit';
+    localStorage.setItem(PROFILE_KEY, JSON.stringify({ ...profile, avatar: localAvatar }));
+  }, [profile]);
   useEffect(() => { sessionRef.current = session; }, [session]);
   useEffect(() => { participantsRef.current = participants; }, [participants]);
   useEffect(() => { microphoneEnabledRef.current = microphoneEnabled; }, [microphoneEnabled]);
@@ -281,21 +336,75 @@ export default function RoomApp() {
   useEffect(() => { audioSettingsRef.current = audioSettings; }, [audioSettings]);
 
   useEffect(() => {
+    let cancelled = false;
+    void loadStoredProfile().then(stored => {
+      if (cancelled || !stored) return;
+      const restored = {
+        ...profileRef.current,
+        name: normalizeName(stored.name),
+        avatar: normalizeAvatar(stored.avatar)
+      };
+      profileRef.current = restored;
+      setProfile(restored);
+      setProfileNameDraft(restored.name);
+    }).catch(() => undefined).finally(() => {
+      if (!cancelled) setProfileStorageReady(true);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!profileStorageReady) return;
+    setProfileSaveState('saving');
+    const timer = window.setTimeout(() => {
+      void saveStoredProfile({ name: profile.name, avatar: profile.avatar })
+        .then(() => setProfileSaveState('saved'))
+        .catch(() => setProfileSaveState('error'));
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [profile, profileStorageReady]);
+
+  useEffect(() => {
     if (!audioMenuOpen || !navigator.mediaDevices?.enumerateDevices) return;
     void navigator.mediaDevices.enumerateDevices().then(setAudioDevices).catch(() => setAudioDevices([]));
   }, [audioMenuOpen, microphoneEnabled]);
 
   useEffect(() => {
-    if (!audioMenuOpen && !screenMenuOpen) return;
+    if (!audioMenuOpen && !screenMenuOpen && !leaveMenuOpen) return;
     const dismiss = (event: PointerEvent) => {
       if (!dockRef.current?.contains(event.target as Node)) {
         setAudioMenuOpen(false);
         setScreenMenuOpen(false);
+        setLeaveMenuOpen(false);
+        setPendingExitAction(null);
       }
     };
     document.addEventListener('pointerdown', dismiss);
     return () => document.removeEventListener('pointerdown', dismiss);
-  }, [audioMenuOpen, screenMenuOpen]);
+  }, [audioMenuOpen, leaveMenuOpen, screenMenuOpen]);
+
+  useEffect(() => {
+    if (!profileOpen) return;
+    const dismiss = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!profilePopoverRef.current?.contains(target) && !profileBarRef.current?.contains(target)) {
+        commitProfileName();
+        setProfileOpen(false);
+      }
+    };
+    document.addEventListener('pointerdown', dismiss);
+    return () => document.removeEventListener('pointerdown', dismiss);
+  }, [profileOpen]);
+
+  useEffect(() => {
+    if (!chatOpen && profileOpen) setProfileOpen(false);
+  }, [chatOpen, profileOpen]);
+
+  useLayoutEffect(() => {
+    const log = chatLogRef.current;
+    if (!log || !chatOpen) return;
+    log.scrollTop = log.scrollHeight;
+  }, [chatMessages, chatOpen, chatValue]);
 
   const appendMessage = useCallback((message: ChatMessage) => {
     if (seenMessageIdsRef.current.has(message.id)) return;
@@ -776,12 +885,41 @@ export default function RoomApp() {
   }, [destroyPeer, disposeMicrophonePipeline]);
 
   function updateProfile(next: Partial<RoomProfile>) {
-    const updated = { ...profileRef.current, ...next, name: normalizeName(next.name ?? profileRef.current.name), device: mobile ? 'mobile' : 'desktop' } as RoomProfile;
+    const updated = { ...profileRef.current, ...next, name: normalizeName(next.name ?? profileRef.current.name), avatar: normalizeAvatar(next.avatar ?? profileRef.current.avatar), device: mobile ? 'mobile' : 'desktop' } as RoomProfile;
     profileRef.current = updated;
     setProfile(updated);
     const id = selfIdRef.current;
     if (id && participantsRef.current[id]) updateParticipant({ ...participantsRef.current[id], ...updated });
     updateSelfMediaState();
+  }
+
+  function commitProfileName() {
+    const name = normalizeName(profileNameDraft || profileRef.current.name);
+    setProfileNameDraft(name);
+    if (name !== profileRef.current.name) updateProfile({ name });
+  }
+
+  async function uploadAvatar(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = '';
+    if (!file) return;
+    setAvatarUploading(true);
+    setProfileSaveState('saving');
+    try {
+      const avatar = await prepareAvatar(file);
+      updateProfile({ avatar });
+      await saveStoredProfile({ name: profileRef.current.name, avatar });
+      setProfileSaveState('saved');
+    } catch (avatarError) {
+      setProfileSaveState('error');
+      setError(avatarError instanceof Error ? avatarError.message : 'Não foi possível salvar a foto agora.');
+    } finally {
+      setAvatarUploading(false);
+    }
+  }
+
+  function removeCustomAvatar() {
+    updateProfile({ avatar: 'orbit' });
   }
 
   async function createRoom() {
@@ -809,9 +947,12 @@ export default function RoomApp() {
     void acquireMicrophone();
   }
 
-  function leaveRoom() {
-    send(socketRef.current, { type: 'leave-group-room' });
-    socketRef.current?.close(1000, 'Participant left');
+  function exitRoom(closeRequested: boolean) {
+    const connectedCount = Object.values(participantsRef.current).filter(participant => participant.connected).length;
+    const closeForEveryone = closeRequested || (Boolean(sessionRef.current?.ownerKey) && connectedCount <= 1);
+    send(socketRef.current, { type: closeForEveryone ? 'close-group-room' : 'leave-group-room' });
+    if (closeForEveryone) localStorage.removeItem(OWNER_ROOM_KEY);
+    socketRef.current?.close(1000, closeForEveryone ? 'Room closed' : 'Participant left');
     for (const peerId of [...peersRef.current.keys()]) destroyPeer(peerId);
     stopScreenShare();
     disposeMicrophonePipeline();
@@ -822,13 +963,17 @@ export default function RoomApp() {
     setLeaderId('');
     setSession(null);
     setMode('landing');
+    setLeaveMenuOpen(false);
+    setPendingExitAction(null);
     history.replaceState(null, '', location.pathname);
   }
 
+  function leaveRoom() {
+    exitRoom(false);
+  }
+
   function closeRoom() {
-    send(socketRef.current, { type: 'close-group-room' });
-    localStorage.removeItem(OWNER_ROOM_KEY);
-    leaveRoom();
+    exitRoom(true);
   }
 
   async function changeInputDevice(deviceId: string) {
@@ -894,6 +1039,15 @@ export default function RoomApp() {
     setChatValue('');
   }
 
+  function toggleChatSidebar() {
+    if (chatOpen) setProfileOpen(false);
+    setAudioMenuOpen(false);
+    setScreenMenuOpen(false);
+    setLeaveMenuOpen(false);
+    setPendingExitAction(null);
+    setChatOpen(!chatOpen);
+  }
+
   async function copyValue(kind: 'code' | 'link') {
     if (!session) return;
     const value = kind === 'code' ? roomCode(session.invite) : groupInviteUrl(session.invite);
@@ -910,44 +1064,38 @@ export default function RoomApp() {
   const isLeader = selfId === leaderId;
   const roomLabel = session ? session.invite.roomId.slice(0, 4).toUpperCase() : '';
   const connectionQuality = mode !== 'connected' ? 'waiting' : latency > 450 ? 'blocked' : latency > 180 ? 'limited' : latency > 90 ? 'good' : 'excellent';
-  const activeChat = mobile ? chatOpen : panelSection === 'chat';
+  const activeChat = chatOpen;
   const activeResolution = automaticQuality ? 720 : resolution;
   const activeFps = automaticQuality ? 30 : fps;
   void peerVersion;
 
   const chatPanel = (
-    <div className="panel-page chat-page">
-      <div className="chat-panel">
-        <div className="chat-toolbar">
-          <label className="chat-identity"><span>Você como</span><input value={profile.name} onChange={event => updateProfile({ name: event.target.value })} aria-label="Seu nome no chat"/></label>
-          <button className="chat-settings-trigger" type="button" onClick={() => setProfileOpen(true)} aria-label="Configurações do perfil"><Icon name="settings"/></button>
-        </div>
-        <div className="chat-log">
-          {chatMessages.length ? chatMessages.map(message => message.system ? (
-            <p className="chat-system" key={message.id}>{message.text}</p>
-          ) : (
-            <article className={`chat-message ${message.senderId === selfId ? 'is-own' : ''}`} key={message.id}>
-              <header><strong>{message.senderId === selfId ? 'Você' : message.senderName}</strong><time>{new Date(message.sentAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</time></header>
-              <p>{message.text}</p>
-            </article>
-          )) : <div className="chat-empty"><Icon name="chat"/><strong>A conversa começa aqui</strong><span>As mensagens são temporárias e somem ao encerrar a chamada.</span></div>}
-        </div>
-        <form className="chat-composer" onSubmit={sendChat}>
-          <textarea value={chatValue} onChange={event => setChatValue(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder="Escrever mensagem…" maxLength={1000}/>
-          <button type="submit" disabled={!chatValue.trim() || !session} aria-label="Enviar mensagem"><Icon name="chevron"/></button>
-        </form>
+    <div className="chat-panel unified-chat-panel">
+      <div className="chat-log" ref={chatLogRef}>
+        {chatMessages.length ? chatMessages.map(message => message.system ? (
+          <p className="chat-system" key={message.id}>{message.text}</p>
+        ) : (
+          <article className={`chat-message ${message.senderId === selfId ? 'is-own' : ''}`} key={message.id}>
+            <header><strong>{message.senderId === selfId ? 'Você' : message.senderName}</strong><time>{new Date(message.sentAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</time></header>
+            <p>{message.text}</p>
+          </article>
+        )) : <div className="chat-empty"><Icon name="chat"/><strong>A conversa começa aqui</strong><span>As mensagens são temporárias e somem ao encerrar a chamada.</span></div>}
       </div>
+      <form className="chat-composer" onSubmit={sendChat}>
+        <textarea value={chatValue} onChange={event => setChatValue(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={session ? 'Escrever mensagem…' : 'Entre em uma chamada para conversar'} maxLength={1000} disabled={!session}/>
+        <button type="submit" disabled={!chatValue.trim() || !session} aria-label="Enviar mensagem"><Icon name="send"/></button>
+      </form>
     </div>
   );
 
   const audioPopover = audioMenuOpen ? (
     <section className="dock-popover audio-popover unified-audio-popover" aria-label="Configurações de áudio">
       <header><strong>Áudio</strong><small>DISPOSITIVOS E VOZ</small></header>
+      <div className="room-device-stack">
+        <RoomDevicePicker input label="Dispositivo de entrada" value={audioSettings.inputDeviceId} devices={audioDevices} onChange={deviceId => void changeInputDevice(deviceId)}/>
+        <RoomDevicePicker label="Dispositivo de saída" value={audioSettings.outputDeviceId} devices={audioDevices} onChange={changeOutputDevice}/>
+      </div>
       <div className="audio-popover-scroll">
-        <div className="room-device-stack">
-          <RoomDevicePicker input label="Dispositivo de entrada" value={audioSettings.inputDeviceId} devices={audioDevices} onChange={deviceId => void changeInputDevice(deviceId)}/>
-          <RoomDevicePicker label="Dispositivo de saída" value={audioSettings.outputDeviceId} devices={audioDevices} onChange={changeOutputDevice}/>
-        </div>
         <section className="audio-menu-section">
           <header><strong>Volumes</strong><small>LOCAL</small></header>
           <div className="volume-control"><label htmlFor="room-input-volume"><strong>Volume de entrada</strong><small>Ganho do seu microfone</small></label><input id="room-input-volume" type="range" min="0" max="150" value={audioSettings.inputVolume} onChange={event => changeInputVolume(Number(event.target.value))}/><output>{audioSettings.inputVolume}%</output></div>
@@ -973,7 +1121,28 @@ export default function RoomApp() {
     <section className="dock-popover more-popover screen-popover unified-screen-popover" aria-label="Configurações do compartilhamento">
       <header><strong>Compartilhamento</strong><small>{sharing ? 'ATIVO' : 'PRONTO'}</small></header>
       <button type="button" onClick={() => { void toggleScreenShare(); setScreenMenuOpen(false); }}><Icon name="screen"/><span><strong>{sharing ? 'Parar compartilhamento' : 'Compartilhar tela'}</strong><small>{sharing ? 'A chamada continuará ativa' : 'Escolha uma tela, janela ou aba'}</small></span></button>
-      <button type="button" onClick={() => { setPanelSection('call'); setScreenMenuOpen(false); }}><Icon name="settings"/><span><strong>Qualidade do vídeo</strong><small>{automaticQuality ? 'Automática' : `${resolution}p · ${fps} FPS`}</small></span></button>
+      <button type="button" onClick={() => setScreenMenuOpen(false)}><Icon name="settings"/><span><strong>Qualidade do vídeo</strong><small>{automaticQuality ? 'Automática' : `${resolution}p · ${fps} FPS`}</small></span></button>
+    </section>
+  ) : null;
+
+  const exitPopover = leaveMenuOpen ? (
+    <section className="dock-popover exit-popover" aria-label="Opções para sair da chamada">
+      {pendingExitAction ? (
+        <>
+          <header><strong>{pendingExitAction === 'close' ? 'Encerrar a sala?' : 'Sair da chamada?'}</strong><small>CONFIRMAÇÃO</small></header>
+          <p>{pendingExitAction === 'close' ? 'A chamada terminará para todas as pessoas.' : 'A sala continuará ativa para quem permanecer.'}</p>
+          <div className="exit-confirm-actions">
+            <button type="button" onClick={() => setPendingExitAction(null)}>Cancelar</button>
+            <button className="is-danger" type="button" onClick={pendingExitAction === 'close' ? closeRoom : leaveRoom}>{pendingExitAction === 'close' ? 'Encerrar sala' : 'Sair agora'}</button>
+          </div>
+        </>
+      ) : (
+        <>
+          <header><strong>Sair da chamada</strong><small>ESCOLHA UMA AÇÃO</small></header>
+          <button type="button" onClick={() => setPendingExitAction('leave')}><Icon name="hangup"/><span><strong>Sair da chamada</strong><small>A sala continua para os demais</small></span></button>
+          {isOwner && <button className="is-danger" type="button" onClick={() => setPendingExitAction('close')}><Icon name="close"/><span><strong>Encerrar sala</strong><small>Desconecta todas as pessoas</small></span></button>}
+        </>
+      )}
     </section>
   ) : null;
 
@@ -986,25 +1155,11 @@ export default function RoomApp() {
           {loadOwnerSession() && <button className="unified-resume" type="button" onClick={() => { setSession(loadOwnerSession()); setMode('connecting'); }}>Retomar sua última sala</button>}
         </section>
       ) : (
-        <>
-          <section className="panel-section unified-participants-section">
-            <div className="section-heading"><h3>Na chamada</h3><small>{connectedParticipants.length} CONECTADO{connectedParticipants.length === 1 ? '' : 'S'}</small></div>
-            <div className="unified-participant-list">
-              {connectedParticipants.map(participant => (
-                <button type="button" key={participant.id} onClick={() => participant.id === selfId && setProfileOpen(true)}>
-                  <Avatar avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} size="small"/>
-                  <span><strong>{participant.id === selfId ? `${participant.name} (você)` : participant.name}</strong><small>{participant.sharing ? 'Compartilhando tela' : participant.microphoneEnabled ? 'Microfone ativo' : 'Silenciado'}</small></span>
-                  {participant.id === leaderId && <Icon name="crown"/>}
-                </button>
-              ))}
-            </div>
-          </section>
-          <section className="panel-section unified-invite-section">
-            <div className="section-heading"><h3>Convite da chamada</h3><small>SALA {roomLabel}</small></div>
-            <div className="invite-row"><input readOnly value={roomCode(session.invite)} aria-label="Código da chamada"/><button type="button" onClick={() => void copyValue('code')} aria-label="Copiar código"><Icon name="copy"/></button></div>
-            <div className="invite-actions"><button type="button" onClick={() => void copyValue('link')}><Icon name="link"/>{copied === 'link' ? 'Link copiado' : 'Copiar link'}</button><button type="button" onClick={() => setProfileOpen(true)}><Icon name="settings"/>Perfil</button>{isOwner && <button className="danger-text-button" type="button" onClick={closeRoom}>Encerrar sala</button>}</div>
-          </section>
-        </>
+        <section className="panel-section unified-invite-section">
+          <div className="section-heading"><h3>Convite da chamada</h3><small>SALA {roomLabel}</small></div>
+          <div className="invite-row"><input readOnly value={roomCode(session.invite)} aria-label="Código da chamada"/><button type="button" onClick={() => void copyValue('code')} aria-label="Copiar código"><Icon name="copy"/></button></div>
+          <div className="invite-actions"><button type="button" onClick={() => void copyValue('link')}><Icon name="link"/>{copied === 'link' ? 'Link copiado' : 'Copiar link'}</button></div>
+        </section>
       )}
       {!mobile && (
         <section className="panel-section quality-section">
@@ -1013,7 +1168,7 @@ export default function RoomApp() {
           <div className="quality-controls">
             <SegmentedSelector label="Resolução" suffix="resolução" options={RESOLUTIONS} value={resolution} disabled={automaticQuality} premium={1080} onChange={value => { setAutomaticQuality(false); void applyVideoProfile(value, fps); }}/>
             <SegmentedSelector label="Fluidez" suffix="FPS" options={FRAME_RATES} value={fps} disabled={automaticQuality} premium={60} onChange={value => { setAutomaticQuality(false); void applyVideoProfile(resolution, value); }}/>
-            {!session && <SegmentedSelector label="Participantes" suffix="máximo" options={PARTICIPANT_LIMITS} value={maxParticipants} onChange={setMaxParticipants}/>} 
+            {!session && <SegmentedSelector label="Participantes" suffix="máximo" options={PARTICIPANT_LIMITS} value={maxParticipants} fullWidth onChange={setMaxParticipants}/>}
           </div>
           <p className="profile-summary"><i/>Bitrate adaptativo ativo</p>
         </section>
@@ -1028,17 +1183,18 @@ export default function RoomApp() {
       <button className={playbackEnabled ? 'is-on' : ''} type="button" onClick={togglePlayback} aria-label={playbackEnabled ? 'Silenciar chamada' : 'Ouvir chamada'} data-label="Áudio"><Icon name={playbackEnabled ? 'volume' : 'volumeOff'}/></button>
       <div className="dock-split-control">
         <button className={microphoneEnabled ? 'is-on' : ''} type="button" onClick={() => void toggleMicrophone()} aria-label={microphoneEnabled ? 'Silenciar microfone' : 'Ativar microfone'} data-label="Microfone"><Icon name={microphoneEnabled ? 'microphone' : 'microphoneOff'}/></button>
-        <button className={`dock-chevron ${audioMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { setAudioMenuOpen(open => !open); setScreenMenuOpen(false); }} aria-expanded={audioMenuOpen} aria-label="Configurações de áudio" data-label="Ajustes"><Icon name="chevron"/></button>
+        <button className={`dock-chevron ${audioMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { setAudioMenuOpen(open => !open); setScreenMenuOpen(false); setLeaveMenuOpen(false); setPendingExitAction(null); }} aria-expanded={audioMenuOpen} aria-label="Configurações de áudio" data-label="Ajustes"><Icon name="chevronDown"/></button>
       </div>
       {!mobile && <div className="dock-split-control screen-split-control">
         <button className={sharing ? 'is-on' : ''} type="button" onClick={() => void toggleScreenShare()} aria-label={sharing ? 'Parar compartilhamento' : 'Compartilhar tela'} aria-pressed={sharing} data-label={sharing ? 'Parar tela' : 'Compartilhar'}><Icon name="screen"/></button>
-        <button className={`dock-chevron ${screenMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { setScreenMenuOpen(open => !open); setAudioMenuOpen(false); }} aria-expanded={screenMenuOpen} aria-label="Configurações da tela" data-label="Ajustes"><Icon name="chevron"/></button>
+        <button className={`dock-chevron ${screenMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { setScreenMenuOpen(open => !open); setAudioMenuOpen(false); setLeaveMenuOpen(false); setPendingExitAction(null); }} aria-expanded={screenMenuOpen} aria-label="Configurações da tela" data-label="Ajustes"><Icon name="chevronDown"/></button>
       </div>}
-      <button className={activeChat ? 'is-on' : ''} type="button" onClick={() => { if (mobile) { setPanelSection('chat'); setChatOpen(open => !open); } else setPanelSection(section => section === 'chat' ? 'call' : 'chat'); }} aria-label="Abrir chat" data-label="Chat"><Icon name="chat"/></button>
+      <button className={activeChat ? 'is-on' : ''} type="button" onClick={toggleChatSidebar} aria-label={activeChat ? 'Fechar chat' : 'Abrir chat'} data-label="Chat"><Icon name="chat"/></button>
       <span className="dock-divider"/>
-      <button className="hangup" type="button" onClick={leaveRoom} aria-label="Sair da chamada" data-label="Sair"><Icon name="hangup"/></button>
+      <button className="hangup" type="button" onClick={() => { setLeaveMenuOpen(open => !open); setPendingExitAction(null); setAudioMenuOpen(false); setScreenMenuOpen(false); }} aria-expanded={leaveMenuOpen} aria-label="Opções para sair da chamada" data-label="Sair"><Icon name="hangup"/></button>
       {audioPopover}
       {screenPopover}
+      {exitPopover}
     </div>
   ) : null;
 
@@ -1056,7 +1212,7 @@ export default function RoomApp() {
     <div className="stage-empty unified-stage-empty">
       {session && mode === 'connected' && connectedParticipants.length ? (
         <div className="stage-avatars">{connectedParticipants.map(participant => <Avatar key={participant.id} avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} size="large"/>)}</div>
-      ) : <MascotMark/>}
+      ) : <div className="stage-echo"><Avatar avatar="echo" name="Echo" size="large"/></div>}
       <span className="eyebrow">Voz, tela e chat P2P</span>
       <h1>{!session ? 'Inicie uma chamada' : mode === 'connecting' ? 'Entrando na chamada' : mode === 'error' ? 'Sala indisponível' : 'Chamada em andamento'}</h1>
       <p>{!session ? 'Crie uma sala ou entre com um código. Depois, qualquer pessoa no computador pode compartilhar a própria tela.' : mode === 'connecting' ? 'Reconectando à sala sem interromper quem já está aqui…' : mode === 'error' ? error : 'A conversa continua normalmente mesmo quando nenhuma tela está sendo compartilhada.'}</p>
@@ -1073,6 +1229,18 @@ export default function RoomApp() {
         <div className={`status-pill room-status-${connectionQuality}`}><i/>{session ? mode === 'connected' ? `${latency || '—'} ms` : 'Conectando' : 'Pronto'}</div>
       </header>
       <main className="host-main unified-room-main">
+          <aside className={`unified-chat-sidebar ${activeChat ? 'is-open' : 'is-closed'}`} aria-label="Chat da chamada" aria-hidden={!activeChat}>
+            <header className="unified-sidebar-header">
+              <div><Icon name="chat"/><span><strong>Chat</strong><small>{session ? `Sala ${roomLabel}` : 'LOCAL'}</small></span></div>
+              {mobile && <button type="button" onClick={() => { setChatOpen(false); setProfileOpen(false); }} aria-label="Fechar chat"><Icon name="close"/></button>}
+            </header>
+            {chatPanel}
+            <button ref={profileBarRef} className="unified-profile-bar" type="button" onClick={() => setProfileOpen(open => !open)} aria-expanded={profileOpen} aria-label={profileOpen ? 'Fechar perfil' : 'Abrir perfil'}>
+              <Avatar avatar={profile.avatar} name={profile.name} speaking={speakingIds.has(selfId)} size="small"/>
+              <span><strong>{profile.name}</strong><small>{session ? microphoneEnabled ? 'Microfone ativo' : 'Microfone desligado' : 'Pronto para entrar'}</small></span>
+              <Icon name="settings"/>
+            </button>
+          </aside>
         <section className={`share-stage unified-room-stage ${sharingParticipants.length ? 'has-screens' : ''}`}>
           {stageContent}
           {session && !sharingParticipants.length && mode === 'connected' && (
@@ -1082,18 +1250,16 @@ export default function RoomApp() {
         </section>
         <aside className="control-panel unified-control-panel">
           <div className="panel-header"><div><h2>Controles</h2></div><span className="audience-count">{connectedParticipants.length}/{maxParticipants}</span></div>
-          <div className="panel-tabs" role="tablist" style={{ '--tab-count': 2, '--tab-index': panelSection === 'call' ? 0 : 1 } as React.CSSProperties}>
-            <button className={panelSection === 'call' ? 'is-active' : ''} type="button" role="tab" aria-selected={panelSection === 'call'} onClick={() => { setPanelSection('call'); setChatOpen(false); }}>Chamada</button>
-            <button className={panelSection === 'chat' ? 'is-active' : ''} type="button" role="tab" aria-selected={panelSection === 'chat'} onClick={() => { setPanelSection('chat'); setChatOpen(true); }}>Chat</button>
-          </div>
-          <div className="panel-view">{panelSection === 'call' ? callPanel : chatPanel}</div>
+          <div className="panel-view">{callPanel}</div>
         </aside>
       </main>
       {profileOpen && (
-        <div className="room-popover profile-popover unified-profile-popover">
-          <header><div><span className="eyebrow">SEU PERFIL</span><h3>Como você aparece</h3></div><button type="button" onClick={() => setProfileOpen(false)} aria-label="Fechar perfil"><Icon name="close"/></button></header>
-          <label htmlFor="profile-name">Nome</label><input id="profile-name" value={profile.name} onChange={event => updateProfile({ name: event.target.value })} maxLength={28}/>
-          <label>Avatar</label><div className="avatar-picker">{AVATARS.map(avatar => <button className={profile.avatar === avatar.id ? 'selected' : ''} type="button" key={avatar.id} onClick={() => updateProfile({ avatar: avatar.id })}><Avatar avatar={avatar.id} name={avatar.label}/><span>{avatar.label}</span></button>)}</div>
+        <div ref={profilePopoverRef} className="room-popover profile-popover unified-profile-popover">
+          <header><div><span className="eyebrow">SEU PERFIL</span><h3>Como você aparece</h3></div><button type="button" onClick={() => { commitProfileName(); setProfileOpen(false); }} aria-label="Fechar perfil"><Icon name="close"/></button></header>
+          <label htmlFor="profile-name">Nome</label><input id="profile-name" value={profileNameDraft} onChange={event => setProfileNameDraft(event.target.value)} onBlur={commitProfileName} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { setProfileNameDraft(profileRef.current.name); event.currentTarget.blur(); } }} maxLength={28}/>
+          <div className="profile-photo-heading"><label>Foto</label><small>{profileSaveState === 'saving' ? 'SALVANDO…' : profileSaveState === 'saved' ? profileStorageKind() === 'sqlite' ? 'SALVO NO SQLITE LOCAL' : 'SALVO NESTE NAVEGADOR' : profileSaveState === 'error' ? 'ERRO AO SALVAR' : 'ARMAZENAMENTO LOCAL'}</small></div>
+          <div className="profile-photo-actions"><Avatar avatar={profile.avatar} name={profile.name} size="normal"/><label className="profile-photo-upload">{avatarUploading ? 'Preparando…' : 'Escolher foto'}<input type="file" accept="image/*" onChange={event => void uploadAvatar(event)} disabled={avatarUploading}/></label>{profile.avatar.startsWith('data:image/') && <button type="button" onClick={removeCustomAvatar}>Remover</button>}</div>
+          <label>Avatares do app</label><div className="avatar-picker">{AVATARS.map(avatar => <button className={profile.avatar === avatar.id ? 'selected' : ''} type="button" key={avatar.id} onClick={() => updateProfile({ avatar: avatar.id })}><Avatar avatar={avatar.id} name={avatar.label}/><span>{avatar.label}</span></button>)}</div>
         </div>
       )}
       {error && mode !== 'error' && <button className="call-error" type="button" onClick={() => setError('')}>{error}<Icon name="close"/></button>}

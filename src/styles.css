@@ -216,16 +216,16 @@ h1, h2, p { margin-top: 0; }
 .section-heading h3 { margin: 0; color: #f1f1f1; font-size: .83rem; font-weight: 610; }
 .section-heading > small { overflow: hidden; color: #b0b0b0; font-size: .63rem; font-weight: 570; letter-spacing: .045em; text-overflow: ellipsis; white-space: nowrap; }
 .quality-controls { display: grid; grid-template-columns: 1fr 1fr; gap: .45rem .6rem; }
-.quality-controls .profile-fieldset:last-child { grid-column: 1 / -1; }
+.quality-controls .profile-fieldset.is-full-width { grid-column: 1 / -1; }
 .profile-fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .profile-fieldset legend { width: 100%; margin-bottom: .28rem; display: flex; align-items: baseline; justify-content: space-between; gap: .6rem; color: #dedede; font-size: .7rem; font-weight: 560; }
 .profile-fieldset legend small { color: #aaa; font-size: .59rem; font-weight: 570; text-transform: uppercase; letter-spacing: .04em; }
 .segmented-control { position: relative; isolation: isolate; height: 1.78rem; padding: .12rem; border-radius: 999px; display: grid; grid-template-columns: repeat(var(--option-count, 4), minmax(0, 1fr)); overflow: hidden; background: #191919; }
-.segmented-control::before, .segmented-control::after { content: ""; position: absolute; top: .12rem; bottom: .12rem; left: .12rem; width: calc((100% - .24rem) / var(--option-count, 4)); border-radius: 999px; transform: translateX(calc(var(--active-index) * 100%)); transition: transform 260ms var(--ease-out), background var(--standard) var(--ease-out), opacity var(--standard); }
+.segmented-control::before { content: ""; position: absolute; top: .12rem; bottom: .12rem; left: .12rem; width: calc((100% - .24rem) / var(--option-count, 4)); border-radius: 999px; transform: translateX(calc(var(--active-index) * 100%)); transition: transform 260ms var(--ease-out), background var(--standard) var(--ease-out), opacity var(--standard); }
 .segmented-control::before { z-index: 0; background: #e9e9e9; }
-.segmented-control::after { z-index: 1; opacity: 0; pointer-events: none; background-image: radial-gradient(circle, rgba(255,255,255,.92) 0 1px, transparent 1.3px), radial-gradient(circle, rgba(229,249,255,.72) 0 .75px, transparent 1.15px), radial-gradient(circle, rgba(255,255,255,.58) 0 .55px, transparent .9px); background-size: 19px 13px, 27px 18px, 13px 21px; background-position: 2px 3px, 9px -1px, -3px 7px; }
 .segmented-control.is-premium-selected::before { background: linear-gradient(110deg, #344fc7 0%, #3a8fd0 38%, #54bfce 62%, #4e65d4 100%); background-size: 220% 100%; animation: premium-gradient 4.8s ease-in-out infinite; }
-.segmented-control.is-premium-selected::after { opacity: .9; animation: premium-dots 5.5s linear infinite; }
+.premium-particles { position: absolute; z-index: 1; top: .12rem; bottom: .12rem; left: .12rem; width: calc((100% - .24rem) / var(--option-count, 4)); border-radius: 999px; overflow: hidden; pointer-events: none; transform: translateX(calc(var(--active-index) * 100%)); transition: transform 260ms var(--ease-out); }
+.premium-particles i { position: absolute; left: var(--particle-x); top: var(--particle-y); width: var(--particle-size); height: var(--particle-size); border-radius: 50%; background: rgba(244,252,255,.72); box-shadow: 0 0 .18rem rgba(231,249,255,.45); animation: proton-drift var(--particle-duration) linear var(--particle-delay) infinite; }
 .segmented-control button { position: relative; z-index: 2; min-width: 0; border: 0; border-radius: 999px; padding: 0 .1rem; color: #b5b5b5; background: transparent; font-size: .69rem; font-variant-numeric: tabular-nums; font-weight: 590; transition: color var(--standard), transform var(--fast); }
 .segmented-control button:hover { color: #d5d5d5; }
 .segmented-control button.is-active { color: #0a0a0a; }
@@ -448,9 +448,13 @@ h1, h2, p { margin-top: 0; }
   50% { background-position: 100% 50%; }
 }
 
-@keyframes premium-dots {
-  from { background-position: 2px 3px, 9px -1px, -3px 7px; }
-  to { background-position: 21px 3px, -18px 17px, 10px -14px; }
+@keyframes proton-drift {
+  0% { opacity: .28; transform: translate3d(8px, 0, 0); }
+  18% { opacity: .8; transform: translate3d(3px, calc(var(--particle-jitter) * -1), 0); }
+  37% { transform: translate3d(-2px, var(--particle-jitter), 0); }
+  61% { opacity: .62; transform: translate3d(-8px, calc(var(--particle-jitter) * -.55), 0); }
+  79% { transform: translate3d(-13px, calc(var(--particle-jitter) * .7), 0); }
+  100% { opacity: .2; transform: translate3d(-19px, 0, 0); }
 }
 
 @keyframes chat-drawer-enter {

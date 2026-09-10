@@ -153,7 +153,10 @@ function validPeerId(value) {
 function normalizeProfile(value) {
   const source = value && typeof value === 'object' ? value : {};
   const name = String(source.name || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 28) || 'Participante';
-  const avatar = /^[a-z0-9-]{1,24}$/i.test(String(source.avatar || '')) ? String(source.avatar) : 'orbit';
+  const avatarValue = String(source.avatar || '');
+  const isPreset = /^[a-z0-9-]{1,24}$/i.test(avatarValue);
+  const isLocalPhoto = /^data:image\/(?:jpeg|png|webp);base64,[a-z0-9+/=]+$/i.test(avatarValue) && avatarValue.length <= 120_000;
+  const avatar = isPreset || isLocalPhoto ? avatarValue : 'orbit';
   const device = source.device === 'mobile' ? 'mobile' : 'desktop';
   return { name, avatar, device };
 }
