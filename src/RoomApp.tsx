@@ -10,9 +10,6 @@ type Session = { invite: Invite; ownerKey?: string; participantId?: string; maxP
 type ChatMessage = { id: string; senderId: string; senderName: string; text: string; sentAt: number; system?: boolean };
 type Resolution = 360 | 480 | 720 | 1080;
 type FrameRate = 15 | 30 | 45 | 60;
-type VideoProfile = { resolution: Resolution; fps: FrameRate };
-type NetworkMetrics = { rttMs: number; packetLoss: number; availableKbps: number };
-type PeerNetworkSample = { rttMs: number | null; packetLoss: number; availableKbps: number | null };
 type AudioSettings = { inputDeviceId: string; outputDeviceId: string; inputVolume: number; outputVolume: number; echoCancellation: boolean; noiseSuppression: boolean; autoGainControl: boolean };
 
 type PeerRecord = {
@@ -67,14 +64,6 @@ const VIDEO_PRESETS: Record<Resolution, { width: number; height: number; bitrate
   720: { width: 1280, height: 720, bitrate: 3_600_000 },
   1080: { width: 1920, height: 1080, bitrate: 7_000_000 }
 };
-const AUTOMATIC_VIDEO_PROFILES: VideoProfile[] = [
-  { resolution: 360, fps: 15 },
-  { resolution: 480, fps: 30 },
-  { resolution: 720, fps: 30 },
-  { resolution: 720, fps: 45 },
-  { resolution: 1080, fps: 45 },
-  { resolution: 1080, fps: 60 }
-];
 
 const AVATARS = [
   { id: 'orbit', label: 'Órbita', colors: ['#8ee6ed', '#387f99'], face: 'robot' },
@@ -251,65 +240,6 @@ function mediaStreamWith(...tracks: Array<MediaStreamTrack | null | undefined>) 
   return new MediaStream(tracks.filter((track): track is MediaStreamTrack => Boolean(track)));
 }
 
-function automaticVideoProfile(metrics: NetworkMetrics): VideoProfile {
-  const capacity = metrics.availableKbps;
-  if (metrics.packetLoss >= 8 || metrics.rttMs >= 450 || (capacity > 0 && capacity < 1_200)) return AUTOMATIC_VIDEO_PROFILES[0]!;
-  if (metrics.packetLoss >= 4 || metrics.rttMs >= 280 || (capacity > 0 && capacity < 2_500)) return AUTOMATIC_VIDEO_PROFILES[1]!;
-  if (metrics.packetLoss >= 2 || metrics.rttMs >= 170 || (capacity > 0 && capacity < 4_500)) return AUTOMATIC_VIDEO_PROFILES[2]!;
-  if (!capacity) return AUTOMATIC_VIDEO_PROFILES[2]!;
-  if (metrics.rttMs >= 120 || capacity < 7_500) return AUTOMATIC_VIDEO_PROFILES[3]!;
-  if (capacity < 12_000) return AUTOMATIC_VIDEO_PROFILES[4]!;
-  return AUTOMATIC_VIDEO_PROFILES[5]!;
-}
-
-function automaticProfileIndex(profile: VideoProfile) {
-  return AUTOMATIC_VIDEO_PROFILES.findIndex(candidate => candidate.resolution === profile.resolution && candidate.fps === profile.fps);
-}
-
-async function configureVideoSender(sender: RTCRtpSender, profile: VideoProfile) {
-  const preset = VIDEO_PRESETS[profile.resolution];
-  const parameters = sender.getParameters();
-  parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
-  parameters.encodings[0]!.maxBitrate = Math.round(preset.bitrate * (profile.fps / 30));
-  parameters.encodings[0]!.maxFramerate = profile.fps;
-  parameters.degradationPreference = 'maintain-framerate';
-  await sender.setParameters(parameters);
-}
-
-async function readPeerNetworkSample(pc: RTCPeerConnection): Promise<PeerNetworkSample> {
-  const report = await pc.getStats();
-  let selectedPairId = '';
-  let candidatePairRttMs: number | null = null;
-  let rtpRttMs: number | null = null;
-  let packetLoss = 0;
-  let availableKbps: number | null = null;
-
-  report.forEach(stat => {
-    if (stat.type === 'transport' && stat.selectedCandidatePairId) selectedPairId = String(stat.selectedCandidatePairId);
-  });
-  report.forEach(stat => {
-    if (stat.type === 'candidate-pair' && (stat.id === selectedPairId || stat.selected || (stat.nominated && stat.state === 'succeeded'))) {
-      const value = Number(stat.currentRoundTripTime);
-      if (Number.isFinite(value) && value >= 0) candidatePairRttMs = Math.max(candidatePairRttMs ?? 0, value * 1_000);
-      const available = Number(stat.availableOutgoingBitrate);
-      if (Number.isFinite(available) && available > 0) availableKbps = Math.round(available / 1_000);
-    }
-    if (stat.type === 'remote-inbound-rtp') {
-      const value = Number(stat.roundTripTime);
-      if (Number.isFinite(value) && value >= 0) rtpRttMs = Math.max(rtpRttMs ?? 0, value * 1_000);
-      const fractionLost = Number(stat.fractionLost);
-      if (Number.isFinite(fractionLost) && fractionLost >= 0) packetLoss = Math.max(packetLoss, fractionLost * 100);
-    }
-  });
-
-  const rttMs = candidatePairRttMs ?? rtpRttMs;
-  return {
-    rttMs: rttMs === null ? null : Math.round(rttMs),
-    packetLoss: Math.round(packetLoss * 10) / 10,
-    availableKbps
-  };
-}
-
 function ScreenTile({ stream, name, local, playbackEnabled, volume = 1, outputDeviceId = '' }: { stream: MediaStream; name: string; local?: boolean; playbackEnabled: boolean; volume?: number; outputDeviceId?: string }) {
   const ref = useRef<HTMLVideoElement>(null);
   useEffect(() => {
@@ -348,9 +278,6 @@ export default function RoomApp() {
   const [resolution, setResolution] = useState<Resolution>(720);
   const [fps, setFps] = useState<FrameRate>(30);
   const [automaticQuality, setAutomaticQuality] = useState(true);
-  const automaticQualityRef = useRef(true);
-  const videoProfileRef = useRef<VideoProfile>({ resolution: 720, fps: 30 });
-  const qualityUpgradeStreakRef = useRef(0);
   const [maxParticipants, setMaxParticipants] = useState(8);
   const [microphoneEnabled, setMicrophoneEnabled] = useState(false);
   const microphoneEnabledRef = useRef(false);
@@ -367,7 +294,7 @@ export default function RoomApp() {
   const [profileOpen, setProfileOpen] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [copied, setCopied] = useState<'code' | 'link' | ''>('');
-  const [mediaLatency, setMediaLatency] = useState<number | null>(null);
+  const [latency, setLatency] = useState(0);
   const [peerVersion, setPeerVersion] = useState(0);
   const [mobile] = useState(isMobileDevice);
   const [audioMenuOpen, setAudioMenuOpen] = useState(false);
@@ -403,7 +330,6 @@ export default function RoomApp() {
   useEffect(() => { sessionRef.current = session; }, [session]);
   useEffect(() => { participantsRef.current = participants; }, [participants]);
   useEffect(() => { microphoneEnabledRef.current = microphoneEnabled; }, [microphoneEnabled]);
-  useEffect(() => { automaticQualityRef.current = automaticQuality; }, [automaticQuality]);
   useEffect(() => { sharingRef.current = sharing; }, [sharing]);
   useEffect(() => { playbackEnabledRef.current = playbackEnabled; }, [playbackEnabled]);
   useEffect(() => { chatMessagesRef.current = chatMessages; }, [chatMessages]);
@@ -554,12 +480,9 @@ export default function RoomApp() {
     record.callAudioReceiver = call.receiver;
     record.screenAudioReceiver = screenAudio.receiver;
     record.screenVideoReceiver = screenVideo.receiver;
-    const localScreenVideo = localScreenStreamRef.current?.getVideoTracks()[0] ?? null;
     await Promise.all([
       call.sender.replaceTrack(localMicrophoneTrackRef.current).catch(() => undefined),
-      screenVideo.sender.replaceTrack(localScreenVideo).then(async () => {
-        if (localScreenVideo) await configureVideoSender(screenVideo.sender, videoProfileRef.current);
-      }).catch(() => undefined),
+      screenVideo.sender.replaceTrack(localScreenStreamRef.current?.getVideoTracks()[0] ?? null).catch(() => undefined),
       screenAudio.sender.replaceTrack(localScreenStreamRef.current?.getAudioTracks()[0] ?? null).catch(() => undefined)
     ]);
     const callTrack = call.receiver.track;
@@ -629,7 +552,6 @@ export default function RoomApp() {
       record.screenVideoReceiver = videoTransceiver.receiver;
       record.screenAudioSender = screenAudioTransceiver.sender;
       record.screenAudioReceiver = screenAudioTransceiver.receiver;
-      if (screenVideo) await configureVideoSender(videoTransceiver.sender, videoProfileRef.current).catch(() => undefined);
       attachChatChannel(record, pc.createDataChannel('room-chat', { ordered: true }));
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
@@ -710,7 +632,10 @@ export default function RoomApp() {
       else record.queuedCandidates.push(message.candidate);
       return;
     }
-    if (message.type === 'pong') return;
+    if (message.type === 'pong') {
+      setLatency(Math.max(0, Date.now() - message.at));
+      return;
+    }
     if (message.type === 'room-closed') {
       if (sessionRef.current?.ownerKey) localStorage.removeItem(OWNER_ROOM_KEY);
       setError('O criador encerrou a sala.');
@@ -883,8 +808,8 @@ export default function RoomApp() {
       return;
     }
     try {
-      const activeResolution = resolution;
-      const activeFps = fps;
+      const activeResolution = automaticQuality ? 720 : resolution;
+      const activeFps = automaticQuality ? 30 : fps;
       const preset = VIDEO_PRESETS[activeResolution];
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: { width: { ideal: preset.width, max: preset.width }, height: { ideal: preset.height, max: preset.height }, frameRate: { ideal: activeFps, max: activeFps } }, audio: true });
       const video = stream.getVideoTracks()[0];
@@ -895,7 +820,11 @@ export default function RoomApp() {
       await Promise.all([...peersRef.current.values()].flatMap(peer => [
         peer.screenVideoSender?.replaceTrack(video).then(async () => {
           if (!peer.screenVideoSender) return;
-          await configureVideoSender(peer.screenVideoSender, { resolution: activeResolution, fps: activeFps });
+          const parameters = peer.screenVideoSender.getParameters();
+          parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
+          parameters.encodings[0]!.maxBitrate = Math.round(preset.bitrate * (activeFps / 30));
+          parameters.encodings[0]!.maxFramerate = activeFps;
+          await peer.screenVideoSender.setParameters(parameters);
         }).catch(() => undefined),
         peer.screenAudioSender?.replaceTrack(screenAudio).catch(() => undefined)
       ]).filter(Boolean));
@@ -906,10 +835,9 @@ export default function RoomApp() {
     } catch {
       // Cancelar o seletor não altera a chamada.
     }
-  }, [fps, resolution, stopScreenShare, updateSelfMediaState]);
+  }, [automaticQuality, fps, resolution, stopScreenShare, updateSelfMediaState]);
 
   const applyVideoProfile = useCallback(async (nextResolution: Resolution, nextFps: FrameRate) => {
-    videoProfileRef.current = { resolution: nextResolution, fps: nextFps };
     setResolution(nextResolution);
     setFps(nextFps);
     const track = localScreenStreamRef.current?.getVideoTracks()[0];
@@ -919,73 +847,13 @@ export default function RoomApp() {
     await track.applyConstraints({ width: { ideal: preset.width, max: preset.width }, height: { ideal: preset.height, max: preset.height }, frameRate: { ideal: nextFps, max: nextFps } }).catch(() => undefined);
     await Promise.all([...peersRef.current.values()].map(async peer => {
       if (!peer.screenVideoSender?.track) return;
-      await configureVideoSender(peer.screenVideoSender, { resolution: nextResolution, fps: nextFps }).catch(() => undefined);
+      const parameters = peer.screenVideoSender.getParameters();
+      parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
+      parameters.encodings[0]!.maxBitrate = Math.round(preset.bitrate * (nextFps / 30));
+      parameters.encodings[0]!.maxFramerate = nextFps;
+      await peer.screenVideoSender.setParameters(parameters).catch(() => undefined);
     }));
   }, []);
-
-  useEffect(() => {
-    if (!session || mode !== 'connected') {
-      setMediaLatency(null);
-      qualityUpgradeStreakRef.current = 0;
-      return;
-    }
-
-    let cancelled = false;
-    let adapting = false;
-    const sample = async () => {
-      const connectedPeers = [...peersRef.current.values()].filter(peer => peer.pc.connectionState === 'connected');
-      if (!connectedPeers.length) {
-        if (!cancelled) setMediaLatency(null);
-        qualityUpgradeStreakRef.current = 0;
-        return;
-      }
-
-      const samples = await Promise.all(connectedPeers.map(peer => readPeerNetworkSample(peer.pc).catch(() => null)));
-      const validSamples = samples.filter((sample): sample is PeerNetworkSample => sample !== null);
-      const rtts = validSamples.map(sample => sample.rttMs).filter((value): value is number => value !== null);
-      const capacities = validSamples.map(sample => sample.availableKbps).filter((value): value is number => value !== null && value > 0);
-      const metrics: NetworkMetrics = {
-        rttMs: rtts.length ? Math.max(...rtts) : 0,
-        packetLoss: validSamples.length ? Math.max(...validSamples.map(sample => sample.packetLoss)) : 0,
-        availableKbps: capacities.length ? Math.max(1, Math.floor(Math.min(...capacities) / connectedPeers.length)) : 0
-      };
-
-      if (!cancelled) setMediaLatency(rtts.length ? metrics.rttMs : null);
-      if (!automaticQualityRef.current || !sharingRef.current || adapting) return;
-
-      const target = automaticVideoProfile(metrics);
-      const current = videoProfileRef.current;
-      const currentIndex = automaticProfileIndex(current);
-      const targetIndex = automaticProfileIndex(target);
-      if (currentIndex < 0 || targetIndex < 0 || targetIndex === currentIndex) {
-        qualityUpgradeStreakRef.current = 0;
-        return;
-      }
-
-      if (targetIndex < currentIndex) {
-        qualityUpgradeStreakRef.current = 0;
-        adapting = true;
-        await applyVideoProfile(target.resolution, target.fps);
-        adapting = false;
-        return;
-      }
-
-      qualityUpgradeStreakRef.current += 1;
-      if (qualityUpgradeStreakRef.current < 3) return;
-      qualityUpgradeStreakRef.current = 0;
-      const nextProfile = AUTOMATIC_VIDEO_PROFILES[Math.min(currentIndex + 1, targetIndex)]!;
-      adapting = true;
-      await applyVideoProfile(nextProfile.resolution, nextProfile.fps);
-      adapting = false;
-    };
-
-    void sample();
-    const timer = window.setInterval(() => void sample(), 2_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [applyVideoProfile, mode, session?.invite.roomId]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -1195,11 +1063,10 @@ export default function RoomApp() {
   const isOwner = Boolean(session?.ownerKey);
   const isLeader = selfId === leaderId;
   const roomLabel = session ? session.invite.roomId.slice(0, 4).toUpperCase() : '';
-  const connectionQuality = mode !== 'connected' || mediaLatency === null ? 'waiting' : mediaLatency > 450 ? 'blocked' : mediaLatency > 180 ? 'limited' : mediaLatency > 90 ? 'good' : 'excellent';
-  const latencyLabel = mediaLatency === null ? '—' : String(mediaLatency);
+  const connectionQuality = mode !== 'connected' ? 'waiting' : latency > 450 ? 'blocked' : latency > 180 ? 'limited' : latency > 90 ? 'good' : 'excellent';
   const activeChat = chatOpen;
-  const activeResolution = resolution;
-  const activeFps = fps;
+  const activeResolution = automaticQuality ? 720 : resolution;
+  const activeFps = automaticQuality ? 30 : fps;
   void peerVersion;
 
   const chatPanel = (
@@ -1254,7 +1121,7 @@ export default function RoomApp() {
     <section className="dock-popover more-popover screen-popover unified-screen-popover" aria-label="Configurações do compartilhamento">
       <header><strong>Compartilhamento</strong><small>{sharing ? 'ATIVO' : 'PRONTO'}</small></header>
       <button type="button" onClick={() => { void toggleScreenShare(); setScreenMenuOpen(false); }}><Icon name="screen"/><span><strong>{sharing ? 'Parar compartilhamento' : 'Compartilhar tela'}</strong><small>{sharing ? 'A chamada continuará ativa' : 'Escolha uma tela, janela ou aba'}</small></span></button>
-      <button type="button" onClick={() => setScreenMenuOpen(false)}><Icon name="settings"/><span><strong>Qualidade do vídeo</strong><small>{automaticQuality ? `Automática · ${resolution}p · ${fps} FPS` : `${resolution}p · ${fps} FPS`}</small></span></button>
+      <button type="button" onClick={() => setScreenMenuOpen(false)}><Icon name="settings"/><span><strong>Qualidade do vídeo</strong><small>{automaticQuality ? 'Automática' : `${resolution}p · ${fps} FPS`}</small></span></button>
     </section>
   ) : null;
 
@@ -1297,13 +1164,13 @@ export default function RoomApp() {
       {!mobile && (
         <section className="panel-section quality-section">
           <div className="section-heading"><h3>Qualidade do vídeo</h3><small>{automaticQuality ? 'AUTOMÁTICA' : 'MANUAL'}</small></div>
-          <button className={`toggle-row ${automaticQuality ? 'is-active' : ''}`} type="button" role="switch" aria-checked={automaticQuality} onClick={() => { const next = !automaticQuality; automaticQualityRef.current = next; qualityUpgradeStreakRef.current = 0; setAutomaticQuality(next); if (next) void applyVideoProfile(720, 30); }}><Icon name="settings"/><span className="toggle-row-copy"><strong>Ajuste automático</strong><small>{activeResolution}p · {activeFps} FPS agora</small></span><span className="toggle-row-switch"><i/></span></button>
+          <button className={`toggle-row ${automaticQuality ? 'is-active' : ''}`} type="button" role="switch" aria-checked={automaticQuality} onClick={() => { const next = !automaticQuality; setAutomaticQuality(next); if (next) void applyVideoProfile(720, 30); }}><Icon name="settings"/><span className="toggle-row-copy"><strong>Ajuste automático</strong><small>{activeResolution}p · até {activeFps} FPS</small></span><span className="toggle-row-switch"><i/></span></button>
           <div className="quality-controls">
-            <SegmentedSelector label="Resolução" suffix="resolução" options={RESOLUTIONS} value={resolution} disabled={automaticQuality} premium={1080} onChange={value => { automaticQualityRef.current = false; qualityUpgradeStreakRef.current = 0; setAutomaticQuality(false); void applyVideoProfile(value, fps); }}/>
-            <SegmentedSelector label="Fluidez" suffix="FPS" options={FRAME_RATES} value={fps} disabled={automaticQuality} premium={60} onChange={value => { automaticQualityRef.current = false; qualityUpgradeStreakRef.current = 0; setAutomaticQuality(false); void applyVideoProfile(resolution, value); }}/>
+            <SegmentedSelector label="Resolução" suffix="resolução" options={RESOLUTIONS} value={resolution} disabled={automaticQuality} premium={1080} onChange={value => { setAutomaticQuality(false); void applyVideoProfile(value, fps); }}/>
+            <SegmentedSelector label="Fluidez" suffix="FPS" options={FRAME_RATES} value={fps} disabled={automaticQuality} premium={60} onChange={value => { setAutomaticQuality(false); void applyVideoProfile(resolution, value); }}/>
             {!session && <SegmentedSelector label="Participantes" suffix="máximo" options={PARTICIPANT_LIMITS} value={maxParticipants} fullWidth onChange={setMaxParticipants}/>}
           </div>
-          <p className="profile-summary"><i/>Rede adaptativa · prioriza FPS</p>
+          <p className="profile-summary"><i/>Bitrate adaptativo ativo</p>
         </section>
       )}
       <p className="privacy-note">Voz, tela e chat P2P · nada é gravado</p>
@@ -1312,7 +1179,7 @@ export default function RoomApp() {
 
   const callDock = session && mode !== 'error' ? (
     <div className="host-call-dock unified-call-dock" ref={dockRef} aria-label="Controles da chamada">
-      <button className={`dock-connection-indicator ${connectionQuality}`} type="button" aria-label={mediaLatency === null ? 'Conexão P2P aguardando medição de latência' : `Latência WebRTC ${mediaLatency} milissegundos`} data-label="Conexão P2P"><Icon name="link"/><span className="connection-tooltip"><strong>{latencyLabel} ms</strong><small>RTT WebRTC · {Math.max(0, connectedParticipants.length - 1)} par{Math.max(0, connectedParticipants.length - 1) === 1 ? '' : 'es'}</small></span></button>
+      <button className={`dock-connection-indicator ${connectionQuality}`} type="button" aria-label={`Conexão ${latency || 0} milissegundos`} data-label="Conexão"><Icon name="link"/><span className="connection-tooltip"><strong>{latency || '—'} ms</strong><small>{connectedParticipants.length} participante{connectedParticipants.length === 1 ? '' : 's'}</small></span></button>
       <button className={playbackEnabled ? 'is-on' : ''} type="button" onClick={togglePlayback} aria-label={playbackEnabled ? 'Silenciar chamada' : 'Ouvir chamada'} data-label="Áudio"><Icon name={playbackEnabled ? 'volume' : 'volumeOff'}/></button>
       <div className="dock-split-control">
         <button className={microphoneEnabled ? 'is-on' : ''} type="button" onClick={() => void toggleMicrophone()} aria-label={microphoneEnabled ? 'Silenciar microfone' : 'Ativar microfone'} data-label="Microfone"><Icon name={microphoneEnabled ? 'microphone' : 'microphoneOff'}/></button>
@@ -1359,7 +1226,7 @@ export default function RoomApp() {
     <div className={`app room-app unified-room-app ${mobile ? 'viewer-mode is-mobile-room' : ''} ${activeChat ? 'is-chat-open' : ''}`}>
       <header className="topbar">
         <div className="brand"><span className="unified-brand-mark"><Icon name="screen"/></span><strong>ScreenLink</strong></div>
-        <div className={`status-pill room-status-${connectionQuality}`}><i/>{session ? mode === 'connected' ? mediaLatency === null ? 'P2P' : `${latencyLabel} ms` : 'Conectando' : 'Pronto'}</div>
+        <div className={`status-pill room-status-${connectionQuality}`}><i/>{session ? mode === 'connected' ? `${latency || '—'} ms` : 'Conectando' : 'Pronto'}</div>
       </header>
       <main className="host-main unified-room-main">
           <aside className={`unified-chat-sidebar ${activeChat ? 'is-open' : 'is-closed'}`} aria-label="Chat da chamada" aria-hidden={!activeChat}>
