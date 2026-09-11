@@ -311,6 +311,7 @@
 .mobile-screen-capability > span { min-width: 0; display: grid; gap: .16rem; }
 .mobile-screen-capability strong { color: #dce2e4; font-size: .67rem; font-weight: 600; }
 .mobile-screen-capability small { color: #858e91; font-size: .58rem; line-height: 1.45; }
+.voice-processing-feedback { margin: .38rem .45rem 0; color: #899396; font-size: .56rem; line-height: 1.45; }
 .exit-popover { right: 0; left: auto; width: min(17rem, calc(100vw - 1rem)); }
 .exit-popover > p { margin: 0 .55rem .7rem; color: #999fa1; font-size: .64rem; line-height: 1.45; }
 .exit-popover > button { width: 100%; min-height: 3.35rem; padding: .48rem .58rem; border: 0; border-radius: .62rem; display: grid; grid-template-columns: 1.05rem minmax(0, 1fr); align-items: center; gap: .65rem; color: #dde1e2; text-align: left; background: transparent; transition: color 190ms ease, background 230ms var(--ease-out), transform 230ms var(--ease-out); }

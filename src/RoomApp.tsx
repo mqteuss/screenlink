@@ -12,6 +12,8 @@ type ChatMessage = { id: string; senderId: string; senderName: string; text: str
 type Resolution = 360 | 480 | 720 | 1080;
 type FrameRate = 15 | 30 | 45 | 60;
 type AudioSettings = { inputDeviceId: string; outputDeviceId: string; inputVolume: number; outputVolume: number; echoCancellation: boolean; noiseSuppression: boolean; autoGainControl: boolean };
+type VoiceSettingKey = 'echoCancellation' | 'noiseSuppression' | 'autoGainControl';
+type VoiceSettingSupport = Record<VoiceSettingKey, boolean>;
 
 type PeerRecord = {
   id: string;
@@ -51,6 +53,12 @@ const CHAT_LIMIT = 160;
 const RESOLUTIONS: Resolution[] = [360, 480, 720, 1080];
 const FRAME_RATES: FrameRate[] = [15, 30, 45, 60];
 const PARTICIPANT_LIMITS = [2, 3, 4, 5, 6, 7, 8];
+const VOICE_SETTING_KEYS: VoiceSettingKey[] = ['noiseSuppression', 'echoCancellation', 'autoGainControl'];
+const VOICE_SETTING_DETAILS: Record<VoiceSettingKey, { label: string; description: string }> = {
+  noiseSuppression: { label: 'Isolamento de voz', description: 'Reduz ruídos ao redor' },
+  echoCancellation: { label: 'Controle de eco', description: 'Evita retorno nos alto-falantes' },
+  autoGainControl: { label: 'Ganho automático', description: 'Equilibra o volume da sua voz' }
+};
 const CHAT_EMOJIS = ['😀', '😂', '🥹', '😍', '😎', '🤔', '😅', '😭', '😡', '👍', '👎', '👏', '🙌', '🙏', '🤝', '💙', '🔥', '✨', '🎉', '🎮', '👀', '✅', '❌', '🚀'];
 const PREMIUM_PARTICLES = [
   ['11%', '26%', '.8px', '15.2s', '-2.6s', '.55px'],
@@ -194,6 +202,39 @@ function isMobileDevice() {
   return window.matchMedia(MOBILE_MEDIA_QUERY).matches;
 }
 
+function detectVoiceSettingSupport(): VoiceSettingSupport {
+  const supported = navigator.mediaDevices?.getSupportedConstraints?.();
+  return {
+    noiseSuppression: supported?.noiseSuppression === true,
+    echoCancellation: supported?.echoCancellation === true,
+    autoGainControl: supported?.autoGainControl === true
+  };
+}
+
+function voiceProcessingConstraints(settings: AudioSettings, support: VoiceSettingSupport): MediaTrackConstraints {
+  const constraints: MediaTrackConstraints = {};
+  for (const key of VOICE_SETTING_KEYS) {
+    if (support[key]) constraints[key] = settings[key];
+  }
+  return constraints;
+}
+
+function microphoneConstraints(settings: AudioSettings, support: VoiceSettingSupport): MediaTrackConstraints {
+  return {
+    ...(settings.inputDeviceId ? { deviceId: { exact: settings.inputDeviceId } } : {}),
+    ...voiceProcessingConstraints(settings, support)
+  };
+}
+
+function readVoiceTrackSettings(track: MediaStreamTrack): Partial<Record<VoiceSettingKey, boolean>> {
+  const settings = track.getSettings() as MediaTrackSettings & Partial<Record<VoiceSettingKey, boolean>>;
+  const result: Partial<Record<VoiceSettingKey, boolean>> = {};
+  for (const key of VOICE_SETTING_KEYS) {
+    if (typeof settings[key] === 'boolean') result[key] = settings[key];
+  }
+  return result;
+}
+
 function loadProfile(): RoomProfile {
   try {
     const stored = JSON.parse(localStorage.getItem(PROFILE_KEY) || '{}') as Partial<RoomProfile>;
@@ -303,6 +344,7 @@ export default function RoomApp() {
   const initialOwner = useMemo(() => initialInvite ? null : loadOwnerSession(), [initialInvite]);
   const [profile, setProfile] = useState<RoomProfile>(() => loadProfile());
   const profileRef = useRef(profile);
+  const profileEditRevisionRef = useRef(0);
   const [profileNameDraft, setProfileNameDraft] = useState(profile.name);
   const [profileStatusDraft, setProfileStatusDraft] = useState(profile.status);
   const profileNameDraftRef = useRef(profile.name);
@@ -353,7 +395,18 @@ export default function RoomApp() {
   const [screenMenuOpen, setScreenMenuOpen] = useState(false);
   const [leaveMenuOpen, setLeaveMenuOpen] = useState(false);
   const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
-  const [audioSettings, setAudioSettings] = useState<AudioSettings>({ inputDeviceId: '', outputDeviceId: '', inputVolume: 100, outputVolume: 100, echoCancellation: true, noiseSuppression: true, autoGainControl: true });
+  const [voiceSettingSupport] = useState(detectVoiceSettingSupport);
+  const [voiceSettingPending, setVoiceSettingPending] = useState<VoiceSettingKey | null>(null);
+  const [voiceSettingFeedback, setVoiceSettingFeedback] = useState('');
+  const [audioSettings, setAudioSettings] = useState<AudioSettings>(() => ({
+    inputDeviceId: '',
+    outputDeviceId: '',
+    inputVolume: 100,
+    outputVolume: 100,
+    echoCancellation: voiceSettingSupport.echoCancellation,
+    noiseSuppression: voiceSettingSupport.noiseSuppression,
+    autoGainControl: voiceSettingSupport.autoGainControl
+  }));
 
   const socketRef = useRef<WebSocket | null>(null);
   const iceServersRef = useRef<IceServerConfig[]>([]);
@@ -408,8 +461,9 @@ export default function RoomApp() {
 
   useEffect(() => {
     let cancelled = false;
+    const revisionAtLoad = profileEditRevisionRef.current;
     void loadStoredProfile().then(stored => {
-      if (cancelled || !stored) return;
+      if (cancelled || !stored || profileEditRevisionRef.current !== revisionAtLoad) return;
       const restored = {
         ...profileRef.current,
         name: normalizeName(stored.name),
@@ -716,6 +770,8 @@ export default function RoomApp() {
       setLeaderId(message.leaderId);
       if (message.maxParticipants) setMaxParticipants(message.maxParticipants);
       const next = Object.fromEntries(message.participants.map(participant => [participant.id, participant]));
+      const localParticipant = next[message.selfId];
+      if (localParticipant) next[message.selfId] = { ...localParticipant, ...profileRef.current };
       setParticipants(next);
       setMode('connected');
       setError('');
@@ -905,15 +961,24 @@ export default function RoomApp() {
       const settings = audioSettingsRef.current;
       const sourceStream = await navigator.mediaDevices.getUserMedia({
         video: false,
-        audio: {
-          deviceId: settings.inputDeviceId ? { exact: settings.inputDeviceId } : undefined,
-          echoCancellation: settings.echoCancellation,
-          noiseSuppression: settings.noiseSuppression,
-          autoGainControl: settings.autoGainControl
-        }
+        audio: microphoneConstraints(settings, voiceSettingSupport)
       });
       const sourceTrack = sourceStream.getAudioTracks()[0];
       if (!sourceTrack) return false;
+      const verifiedSettings = readVoiceTrackSettings(sourceTrack);
+      const effectiveSettings = { ...settings };
+      let browserAdjustedSettings = false;
+      for (const key of VOICE_SETTING_KEYS) {
+        const verified = verifiedSettings[key];
+        if (typeof verified !== 'boolean') continue;
+        if (verified !== settings[key]) browserAdjustedSettings = true;
+        effectiveSettings[key] = verified;
+      }
+      audioSettingsRef.current = effectiveSettings;
+      setAudioSettings(effectiveSettings);
+      setVoiceSettingFeedback(browserAdjustedSettings
+        ? 'O navegador ajustou os filtros disponíveis para este microfone.'
+        : 'Tratamento de voz aplicado ao microfone.');
       disposeMicrophonePipeline();
       microphoneSourceStreamRef.current = sourceStream;
       localMicrophoneStreamRef.current = sourceStream;
@@ -952,10 +1017,11 @@ export default function RoomApp() {
       }, { once: true });
       return true;
     } catch {
+      setVoiceSettingFeedback('Não foi possível acessar o microfone. Verifique a permissão e o dispositivo de entrada.');
       setError('Não foi possível abrir o microfone. Confira a permissão e o dispositivo de entrada.');
       return false;
     }
-  }, [disposeMicrophonePipeline, updateSelfMediaState]);
+  }, [disposeMicrophonePipeline, updateSelfMediaState, voiceSettingSupport]);
 
   const toggleMicrophone = useCallback(async () => {
     if (!localMicrophoneTrackRef.current || localMicrophoneTrackRef.current.readyState !== 'live') {
@@ -1070,6 +1136,7 @@ export default function RoomApp() {
   }, [destroyPeer, disposeMicrophonePipeline]);
 
   function updateProfile(next: Partial<RoomProfile>) {
+    profileEditRevisionRef.current += 1;
     const updated = { ...profileRef.current, ...next, name: normalizeName(next.name ?? profileRef.current.name), avatar: normalizeAvatar(next.avatar ?? profileRef.current.avatar), status: normalizeStatus(next.status ?? profileRef.current.status), device: mobile ? 'mobile' : 'desktop' } as RoomProfile;
     profileRef.current = updated;
     setProfile(updated);
@@ -1212,12 +1279,49 @@ export default function RoomApp() {
     }
   }
 
-  function changeVoiceSetting(key: 'echoCancellation' | 'noiseSuppression' | 'autoGainControl') {
-    const next = { ...audioSettingsRef.current, [key]: !audioSettingsRef.current[key] };
+  async function changeVoiceSetting(key: VoiceSettingKey) {
+    const details = VOICE_SETTING_DETAILS[key];
+    if (!voiceSettingSupport[key]) {
+      setVoiceSettingFeedback(`${details.label} não é oferecido por este navegador.`);
+      return;
+    }
+
+    const previous = audioSettingsRef.current;
+    const next = { ...previous, [key]: !previous[key] };
     audioSettingsRef.current = next;
     setAudioSettings(next);
     const sourceTrack = microphoneSourceStreamRef.current?.getAudioTracks()[0];
-    if (sourceTrack) void sourceTrack.applyConstraints({ echoCancellation: next.echoCancellation, noiseSuppression: next.noiseSuppression, autoGainControl: next.autoGainControl }).catch(() => undefined);
+    if (!sourceTrack || sourceTrack.readyState !== 'live') {
+      setVoiceSettingFeedback(`${details.label} será ${next[key] ? 'ativado' : 'desativado'} ao ligar o microfone.`);
+      return;
+    }
+
+    setVoiceSettingPending(key);
+    try {
+      await sourceTrack.applyConstraints(voiceProcessingConstraints(next, voiceSettingSupport));
+      const verified = readVoiceTrackSettings(sourceTrack);
+      const effective = { ...next };
+      for (const settingKey of VOICE_SETTING_KEYS) {
+        if (typeof verified[settingKey] === 'boolean') effective[settingKey] = verified[settingKey];
+      }
+      if (typeof verified[key] === 'boolean' && verified[key] !== next[key]) {
+        throw new Error('O navegador não aplicou a configuração solicitada.');
+      }
+      audioSettingsRef.current = effective;
+      setAudioSettings(effective);
+      setVoiceSettingFeedback(`${details.label} ${effective[key] ? 'ativado' : 'desativado'} no microfone.`);
+    } catch {
+      const verified = readVoiceTrackSettings(sourceTrack);
+      const restored = { ...next };
+      for (const settingKey of VOICE_SETTING_KEYS) {
+        restored[settingKey] = typeof verified[settingKey] === 'boolean' ? verified[settingKey] : previous[settingKey];
+      }
+      audioSettingsRef.current = restored;
+      setAudioSettings(restored);
+      setVoiceSettingFeedback(`Não foi possível alterar ${details.label.toLocaleLowerCase('pt-BR')} neste dispositivo.`);
+    } finally {
+      setVoiceSettingPending(current => current === key ? null : current);
+    }
   }
 
   function togglePlayback() {
@@ -1368,14 +1472,14 @@ export default function RoomApp() {
         <section className="audio-menu-section">
           <header><strong>Tratamento de voz</strong><small>MICROFONE</small></header>
           <div className="voice-settings">
-            {([
-              ['noiseSuppression', 'Isolamento de voz', 'Reduz ruídos ao redor'],
-              ['echoCancellation', 'Controle de eco', 'Evita retorno nos alto-falantes'],
-              ['autoGainControl', 'Ganho automático', 'Equilibra o volume da sua voz']
-            ] as const).map(([key, label, description]) => (
-              <button key={key} className="voice-setting" type="button" role="switch" aria-checked={audioSettings[key]} onClick={() => changeVoiceSetting(key)}><span><strong>{label}</strong><small>{description}</small></span><i><b/></i></button>
-            ))}
+            {VOICE_SETTING_KEYS.map(key => {
+              const details = VOICE_SETTING_DETAILS[key];
+              const unsupported = !voiceSettingSupport[key];
+              const applying = voiceSettingPending === key;
+              return <button key={key} className={`voice-setting ${applying ? 'is-applying' : ''}`} type="button" role="switch" aria-checked={audioSettings[key]} aria-busy={applying} disabled={unsupported || voiceSettingPending !== null} onClick={() => void changeVoiceSetting(key)}><span><strong>{details.label}</strong><small>{unsupported ? 'Não disponível neste navegador' : applying ? 'Aplicando ao microfone…' : details.description}</small></span><i><b/></i></button>;
+            })}
           </div>
+          {voiceSettingFeedback && <p className="voice-processing-feedback" role="status">{voiceSettingFeedback}</p>}
         </section>
       </div>
     </section>
@@ -1463,7 +1567,7 @@ export default function RoomApp() {
   ) : (
     <div className="stage-empty unified-stage-empty">
       {session && mode === 'connected' && connectedParticipants.length ? (
-        <div className="stage-identities">{connectedParticipants.map(participant => <div className="stage-identity" key={participant.id}><Avatar avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} leader={participant.id === leaderId} size="large"/><strong>{participant.id === selfId ? 'Você' : participant.name}</strong><small>{participant.status}</small></div>)}</div>
+        <div className="stage-identities">{connectedParticipants.map(participant => <div className="stage-identity" key={participant.id}><Avatar avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} leader={participant.id === leaderId} size="large"/><strong>{participant.name}</strong><small>{participant.status}</small></div>)}</div>
       ) : <div className="stage-echo"><Avatar avatar="echo" name="Echo" size="large"/></div>}
       <h1>{!session ? 'Inicie uma chamada' : mode === 'connecting' ? 'Entrando na chamada' : mode === 'error' ? 'Sala indisponível' : 'Chamada em andamento'}</h1>
       {mode !== 'connected' && <p>{!session ? 'Crie uma sala ou entre com um código. Quem estiver no computador também pode compartilhar a própria tela.' : mode === 'connecting' ? 'Reconectando à sala sem interromper quem já está aqui…' : error}</p>}
@@ -1494,7 +1598,7 @@ export default function RoomApp() {
         <section className={`share-stage unified-room-stage ${sharingParticipants.length ? 'has-screens' : ''}`}>
           {stageContent}
           {session && !sharingParticipants.length && mode === 'connected' && (
-            <div className="participant-rail">{connectedParticipants.map(participant => <div key={participant.id} className={speakingIds.has(participant.id) ? 'is-speaking' : ''}><Avatar avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} leader={participant.id === leaderId} size="small"/><span><strong>{participant.id === selfId ? 'Você' : participant.name}</strong><small>{participant.status}</small></span></div>)}</div>
+            <div className="participant-rail">{connectedParticipants.map(participant => <div key={participant.id} className={speakingIds.has(participant.id) ? 'is-speaking' : ''}><Avatar avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} leader={participant.id === leaderId} size="small"/><span><strong>{participant.name}</strong><small>{participant.status}</small></span></div>)}</div>
           )}
           {callDock}
         </section>
