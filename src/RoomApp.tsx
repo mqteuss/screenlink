@@ -46,6 +46,7 @@ type RoomMessage =
 const OWNER_ROOM_KEY = 'screenlink-owner-room-v2';
 const PROFILE_KEY = 'screenlink-room-profile-v2';
 const PEER_KEY_PREFIX = 'screenlink-room-peer:';
+const MOBILE_MEDIA_QUERY = '(max-width: 760px), (pointer: coarse) and (max-width: 980px)';
 const CHAT_LIMIT = 160;
 const RESOLUTIONS: Resolution[] = [360, 480, 720, 1080];
 const FRAME_RATES: FrameRate[] = [15, 30, 45, 60];
@@ -190,7 +191,7 @@ function normalizeStatus(value: string) {
 }
 
 function isMobileDevice() {
-  return window.matchMedia('(max-width: 760px), (pointer: coarse) and (max-width: 980px)').matches;
+  return window.matchMedia(MOBILE_MEDIA_QUERY).matches;
 }
 
 function loadProfile(): RoomProfile {
@@ -304,6 +305,8 @@ export default function RoomApp() {
   const profileRef = useRef(profile);
   const [profileNameDraft, setProfileNameDraft] = useState(profile.name);
   const [profileStatusDraft, setProfileStatusDraft] = useState(profile.status);
+  const profileNameDraftRef = useRef(profile.name);
+  const profileStatusDraftRef = useRef(profile.status);
   const [profileStorageReady, setProfileStorageReady] = useState(false);
   const [profileSaveState, setProfileSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [avatarUploading, setAvatarUploading] = useState(false);
@@ -332,6 +335,9 @@ export default function RoomApp() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const chatMessagesRef = useRef<ChatMessage[]>([]);
   const seenMessageIdsRef = useRef(new Set<string>());
+  const ownMessageIdsRef = useRef(new Set<string>());
+  const chatOpenRef = useRef(chatOpen);
+  const [unreadMessages, setUnreadMessages] = useState(0);
   const [chatValue, setChatValue] = useState('');
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
@@ -342,7 +348,7 @@ export default function RoomApp() {
   const [copied, setCopied] = useState<'code' | 'link' | ''>('');
   const [mediaLatency, setMediaLatency] = useState<number | null>(null);
   const [peerVersion, setPeerVersion] = useState(0);
-  const [mobile] = useState(isMobileDevice);
+  const [mobile, setMobile] = useState(isMobileDevice);
   const [audioMenuOpen, setAudioMenuOpen] = useState(false);
   const [screenMenuOpen, setScreenMenuOpen] = useState(false);
   const [leaveMenuOpen, setLeaveMenuOpen] = useState(false);
@@ -381,6 +387,24 @@ export default function RoomApp() {
   useEffect(() => { playbackEnabledRef.current = playbackEnabled; }, [playbackEnabled]);
   useEffect(() => { chatMessagesRef.current = chatMessages; }, [chatMessages]);
   useEffect(() => { audioSettingsRef.current = audioSettings; }, [audioSettings]);
+  useEffect(() => { profileNameDraftRef.current = profileNameDraft; }, [profileNameDraft]);
+  useEffect(() => { profileStatusDraftRef.current = profileStatusDraft; }, [profileStatusDraft]);
+  useEffect(() => {
+    chatOpenRef.current = chatOpen;
+    if (chatOpen) setUnreadMessages(0);
+  }, [chatOpen]);
+
+  useEffect(() => {
+    const query = window.matchMedia(MOBILE_MEDIA_QUERY);
+    const syncViewport = () => setMobile(query.matches);
+    syncViewport();
+    query.addEventListener('change', syncViewport);
+    return () => query.removeEventListener('change', syncViewport);
+  }, []);
+
+  useEffect(() => {
+    if (!mobile) setControlsOpen(false);
+  }, [mobile]);
 
   useEffect(() => {
     let cancelled = false;
@@ -393,6 +417,8 @@ export default function RoomApp() {
         status: normalizeStatus(stored.status)
       };
       profileRef.current = restored;
+      profileNameDraftRef.current = restored.name;
+      profileStatusDraftRef.current = restored.status;
       setProfile(restored);
       setProfileNameDraft(restored.name);
       setProfileStatusDraft(restored.status);
@@ -476,10 +502,20 @@ export default function RoomApp() {
     log.scrollTop = log.scrollHeight;
   }, [chatMessages, chatOpen, chatValue]);
 
-  const appendMessage = useCallback((message: ChatMessage) => {
+  const appendMessage = useCallback((message: ChatMessage, own = false) => {
+    if (own) ownMessageIdsRef.current.add(message.id);
     if (seenMessageIdsRef.current.has(message.id)) return;
     seenMessageIdsRef.current.add(message.id);
-    setChatMessages(current => [...current, message].slice(-CHAT_LIMIT));
+    if (!own && !message.system && !chatOpenRef.current) setUnreadMessages(current => Math.min(99, current + 1));
+    setChatMessages(current => {
+      const next = [...current, message].slice(-CHAT_LIMIT);
+      if (seenMessageIdsRef.current.size > CHAT_LIMIT * 2) {
+        const retained = new Set(next.map(item => item.id));
+        for (const id of seenMessageIdsRef.current) if (!retained.has(id)) seenMessageIdsRef.current.delete(id);
+        for (const id of ownMessageIdsRef.current) if (!retained.has(id)) ownMessageIdsRef.current.delete(id);
+      }
+      return next;
+    });
   }, []);
 
   const systemMessage = useCallback((text: string) => {
@@ -507,14 +543,35 @@ export default function RoomApp() {
     });
   }, []);
 
+  useEffect(() => {
+    const device: RoomProfile['device'] = mobile ? 'mobile' : 'desktop';
+    if (profileRef.current.device === device) return;
+    const updated = { ...profileRef.current, device };
+    profileRef.current = updated;
+    setProfile(updated);
+    const id = selfIdRef.current;
+    if (id && participantsRef.current[id]) updateParticipant({ ...participantsRef.current[id], ...updated });
+    updateSelfMediaState();
+  }, [mobile, updateParticipant, updateSelfMediaState]);
+
   const attachChatChannel = useCallback((record: PeerRecord, channel: RTCDataChannel) => {
     record.chatChannel = channel;
     channel.onmessage = event => {
       if (typeof event.data !== 'string') return;
       try {
-        const message = JSON.parse(event.data) as ChatMessage;
-        if (!message?.id || typeof message.text !== 'string' || message.text.length > 1_000) return;
-        appendMessage(message);
+        const incoming = JSON.parse(event.data) as Partial<ChatMessage>;
+        const id = typeof incoming.id === 'string' ? incoming.id.slice(0, 200) : '';
+        const text = typeof incoming.text === 'string' ? incoming.text.trim().slice(0, 1_000) : '';
+        if (!id || !text) return;
+        const sentAt = Number(incoming.sentAt);
+        const participant = participantsRef.current[record.id];
+        appendMessage({
+          id,
+          senderId: record.id,
+          senderName: participant?.name || 'Participante',
+          text,
+          sentAt: Number.isFinite(sentAt) && sentAt > 0 ? sentAt : Date.now()
+        });
       } catch {
         // Mensagens inválidas não afetam a chamada.
       }
@@ -1022,13 +1079,15 @@ export default function RoomApp() {
   }
 
   function commitProfileName() {
-    const name = normalizeName(profileNameDraft || profileRef.current.name);
+    const name = normalizeName(profileNameDraftRef.current || profileRef.current.name);
+    profileNameDraftRef.current = name;
     setProfileNameDraft(name);
     if (name !== profileRef.current.name) updateProfile({ name });
   }
 
   function commitProfileStatus() {
-    const status = normalizeStatus(profileStatusDraft || profileRef.current.status);
+    const status = normalizeStatus(profileStatusDraftRef.current || profileRef.current.status);
+    profileStatusDraftRef.current = status;
     setProfileStatusDraft(status);
     if (status !== profileRef.current.status) updateProfile({ status });
   }
@@ -1180,7 +1239,7 @@ export default function RoomApp() {
     const text = chatValue.trim().slice(0, 1_000);
     if (!text || !selfIdRef.current) return;
     const message: ChatMessage = { id: `${selfIdRef.current}-${Date.now()}-${randomSecret(4)}`, senderId: selfIdRef.current, senderName: profileRef.current.name, text, sentAt: Date.now() };
-    appendMessage(message);
+    appendMessage(message, true);
     const payload = JSON.stringify(message);
     let directDeliveries = 0;
     for (const peer of peersRef.current.values()) {
@@ -1265,19 +1324,22 @@ export default function RoomApp() {
   const activeChat = chatOpen;
   const activeResolution = automaticQuality ? 720 : resolution;
   const activeFps = automaticQuality ? 30 : fps;
+  const screenShareSupported = typeof navigator.mediaDevices?.getDisplayMedia === 'function';
   void peerVersion;
 
   const chatPanel = (
     <div className="chat-panel unified-chat-panel">
       <div className="chat-log" ref={chatLogRef}>
-        {chatMessages.length ? chatMessages.map(message => message.system ? (
-          <p className="chat-system" key={message.id}>{message.text}</p>
-        ) : (
-          <article className={`chat-message ${message.senderId === selfId ? 'is-own' : ''}`} key={message.id}>
-            <header><strong>{message.senderId === selfId ? 'Você' : message.senderName}</strong><time>{new Date(message.sentAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</time></header>
-            <p>{message.text}</p>
-          </article>
-        )) : <div className="chat-empty"><Icon name="chat"/><strong>A conversa começa aqui</strong><span>As mensagens são temporárias e somem ao encerrar a chamada.</span></div>}
+        {chatMessages.length ? chatMessages.map(message => {
+          if (message.system) return <p className="chat-system" key={message.id}>{message.text}</p>;
+          const own = ownMessageIdsRef.current.has(message.id);
+          return (
+            <article className={`chat-message ${own ? 'is-own' : ''}`} key={message.id}>
+              <header><strong>{own ? 'Você' : message.senderName}</strong><time>{new Date(message.sentAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</time></header>
+              <p>{message.text}</p>
+            </article>
+          );
+        }) : <div className="chat-empty"><Icon name="chat"/><strong>A conversa começa aqui</strong><span>Envie a primeira mensagem da chamada.</span></div>}
       </div>
       <form className="chat-composer" onSubmit={sendChat}>
         <div className="emoji-picker-anchor" ref={emojiPickerRef}>
@@ -1322,7 +1384,7 @@ export default function RoomApp() {
   const screenPopover = screenMenuOpen ? (
     <section className="dock-popover more-popover screen-popover unified-screen-popover" aria-label="Configurações do compartilhamento">
       <header><strong>Compartilhamento</strong><small>{sharing ? 'ATIVO' : 'PRONTO'}</small></header>
-      <button type="button" onClick={() => { void toggleScreenShare(); setScreenMenuOpen(false); }}><Icon name="screen"/><span><strong>{sharing ? 'Parar compartilhamento' : 'Compartilhar tela'}</strong><small>{sharing ? 'A chamada continuará ativa' : 'Escolha uma tela, janela ou aba'}</small></span></button>
+      <button type="button" onClick={() => { void toggleScreenShare(); setScreenMenuOpen(false); }}><Icon name="screen"/><span><strong>{sharing ? 'Parar compartilhamento' : 'Compartilhar tela'}</strong><small>{sharing ? 'A chamada continuará ativa' : screenShareSupported ? 'Escolha uma tela, janela ou aba' : 'Não disponível neste navegador'}</small></span></button>
       <button type="button" onClick={() => setScreenMenuOpen(false)}><Icon name="settings"/><span><strong>Qualidade do vídeo</strong><small>{automaticQuality ? 'Automática' : `${resolution}p · ${fps} FPS`}</small></span></button>
     </section>
   ) : null;
@@ -1342,7 +1404,7 @@ export default function RoomApp() {
       {!session ? (
         <section className="panel-section unified-join-section">
           <div className="section-heading"><h3>Entrar em uma chamada</h3><small>CÓDIGO OU LINK</small></div>
-          <form onSubmit={joinRoom} className="unified-join-form"><div><Icon name="link"/><input value={joinValue} onChange={event => setJoinValue(event.target.value)} placeholder="Cole o código da sala" autoComplete="off"/><button type="submit">Entrar</button></div></form>
+          <form onSubmit={joinRoom} className="unified-join-form"><div><Icon name="link"/><input aria-label="Código ou link da chamada" value={joinValue} onChange={event => { setJoinValue(event.target.value); if (error) setError(''); }} placeholder="Cole o código da sala" autoComplete="off" autoCapitalize="characters" enterKeyHint="go" spellCheck={false} maxLength={512}/><button type="submit" disabled={!joinValue.trim()}>Entrar</button></div></form>
           {loadOwnerSession() && <button className="unified-resume" type="button" onClick={() => { setSession(loadOwnerSession()); setMode('connecting'); }}>Retomar sua última sala</button>}
         </section>
       ) : (
@@ -1352,6 +1414,7 @@ export default function RoomApp() {
           <div className="invite-actions"><button type="button" onClick={() => void copyValue('link')}><Icon name="link"/>{copied === 'link' ? 'Link copiado' : 'Copiar link'}</button><button type="button" onClick={() => setQrOpen(true)} disabled={!qrCode}><Icon name="qr"/>QR Code</button></div>
         </section>
       )}
+        {session && mobile && !screenShareSupported && <section className="panel-section mobile-screen-capability" role="status"><Icon name="screen"/><span><strong>Compartilhamento pelo celular</strong><small>Este navegador pode assistir à chamada, mas não consegue enviar a tela.</small></span></section>}
         <section className="panel-section quality-section">
           <div className="section-heading"><h3>Qualidade do vídeo</h3><small>{automaticQuality ? 'AUTOMÁTICA' : 'MANUAL'}</small></div>
           <button className={`toggle-row ${automaticQuality ? 'is-active' : ''}`} type="button" role="switch" aria-checked={automaticQuality} onClick={() => { const next = !automaticQuality; setAutomaticQuality(next); if (next) void applyVideoProfile(720, 30); }}><Icon name="settings"/><span className="toggle-row-copy"><strong>Ajuste automático</strong><small>{activeResolution}p · até {activeFps} FPS</small></span><span className="toggle-row-switch"><i/></span></button>
@@ -1362,7 +1425,6 @@ export default function RoomApp() {
           </div>
           <p className="profile-summary"><i/>Bitrate adaptativo ativo</p>
         </section>
-      <p className="privacy-note">Voz e tela P2P · chat com fallback pela sala · nada é gravado</p>
     </div>
   );
 
@@ -1375,10 +1437,10 @@ export default function RoomApp() {
         <button className={`dock-chevron ${audioMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { setAudioMenuOpen(open => !open); setScreenMenuOpen(false); setLeaveMenuOpen(false); }} aria-expanded={audioMenuOpen} aria-label="Configurações de áudio" data-label="Ajustes"><Icon name="chevronDown"/></button>
       </div>
       <div className="dock-split-control screen-split-control">
-        <button className={sharing ? 'is-on' : ''} type="button" onClick={() => void toggleScreenShare()} aria-label={sharing ? 'Parar compartilhamento' : 'Compartilhar tela'} aria-pressed={sharing} data-label={sharing ? 'Parar tela' : 'Compartilhar'}><Icon name="screen"/></button>
+        <button className={`${sharing ? 'is-on' : ''} ${!sharing && !screenShareSupported ? 'is-unsupported' : ''}`} type="button" onClick={() => void toggleScreenShare()} aria-label={sharing ? 'Parar compartilhamento' : screenShareSupported ? 'Compartilhar tela' : 'Compartilhamento de tela indisponível neste navegador'} aria-pressed={sharing} data-label={sharing ? 'Parar tela' : screenShareSupported ? 'Compartilhar' : 'Indisponível'} title={!sharing && !screenShareSupported ? 'Este navegador não permite compartilhar a tela' : undefined}><Icon name="screen"/></button>
         <button className={`dock-chevron ${screenMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { setScreenMenuOpen(open => !open); setAudioMenuOpen(false); setLeaveMenuOpen(false); }} aria-expanded={screenMenuOpen} aria-label="Configurações da tela" data-label="Ajustes"><Icon name="chevronDown"/></button>
       </div>
-      <button className={activeChat ? 'is-on' : ''} type="button" onClick={toggleChatSidebar} aria-label={activeChat ? 'Fechar chat' : 'Abrir chat'} data-label="Chat"><Icon name="chat"/></button>
+      <button className={`dock-chat-button ${activeChat ? 'is-on' : ''}`} type="button" onClick={toggleChatSidebar} aria-label={activeChat ? 'Fechar chat' : unreadMessages ? `Abrir chat, ${unreadMessages} mensagem${unreadMessages === 1 ? '' : 's'} não lida${unreadMessages === 1 ? '' : 's'}` : 'Abrir chat'} data-label="Chat"><Icon name="chat"/>{unreadMessages > 0 && <span className="chat-unread-badge" aria-hidden="true">{unreadMessages === 99 ? '99+' : unreadMessages}</span>}</button>
       {mobile && <button className={controlsOpen ? 'is-on mobile-controls-trigger' : 'mobile-controls-trigger'} type="button" onClick={() => { setControlsOpen(open => !open); setChatOpen(false); setProfileOpen(false); setAudioMenuOpen(false); setScreenMenuOpen(false); setLeaveMenuOpen(false); }} aria-expanded={controlsOpen} aria-label="Abrir controles" data-label="Controles"><Icon name="settings"/></button>}
       <span className="dock-divider"/>
       <button className="hangup" type="button" onClick={() => { setLeaveMenuOpen(open => !open); setAudioMenuOpen(false); setScreenMenuOpen(false); }} aria-expanded={leaveMenuOpen} aria-label="Opções para sair da chamada" data-label="Sair"><Icon name="hangup"/></button>
@@ -1403,12 +1465,10 @@ export default function RoomApp() {
       {session && mode === 'connected' && connectedParticipants.length ? (
         <div className="stage-identities">{connectedParticipants.map(participant => <div className="stage-identity" key={participant.id}><Avatar avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} leader={participant.id === leaderId} size="large"/><strong>{participant.id === selfId ? 'Você' : participant.name}</strong><small>{participant.status}</small></div>)}</div>
       ) : <div className="stage-echo"><Avatar avatar="echo" name="Echo" size="large"/></div>}
-      <span className="eyebrow">Voz e tela P2P · chat resiliente</span>
       <h1>{!session ? 'Inicie uma chamada' : mode === 'connecting' ? 'Entrando na chamada' : mode === 'error' ? 'Sala indisponível' : 'Chamada em andamento'}</h1>
-      <p>{!session ? 'Crie uma sala ou entre com um código. Depois, qualquer pessoa no computador pode compartilhar a própria tela.' : mode === 'connecting' ? 'Reconectando à sala sem interromper quem já está aqui…' : mode === 'error' ? error : 'A conversa continua normalmente mesmo quando nenhuma tela está sendo compartilhada.'}</p>
+      {mode !== 'connected' && <p>{!session ? 'Crie uma sala ou entre com um código. Quem estiver no computador também pode compartilhar a própria tela.' : mode === 'connecting' ? 'Reconectando à sala sem interromper quem já está aqui…' : error}</p>}
       {!session && <div className="stage-entry-actions"><button className="primary-action" type="button" onClick={() => void createRoom()}><Icon name="users"/> Iniciar chamada</button>{mobile && <button className="secondary-action" type="button" onClick={() => { setControlsOpen(true); setChatOpen(false); }}><Icon name="link"/> Entrar com código</button>}</div>}
       {mode === 'error' && <button className="primary-action" type="button" onClick={leaveRoom}>Voltar</button>}
-      <small className="stage-note">Voz, tela e chat temporários · nada é gravado</small>
     </div>
   );
 
@@ -1447,8 +1507,8 @@ export default function RoomApp() {
       {profileOpen && (
         <div ref={profilePopoverRef} className="room-popover profile-popover unified-profile-popover">
           <header><div><span className="eyebrow">SEU PERFIL</span><h3>Como você aparece</h3></div><button type="button" onClick={() => { commitProfileName(); commitProfileStatus(); setProfileOpen(false); }} aria-label="Fechar perfil"><Icon name="close"/></button></header>
-          <label htmlFor="profile-name">Nome</label><input id="profile-name" value={profileNameDraft} onChange={event => setProfileNameDraft(event.target.value)} onBlur={commitProfileName} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { setProfileNameDraft(profileRef.current.name); event.currentTarget.blur(); } }} maxLength={28}/>
-          <label htmlFor="profile-status">Mensagem de status</label><input id="profile-status" value={profileStatusDraft} onChange={event => setProfileStatusDraft(event.target.value)} onBlur={commitProfileStatus} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { setProfileStatusDraft(profileRef.current.status); event.currentTarget.blur(); } }} maxLength={64} placeholder="Disponível"/>
+          <label htmlFor="profile-name">Nome</label><input id="profile-name" value={profileNameDraft} onChange={event => { profileNameDraftRef.current = event.target.value; setProfileNameDraft(event.target.value); }} onBlur={commitProfileName} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { profileNameDraftRef.current = profileRef.current.name; setProfileNameDraft(profileRef.current.name); event.currentTarget.blur(); } }} maxLength={28}/>
+          <label htmlFor="profile-status">Mensagem de status</label><input id="profile-status" value={profileStatusDraft} onChange={event => { profileStatusDraftRef.current = event.target.value; setProfileStatusDraft(event.target.value); }} onBlur={commitProfileStatus} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { profileStatusDraftRef.current = profileRef.current.status; setProfileStatusDraft(profileRef.current.status); event.currentTarget.blur(); } }} maxLength={64} placeholder="Disponível"/>
           <div className="profile-photo-heading"><label>Foto</label><small>{profileSaveState === 'saving' ? 'SALVANDO…' : profileSaveState === 'saved' ? profileStorageKind() === 'sqlite' ? 'SALVO NO SQLITE LOCAL' : 'SALVO NESTE NAVEGADOR' : profileSaveState === 'error' ? 'ERRO AO SALVAR' : 'ARMAZENAMENTO LOCAL'}</small></div>
           <div className="profile-photo-actions"><Avatar avatar={profile.avatar} name={profile.name} size="normal"/><label className="profile-photo-upload">{avatarUploading ? 'Preparando…' : 'Escolher foto'}<input type="file" accept="image/*" onChange={event => void uploadAvatar(event)} disabled={avatarUploading}/></label>{profile.avatar.startsWith('data:image/') && <button type="button" onClick={removeCustomAvatar}>Remover</button>}</div>
           <label>Avatares do app</label><div className="avatar-picker">{AVATARS.map(avatar => <button className={profile.avatar === avatar.id ? 'selected' : ''} type="button" key={avatar.id} onClick={() => updateProfile({ avatar: avatar.id })}><Avatar avatar={avatar.id} name={avatar.label}/><span>{avatar.label}</span></button>)}</div>
