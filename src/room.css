@@ -430,14 +430,28 @@
 .unified-profile-popover .avatar-picker { padding: 0 .58rem; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: .2rem; }
 .unified-profile-popover .avatar-picker button { min-width: 0; padding: .35rem .08rem .28rem; border-radius: .52rem; font-size: .47rem; }
 .unified-profile-popover .avatar-picker .preset-avatar { width: 1.65rem; height: 1.65rem; }
-.unified-control-panel { padding: 1rem 1rem .8rem; gap: 1rem; }
-.unified-control-panel .panel-header { min-height: 2.8rem; padding-bottom: .6rem; border-bottom: 1px solid #242728; }
-.unified-control-panel .panel-header h2 { font-size: 1rem; }
+.unified-control-panel { padding: 1.2rem 1.15rem .9rem; gap: 1.15rem; }
+.unified-control-panel .panel-header { min-height: 3rem; padding: 0 .1rem .8rem; border-bottom: 1px solid #292c2e; }
+.unified-control-panel .panel-header h2 { font-size: 1.04rem; font-weight: 610; letter-spacing: -.025em; }
+.unified-control-panel .audience-count { color: #858d90; font-size: .68rem; }
 .unified-control-panel .panel-view { overflow: hidden; }
-.unified-call-page .panel-section { padding: 1.15rem 0; }
-.unified-call-page .section-heading { margin-bottom: .78rem; }
-.unified-call-page .quality-controls { gap: .88rem .72rem; }
+.unified-call-page .panel-section { padding: 1.3rem .08rem; }
+.unified-call-page .panel-section:first-child { padding-top: .15rem; }
+.unified-call-page .section-heading { min-height: 1.35rem; margin-bottom: .9rem; }
+.unified-call-page .section-heading h3 { font-size: .82rem; font-weight: 640; }
+.unified-call-page .section-heading > small { color: #858d90; font-size: .54rem; }
+.unified-call-page .quality-controls { gap: 1rem .78rem; }
 .unified-call-page .privacy-note { padding-top: .85rem; }
+
+.sidebar-bitrate-settings { margin-top: 1.15rem; padding-top: 1.05rem; border-top: 1px solid #222526; }
+.subsection-heading { min-height: 1.2rem; margin-bottom: .45rem; display: flex; align-items: center; justify-content: space-between; gap: .7rem; }
+.subsection-heading strong { color: #cfd5d6; font-size: .68rem; font-weight: 620; }
+.subsection-heading small { color: #72b8c8; font-size: .57rem; font-weight: 620; font-variant-numeric: tabular-nums; }
+.sidebar-bitrate-settings .bitrate-toggle { margin-bottom: .28rem; }
+.sidebar-bitrate-control { min-height: 3.55rem; grid-template-columns: minmax(0, 1fr) minmax(5.2rem, 6.8rem) 3.1rem; }
+.sidebar-bitrate-control label strong { font-size: .68rem; }
+.sidebar-bitrate-control label small { font-size: .55rem; }
+.unified-screen-popover { max-height: min(36rem, calc(100dvh - 8.5rem)); }
 
 .invite-code-display { min-height: 3.25rem; padding: .55rem .75rem; border-radius: .72rem; display: flex; align-items: center; justify-content: space-between; gap: .7rem; background: #16191a; }
 .invite-code-display span { color: #828a8d; font-size: .61rem; }
@@ -471,7 +485,8 @@
 @media (max-width: 1240px) and (min-width: 761px) {
   .unified-room-app { --room-sidebar-width: 18.5rem; }
   .unified-room-app.is-chat-open .unified-room-main { grid-template-columns: var(--room-sidebar-width) minmax(0, 1fr) var(--room-sidebar-width); }
-  .unified-control-panel { padding-right: .72rem; padding-left: .72rem; }
+  .unified-control-panel { padding-right: .9rem; padding-left: .9rem; }
+  .sidebar-bitrate-control { grid-template-columns: minmax(0, 1fr) 5rem 2.9rem; gap: .42rem; }
 }
 
 @media (max-width: 760px) {

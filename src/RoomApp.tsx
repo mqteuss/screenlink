@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import QRCode from 'qrcode';
+import { playInterfaceSound as playCallSound, unlockInterfaceSounds, type InterfaceSoundName } from './callSounds';
 import { createPrivateRoom, parseInvite, signalUrl, type IceServerConfig, type Invite, type RoomParticipant, type RoomProfile, type SessionDescription } from './protocol';
 import { loadStoredProfile, prepareAvatar, profileStorageKind, saveStoredProfile } from './profileStore';
 import './room.css';
@@ -47,12 +48,15 @@ type RoomMessage =
 
 const OWNER_ROOM_KEY = 'screenlink-owner-room-v2';
 const PROFILE_KEY = 'screenlink-room-profile-v2';
+const INTERFACE_SOUNDS_KEY = 'screenlink-interface-sounds-v1';
 const PEER_KEY_PREFIX = 'screenlink-room-peer:';
 const MOBILE_MEDIA_QUERY = '(max-width: 760px), (pointer: coarse) and (max-width: 980px)';
 const CHAT_LIMIT = 160;
 const RESOLUTIONS: Resolution[] = [360, 480, 720, 1080];
 const FRAME_RATES: FrameRate[] = [15, 30, 45, 60];
 const PARTICIPANT_LIMITS = [2, 3, 4, 5, 6, 7, 8];
+const MIN_BITRATE_MBPS = 0.5;
+const MAX_BITRATE_MBPS = 20;
 const VOICE_SETTING_KEYS: VoiceSettingKey[] = ['noiseSuppression', 'echoCancellation', 'autoGainControl'];
 const VOICE_SETTING_DETAILS: Record<VoiceSettingKey, { label: string; description: string }> = {
   noiseSuppression: { label: 'Isolamento de voz', description: 'Reduz ruídos ao redor' },
@@ -219,10 +223,12 @@ function voiceProcessingConstraints(settings: AudioSettings, support: VoiceSetti
   return constraints;
 }
 
-function microphoneConstraints(settings: AudioSettings, support: VoiceSettingSupport): MediaTrackConstraints {
+function microphoneConstraints(settings: AudioSettings, support: VoiceSettingSupport, exactSetting?: VoiceSettingKey): MediaTrackConstraints {
+  const processing = voiceProcessingConstraints(settings, support);
+  if (exactSetting && support[exactSetting]) processing[exactSetting] = { exact: settings[exactSetting] };
   return {
     ...(settings.inputDeviceId ? { deviceId: { exact: settings.inputDeviceId } } : {}),
-    ...voiceProcessingConstraints(settings, support)
+    ...processing
   };
 }
 
@@ -233,6 +239,39 @@ function readVoiceTrackSettings(track: MediaStreamTrack): Partial<Record<VoiceSe
     if (typeof settings[key] === 'boolean') result[key] = settings[key];
   }
   return result;
+}
+
+function detectVoiceTrackSupport(track: MediaStreamTrack, fallback: VoiceSettingSupport): VoiceSettingSupport {
+  const result = { ...fallback };
+  let capabilities: (MediaTrackCapabilities & Partial<Record<VoiceSettingKey, boolean[]>>) | undefined;
+  try {
+    capabilities = track.getCapabilities?.() as MediaTrackCapabilities & Partial<Record<VoiceSettingKey, boolean[]>>;
+  } catch {
+    return result;
+  }
+  for (const key of VOICE_SETTING_KEYS) {
+    const values = capabilities?.[key];
+    if (Array.isArray(values)) result[key] = values.includes(true) && values.includes(false);
+  }
+  return result;
+}
+
+function recommendedBitrateMbps(resolution: Resolution, fps: FrameRate) {
+  return Math.min(MAX_BITRATE_MBPS, Math.max(MIN_BITRATE_MBPS, VIDEO_PRESETS[resolution].bitrate * (fps / 30) / 1_000_000));
+}
+
+function formatBitrate(value: number) {
+  return `${value < 10 && value % 1 ? value.toFixed(1) : Math.round(value)} Mb/s`;
+}
+
+async function configureScreenSender(sender: RTCRtpSender | null, resolution: Resolution, fps: FrameRate, adaptive: boolean, manualMbps: number) {
+  if (!sender?.track) return;
+  const parameters = sender.getParameters();
+  parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
+  parameters.encodings[0]!.maxBitrate = Math.round((adaptive ? recommendedBitrateMbps(resolution, fps) : manualMbps) * 1_000_000);
+  parameters.encodings[0]!.maxFramerate = fps;
+  parameters.degradationPreference = adaptive ? 'balanced' : 'maintain-resolution';
+  await sender.setParameters(parameters).catch(() => undefined);
 }
 
 function loadProfile(): RoomProfile {
@@ -365,6 +404,8 @@ export default function RoomApp() {
   const [resolution, setResolution] = useState<Resolution>(720);
   const [fps, setFps] = useState<FrameRate>(30);
   const [automaticQuality, setAutomaticQuality] = useState(true);
+  const [adaptiveBitrate, setAdaptiveBitrate] = useState(true);
+  const [bitrateMbps, setBitrateMbps] = useState(4);
   const [maxParticipants, setMaxParticipants] = useState(8);
   const [microphoneEnabled, setMicrophoneEnabled] = useState(false);
   const microphoneEnabledRef = useRef(false);
@@ -395,9 +436,10 @@ export default function RoomApp() {
   const [screenMenuOpen, setScreenMenuOpen] = useState(false);
   const [leaveMenuOpen, setLeaveMenuOpen] = useState(false);
   const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
-  const [voiceSettingSupport] = useState(detectVoiceSettingSupport);
+  const [voiceSettingSupport, setVoiceSettingSupport] = useState(detectVoiceSettingSupport);
   const [voiceSettingPending, setVoiceSettingPending] = useState<VoiceSettingKey | null>(null);
   const [voiceSettingFeedback, setVoiceSettingFeedback] = useState('');
+  const [interfaceSoundsEnabled, setInterfaceSoundsEnabled] = useState(() => localStorage.getItem(INTERFACE_SOUNDS_KEY) !== 'false');
   const [audioSettings, setAudioSettings] = useState<AudioSettings>(() => ({
     inputDeviceId: '',
     outputDeviceId: '',
@@ -407,6 +449,7 @@ export default function RoomApp() {
     noiseSuppression: voiceSettingSupport.noiseSuppression,
     autoGainControl: voiceSettingSupport.autoGainControl
   }));
+  const [screenVolumes, setScreenVolumes] = useState<Record<string, number>>({});
 
   const socketRef = useRef<WebSocket | null>(null);
   const iceServersRef = useRef<IceServerConfig[]>([]);
@@ -419,6 +462,15 @@ export default function RoomApp() {
   const microphoneGainRef = useRef<GainNode | null>(null);
   const microphoneSourceStreamRef = useRef<MediaStream | null>(null);
   const audioSettingsRef = useRef(audioSettings);
+  const resolutionRef = useRef(resolution);
+  const fpsRef = useRef(fps);
+  const automaticQualityRef = useRef(automaticQuality);
+  const adaptiveBitrateRef = useRef(adaptiveBitrate);
+  const bitrateMbpsRef = useRef(bitrateMbps);
+  const screenVolumesRef = useRef(screenVolumes);
+  const interfaceSoundsEnabledRef = useRef(interfaceSoundsEnabled);
+  const callSoundConnectedRef = useRef(false);
+  const endingCallRef = useRef(false);
   const dockRef = useRef<HTMLDivElement>(null);
   const profileBarRef = useRef<HTMLButtonElement>(null);
   const profilePopoverRef = useRef<HTMLDivElement>(null);
@@ -440,6 +492,16 @@ export default function RoomApp() {
   useEffect(() => { playbackEnabledRef.current = playbackEnabled; }, [playbackEnabled]);
   useEffect(() => { chatMessagesRef.current = chatMessages; }, [chatMessages]);
   useEffect(() => { audioSettingsRef.current = audioSettings; }, [audioSettings]);
+  useEffect(() => { resolutionRef.current = resolution; }, [resolution]);
+  useEffect(() => { fpsRef.current = fps; }, [fps]);
+  useEffect(() => { automaticQualityRef.current = automaticQuality; }, [automaticQuality]);
+  useEffect(() => { adaptiveBitrateRef.current = adaptiveBitrate; }, [adaptiveBitrate]);
+  useEffect(() => { bitrateMbpsRef.current = bitrateMbps; }, [bitrateMbps]);
+  useEffect(() => { screenVolumesRef.current = screenVolumes; }, [screenVolumes]);
+  useEffect(() => {
+    interfaceSoundsEnabledRef.current = interfaceSoundsEnabled;
+    localStorage.setItem(INTERFACE_SOUNDS_KEY, String(interfaceSoundsEnabled));
+  }, [interfaceSoundsEnabled]);
   useEffect(() => { profileNameDraftRef.current = profileNameDraft; }, [profileNameDraft]);
   useEffect(() => { profileStatusDraftRef.current = profileStatusDraft; }, [profileStatusDraft]);
   useEffect(() => {
@@ -597,6 +659,11 @@ export default function RoomApp() {
     });
   }, []);
 
+  const playSound = useCallback((name: InterfaceSoundName) => {
+    if (!interfaceSoundsEnabledRef.current) return;
+    playCallSound(name, audioSettingsRef.current.outputVolume / 100);
+  }, []);
+
   useEffect(() => {
     const device: RoomProfile['device'] = mobile ? 'mobile' : 'desktop';
     if (profileRef.current.device === device) return;
@@ -672,6 +739,9 @@ export default function RoomApp() {
       screenVideo.sender.replaceTrack(localScreenStreamRef.current?.getVideoTracks()[0] ?? null).catch(() => undefined),
       screenAudio.sender.replaceTrack(localScreenStreamRef.current?.getAudioTracks()[0] ?? null).catch(() => undefined)
     ]);
+    const activeResolution = automaticQualityRef.current ? 720 : resolutionRef.current;
+    const activeFps = automaticQualityRef.current ? 30 : fpsRef.current;
+    await configureScreenSender(screenVideo.sender, activeResolution, activeFps, adaptiveBitrateRef.current, bitrateMbpsRef.current);
     const callTrack = call.receiver.track;
     if (!record.callAudio || !(record.callAudio.srcObject instanceof MediaStream) || record.callAudio.srcObject.getAudioTracks()[0]?.id !== callTrack.id) {
       record.callAudio?.remove();
@@ -693,7 +763,7 @@ export default function RoomApp() {
       const audioElement = document.createElement('audio');
       audioElement.autoplay = true;
       audioElement.muted = !playbackEnabledRef.current;
-      audioElement.volume = audioSettingsRef.current.outputVolume / 100;
+      audioElement.volume = (audioSettingsRef.current.outputVolume / 100) * ((screenVolumesRef.current[record.id] ?? 100) / 100);
       const sinkable = audioElement as HTMLAudioElement & { setSinkId?: (deviceId: string) => Promise<void> };
       if (audioSettingsRef.current.outputDeviceId && sinkable.setSinkId) void sinkable.setSinkId(audioSettingsRef.current.outputDeviceId).catch(() => undefined);
       audioElement.srcObject = mediaStreamWith(screenAudioTrack);
@@ -775,6 +845,10 @@ export default function RoomApp() {
       setParticipants(next);
       setMode('connected');
       setError('');
+      if (!callSoundConnectedRef.current) {
+        callSoundConnectedRef.current = true;
+        playSound('callConnected');
+      }
       const activeSession = sessionRef.current;
       if (activeSession) {
         const nextSession = { ...activeSession, invite: message.invite, joinCode: message.joinCode, joinByCode: false, participantId: message.selfId };
@@ -795,17 +869,30 @@ export default function RoomApp() {
     if (message.type === 'participant-joined') {
       updateParticipant(message.participant);
       systemMessage(`${message.participant.name} entrou na chamada.`);
+      playSound('participantJoined');
       return;
     }
     if (message.type === 'participant-left') {
       const name = participantsRef.current[message.peerId]?.name || 'Um participante';
       destroyPeer(message.peerId);
       setParticipants(current => { const next = { ...current }; delete next[message.peerId]; return next; });
+      setScreenVolumes(current => {
+        if (!(message.peerId in current)) return current;
+        const next = { ...current };
+        delete next[message.peerId];
+        screenVolumesRef.current = next;
+        return next;
+      });
       systemMessage(`${name} saiu da chamada.`);
+      playSound('participantLeft');
       return;
     }
     if (message.type === 'participant-state') {
+      const previous = participantsRef.current[message.participant.id];
       updateParticipant(message.participant);
+      if (message.participant.id !== selfIdRef.current && previous && previous.sharing !== message.participant.sharing) {
+        playSound(message.participant.sharing ? 'screenStarted' : 'screenStopped');
+      }
       return;
     }
     if (message.type === 'leader-changed') {
@@ -845,6 +932,8 @@ export default function RoomApp() {
     if (message.type === 'pong') return;
     if (message.type === 'room-closed') {
       if (sessionRef.current?.ownerKey) localStorage.removeItem(OWNER_ROOM_KEY);
+      if (callSoundConnectedRef.current) playSound('callDisconnected');
+      callSoundConnectedRef.current = false;
       setError('O criador encerrou a sala.');
       setMode('error');
       return;
@@ -856,7 +945,7 @@ export default function RoomApp() {
         if (sessionRef.current?.ownerKey) localStorage.removeItem(OWNER_ROOM_KEY);
       }
     }
-  }, [appendMessage, createPeer, destroyPeer, syncPeerMedia, systemMessage, updateParticipant, updateSelfMediaState]);
+  }, [appendMessage, createPeer, destroyPeer, playSound, syncPeerMedia, systemMessage, updateParticipant, updateSelfMediaState]);
 
   useEffect(() => {
     if (!session) return;
@@ -948,7 +1037,7 @@ export default function RoomApp() {
     if (context && context.state !== 'closed') void context.close().catch(() => undefined);
   }, []);
 
-  const acquireMicrophone = useCallback(async (force = false) => {
+  const acquireMicrophone = useCallback(async (force = false, exactSetting?: VoiceSettingKey) => {
     const current = localMicrophoneTrackRef.current;
     if (!force && current?.readyState === 'live') {
       current.enabled = true;
@@ -961,10 +1050,11 @@ export default function RoomApp() {
       const settings = audioSettingsRef.current;
       const sourceStream = await navigator.mediaDevices.getUserMedia({
         video: false,
-        audio: microphoneConstraints(settings, voiceSettingSupport)
+        audio: microphoneConstraints(settings, voiceSettingSupport, exactSetting)
       });
       const sourceTrack = sourceStream.getAudioTracks()[0];
       if (!sourceTrack) return false;
+      setVoiceSettingSupport(detectVoiceTrackSupport(sourceTrack, voiceSettingSupport));
       const verifiedSettings = readVoiceTrackSettings(sourceTrack);
       const effectiveSettings = { ...settings };
       let browserAdjustedSettings = false;
@@ -1010,22 +1100,26 @@ export default function RoomApp() {
       updateSelfMediaState({ microphoneEnabled: true });
       sourceTrack.addEventListener('ended', () => {
         if (microphoneSourceStreamRef.current !== sourceStream) return;
+        const wasEnabled = microphoneEnabledRef.current;
         disposeMicrophonePipeline();
         microphoneEnabledRef.current = false;
         setMicrophoneEnabled(false);
         updateSelfMediaState({ microphoneEnabled: false });
+        if (wasEnabled && !endingCallRef.current) playSound('microphoneMuted');
       }, { once: true });
       return true;
     } catch {
+      if (exactSetting) return false;
       setVoiceSettingFeedback('Não foi possível acessar o microfone. Verifique a permissão e o dispositivo de entrada.');
       setError('Não foi possível abrir o microfone. Confira a permissão e o dispositivo de entrada.');
       return false;
     }
-  }, [disposeMicrophonePipeline, updateSelfMediaState, voiceSettingSupport]);
+  }, [disposeMicrophonePipeline, playSound, updateSelfMediaState, voiceSettingSupport]);
 
   const toggleMicrophone = useCallback(async () => {
     if (!localMicrophoneTrackRef.current || localMicrophoneTrackRef.current.readyState !== 'live') {
-      await acquireMicrophone();
+      const enabled = await acquireMicrophone();
+      if (enabled) playSound('microphoneEnabled');
       return;
     }
     const next = !microphoneEnabledRef.current;
@@ -1033,9 +1127,15 @@ export default function RoomApp() {
     microphoneEnabledRef.current = next;
     setMicrophoneEnabled(next);
     updateSelfMediaState({ microphoneEnabled: next });
-  }, [acquireMicrophone, updateSelfMediaState]);
+    playSound(next ? 'microphoneEnabled' : 'microphoneMuted');
+  }, [acquireMicrophone, playSound, updateSelfMediaState]);
+
+  const applyScreenEncoding = useCallback(async (nextResolution: Resolution, nextFps: FrameRate, adaptive = adaptiveBitrateRef.current, manualMbps = bitrateMbpsRef.current) => {
+    await Promise.all([...peersRef.current.values()].map(peer => configureScreenSender(peer.screenVideoSender, nextResolution, nextFps, adaptive, manualMbps)));
+  }, []);
 
   const stopScreenShare = useCallback(() => {
+    const wasSharing = sharingRef.current;
     const stream = localScreenStreamRef.current;
     localScreenStreamRef.current = null;
     stream?.getTracks().forEach(track => track.stop());
@@ -1046,7 +1146,8 @@ export default function RoomApp() {
       void peer.screenAudioSender?.replaceTrack(null);
     }
     updateSelfMediaState({ sharing: false });
-  }, [updateSelfMediaState]);
+    if (wasSharing && !endingCallRef.current) playSound('screenStopped');
+  }, [playSound, updateSelfMediaState]);
 
   const toggleScreenShare = useCallback(async () => {
     if (sharingRef.current) {
@@ -1068,27 +1169,24 @@ export default function RoomApp() {
       video.contentHint = activeFps >= 45 ? 'motion' : 'detail';
       const screenAudio = stream.getAudioTracks()[0] ?? null;
       await Promise.all([...peersRef.current.values()].flatMap(peer => [
-        peer.screenVideoSender?.replaceTrack(video).then(async () => {
-          if (!peer.screenVideoSender) return;
-          const parameters = peer.screenVideoSender.getParameters();
-          parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
-          parameters.encodings[0]!.maxBitrate = Math.round(preset.bitrate * (activeFps / 30));
-          parameters.encodings[0]!.maxFramerate = activeFps;
-          await peer.screenVideoSender.setParameters(parameters);
-        }).catch(() => undefined),
+        peer.screenVideoSender?.replaceTrack(video).catch(() => undefined),
         peer.screenAudioSender?.replaceTrack(screenAudio).catch(() => undefined)
       ]).filter(Boolean));
+      await applyScreenEncoding(activeResolution, activeFps);
       sharingRef.current = true;
       setSharing(true);
       updateSelfMediaState({ sharing: true });
+      playSound('screenStarted');
       video.addEventListener('ended', stopScreenShare, { once: true });
     } catch (screenError) {
       if (screenError instanceof DOMException && screenError.name === 'NotAllowedError') return;
       setError('Não foi possível iniciar o compartilhamento. Tente escolher novamente a tela, janela ou aba.');
     }
-  }, [automaticQuality, fps, resolution, stopScreenShare, updateSelfMediaState]);
+  }, [applyScreenEncoding, automaticQuality, fps, playSound, resolution, stopScreenShare, updateSelfMediaState]);
 
   const applyVideoProfile = useCallback(async (nextResolution: Resolution, nextFps: FrameRate) => {
+    resolutionRef.current = nextResolution;
+    fpsRef.current = nextFps;
     setResolution(nextResolution);
     setFps(nextFps);
     const track = localScreenStreamRef.current?.getVideoTracks()[0];
@@ -1096,15 +1194,14 @@ export default function RoomApp() {
     const preset = VIDEO_PRESETS[nextResolution];
     track.contentHint = nextFps >= 45 ? 'motion' : 'detail';
     await track.applyConstraints({ width: { ideal: preset.width, max: preset.width }, height: { ideal: preset.height, max: preset.height }, frameRate: { ideal: nextFps, max: nextFps } }).catch(() => undefined);
-    await Promise.all([...peersRef.current.values()].map(async peer => {
-      if (!peer.screenVideoSender?.track) return;
-      const parameters = peer.screenVideoSender.getParameters();
-      parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
-      parameters.encodings[0]!.maxBitrate = Math.round(preset.bitrate * (nextFps / 30));
-      parameters.encodings[0]!.maxFramerate = nextFps;
-      await peer.screenVideoSender.setParameters(parameters).catch(() => undefined);
-    }));
-  }, []);
+    await applyScreenEncoding(nextResolution, nextFps);
+  }, [applyScreenEncoding]);
+
+  function changeAutomaticQuality(enabled: boolean) {
+    automaticQualityRef.current = enabled;
+    setAutomaticQuality(enabled);
+    if (enabled) void applyVideoProfile(720, 30);
+  }
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -1183,6 +1280,7 @@ export default function RoomApp() {
   }
 
   async function createRoom() {
+    void unlockInterfaceSounds();
     const invite = createPrivateRoom();
     const next: Session = { invite, ownerKey: randomSecret(), maxParticipants };
     localStorage.setItem(OWNER_ROOM_KEY, JSON.stringify(next));
@@ -1195,6 +1293,7 @@ export default function RoomApp() {
 
   async function joinRoom(event: FormEvent) {
     event.preventDefault();
+    void unlockInterfaceSounds();
     const entry = parseRoomEntry(joinValue);
     if (!entry) {
       setError('Cole um código ou link de sala válido.');
@@ -1213,6 +1312,9 @@ export default function RoomApp() {
   }
 
   function exitRoom(closeRequested: boolean) {
+    endingCallRef.current = true;
+    if (callSoundConnectedRef.current) playSound('callDisconnected');
+    callSoundConnectedRef.current = false;
     const connectedCount = Object.values(participantsRef.current).filter(participant => participant.connected).length;
     const closeForEveryone = closeRequested || (Boolean(sessionRef.current?.ownerKey) && connectedCount <= 1);
     send(socketRef.current, { type: closeForEveryone ? 'close-group-room' : 'leave-group-room' });
@@ -1223,6 +1325,8 @@ export default function RoomApp() {
     disposeMicrophonePipeline();
     setMicrophoneEnabled(false);
     setParticipants({});
+    screenVolumesRef.current = {};
+    setScreenVolumes({});
     setSelfId('');
     selfIdRef.current = '';
     setLeaderId('');
@@ -1232,6 +1336,7 @@ export default function RoomApp() {
     setControlsOpen(false);
     setQrOpen(false);
     history.replaceState(null, '', location.pathname);
+    window.setTimeout(() => { endingCallRef.current = false; }, 400);
   }
 
   function leaveRoom() {
@@ -1275,14 +1380,39 @@ export default function RoomApp() {
     setAudioSettings(next);
     for (const peer of peersRef.current.values()) {
       if (peer.callAudio) peer.callAudio.volume = value / 100;
-      if (peer.screenAudio) peer.screenAudio.volume = value / 100;
+      if (peer.screenAudio) peer.screenAudio.volume = (value / 100) * ((screenVolumesRef.current[peer.id] ?? 100) / 100);
     }
+  }
+
+  function changeScreenVolume(peerId: string, value: number) {
+    const next = { ...screenVolumesRef.current, [peerId]: value };
+    screenVolumesRef.current = next;
+    setScreenVolumes(next);
+    const screenAudio = peersRef.current.get(peerId)?.screenAudio;
+    if (screenAudio) screenAudio.volume = (audioSettingsRef.current.outputVolume / 100) * (value / 100);
+  }
+
+  function changeAdaptiveBitrate(enabled: boolean) {
+    adaptiveBitrateRef.current = enabled;
+    setAdaptiveBitrate(enabled);
+    const nextResolution = automaticQualityRef.current ? 720 : resolutionRef.current;
+    const nextFps = automaticQualityRef.current ? 30 : fpsRef.current;
+    void applyScreenEncoding(nextResolution, nextFps, enabled, bitrateMbpsRef.current);
+  }
+
+  function changeBitrate(value: number) {
+    bitrateMbpsRef.current = value;
+    setBitrateMbps(value);
+    if (adaptiveBitrateRef.current) return;
+    const nextResolution = automaticQualityRef.current ? 720 : resolutionRef.current;
+    const nextFps = automaticQualityRef.current ? 30 : fpsRef.current;
+    void applyScreenEncoding(nextResolution, nextFps, false, value);
   }
 
   async function changeVoiceSetting(key: VoiceSettingKey) {
     const details = VOICE_SETTING_DETAILS[key];
     if (!voiceSettingSupport[key]) {
-      setVoiceSettingFeedback(`${details.label} não é oferecido por este navegador.`);
+      setVoiceSettingFeedback(`${details.label} está fixado pelo dispositivo ou pelo navegador.`);
       return;
     }
 
@@ -1298,27 +1428,44 @@ export default function RoomApp() {
 
     setVoiceSettingPending(key);
     try {
-      await sourceTrack.applyConstraints(voiceProcessingConstraints(next, voiceSettingSupport));
-      const verified = readVoiceTrackSettings(sourceTrack);
-      const effective = { ...next };
-      for (const settingKey of VOICE_SETTING_KEYS) {
-        if (typeof verified[settingKey] === 'boolean') effective[settingKey] = verified[settingKey];
+      let appliedWithoutRestart = false;
+      try {
+        await sourceTrack.applyConstraints(voiceProcessingConstraints(next, voiceSettingSupport));
+        const verified = readVoiceTrackSettings(sourceTrack);
+        if (typeof verified[key] !== 'boolean' || verified[key] === next[key]) {
+          const effective = { ...next };
+          for (const settingKey of VOICE_SETTING_KEYS) {
+            if (typeof verified[settingKey] === 'boolean') effective[settingKey] = verified[settingKey];
+          }
+          audioSettingsRef.current = effective;
+          setAudioSettings(effective);
+          appliedWithoutRestart = true;
+        }
+      } catch {
+        // Alguns drivers só aplicam processamento ao abrir uma nova captura.
       }
-      if (typeof verified[key] === 'boolean' && verified[key] !== next[key]) {
-        throw new Error('O navegador não aplicou a configuração solicitada.');
+
+      if (appliedWithoutRestart) {
+        setVoiceSettingFeedback(`${details.label} ${next[key] ? 'ativado' : 'desativado'} no microfone.`);
+        return;
       }
-      audioSettingsRef.current = effective;
-      setAudioSettings(effective);
-      setVoiceSettingFeedback(`${details.label} ${effective[key] ? 'ativado' : 'desativado'} no microfone.`);
-    } catch {
-      const verified = readVoiceTrackSettings(sourceTrack);
+
+      const reopened = await acquireMicrophone(true, key);
+      if (reopened && audioSettingsRef.current[key] === next[key]) {
+        setVoiceSettingFeedback(`${details.label} ${next[key] ? 'ativado' : 'desativado'} após reiniciar a captura.`);
+        return;
+      }
+
+      const activeSource = microphoneSourceStreamRef.current?.getAudioTracks()[0] ?? sourceTrack;
+      const verified = readVoiceTrackSettings(activeSource);
       const restored = { ...next };
       for (const settingKey of VOICE_SETTING_KEYS) {
         restored[settingKey] = typeof verified[settingKey] === 'boolean' ? verified[settingKey] : previous[settingKey];
       }
       audioSettingsRef.current = restored;
       setAudioSettings(restored);
-      setVoiceSettingFeedback(`Não foi possível alterar ${details.label.toLocaleLowerCase('pt-BR')} neste dispositivo.`);
+      setVoiceSettingSupport(current => ({ ...current, [key]: false }));
+      setVoiceSettingFeedback(`${details.label} é fixado pelo driver ou navegador neste dispositivo.`);
     } finally {
       setVoiceSettingPending(current => current === key ? null : current);
     }
@@ -1335,6 +1482,18 @@ export default function RoomApp() {
         audioElement.muted = !next;
         if (next) void audioElement.play().catch(() => undefined);
       }
+    }
+    playSound(next ? 'outputEnabled' : 'outputMuted');
+  }
+
+  function toggleInterfaceSounds() {
+    const next = !interfaceSoundsEnabledRef.current;
+    if (!next) playCallSound('outputMuted', audioSettingsRef.current.outputVolume / 100);
+    interfaceSoundsEnabledRef.current = next;
+    setInterfaceSoundsEnabled(next);
+    if (next) {
+      void unlockInterfaceSounds();
+      playSound('outputEnabled');
     }
   }
 
@@ -1410,6 +1569,7 @@ export default function RoomApp() {
   const participantList = Object.values(participants).sort((left, right) => left.joinedAt - right.joinedAt);
   const connectedParticipants = participantList.filter(participant => participant.connected);
   const sharingParticipants = connectedParticipants.filter(participant => participant.sharing);
+  const remoteSharingParticipants = sharingParticipants.filter(participant => participant.id !== selfId);
   const localScreen = localScreenStreamRef.current;
   const isOwner = Boolean(session?.ownerKey);
   const isLeader = selfId === leaderId;
@@ -1428,6 +1588,7 @@ export default function RoomApp() {
   const activeChat = chatOpen;
   const activeResolution = automaticQuality ? 720 : resolution;
   const activeFps = automaticQuality ? 30 : fps;
+  const effectiveBitrateMbps = adaptiveBitrate ? recommendedBitrateMbps(activeResolution, activeFps) : bitrateMbps;
   const screenShareSupported = typeof navigator.mediaDevices?.getDisplayMedia === 'function';
   void peerVersion;
 
@@ -1468,6 +1629,7 @@ export default function RoomApp() {
           <header><strong>Volumes</strong><small>LOCAL</small></header>
           <div className="volume-control"><label htmlFor="room-input-volume"><strong>Volume de entrada</strong><small>Ganho do seu microfone</small></label><input id="room-input-volume" type="range" min="0" max="150" value={audioSettings.inputVolume} onChange={event => changeInputVolume(Number(event.target.value))}/><output>{audioSettings.inputVolume}%</output></div>
           <div className="volume-control"><label htmlFor="room-output-volume"><strong>Volume de saída</strong><small>Áudio recebido da chamada</small></label><input id="room-output-volume" type="range" min="0" max="100" value={audioSettings.outputVolume} onChange={event => changeOutputVolume(Number(event.target.value))}/><output>{audioSettings.outputVolume}%</output></div>
+          <button className="voice-setting interface-sound-setting" type="button" role="switch" aria-checked={interfaceSoundsEnabled} onClick={toggleInterfaceSounds}><span><strong>Sons da interface</strong><small>Chamada, microfone e participantes</small></span><i><b/></i></button>
         </section>
         <section className="audio-menu-section">
           <header><strong>Tratamento de voz</strong><small>MICROFONE</small></header>
@@ -1476,7 +1638,7 @@ export default function RoomApp() {
               const details = VOICE_SETTING_DETAILS[key];
               const unsupported = !voiceSettingSupport[key];
               const applying = voiceSettingPending === key;
-              return <button key={key} className={`voice-setting ${applying ? 'is-applying' : ''}`} type="button" role="switch" aria-checked={audioSettings[key]} aria-busy={applying} disabled={unsupported || voiceSettingPending !== null} onClick={() => void changeVoiceSetting(key)}><span><strong>{details.label}</strong><small>{unsupported ? 'Não disponível neste navegador' : applying ? 'Aplicando ao microfone…' : details.description}</small></span><i><b/></i></button>;
+              return <button key={key} className={`voice-setting ${applying ? 'is-applying' : ''}`} type="button" role="switch" aria-checked={audioSettings[key]} aria-busy={applying} disabled={unsupported || voiceSettingPending !== null} onClick={() => void changeVoiceSetting(key)}><span><strong>{details.label}</strong><small>{unsupported ? 'Fixado pelo dispositivo ou navegador' : applying ? 'Aplicando ao microfone…' : details.description}</small></span><i><b/></i></button>;
             })}
           </div>
           {voiceSettingFeedback && <p className="voice-processing-feedback" role="status">{voiceSettingFeedback}</p>}
@@ -1489,7 +1651,24 @@ export default function RoomApp() {
     <section className="dock-popover more-popover screen-popover unified-screen-popover" aria-label="Configurações do compartilhamento">
       <header><strong>Compartilhamento</strong><small>{sharing ? 'ATIVO' : 'PRONTO'}</small></header>
       <button type="button" onClick={() => { void toggleScreenShare(); setScreenMenuOpen(false); }}><Icon name="screen"/><span><strong>{sharing ? 'Parar compartilhamento' : 'Compartilhar tela'}</strong><small>{sharing ? 'A chamada continuará ativa' : screenShareSupported ? 'Escolha uma tela, janela ou aba' : 'Não disponível neste navegador'}</small></span></button>
-      <button type="button" onClick={() => setScreenMenuOpen(false)}><Icon name="settings"/><span><strong>Qualidade do vídeo</strong><small>{automaticQuality ? 'Automática' : `${resolution}p · ${fps} FPS`}</small></span></button>
+      <div className="screen-popover-scroll">
+        <section className="screen-menu-section">
+          <header><strong>Áudio recebido</strong><small>{remoteSharingParticipants.length ? `${remoteSharingParticipants.length} TELA${remoteSharingParticipants.length === 1 ? '' : 'S'}` : 'SEM TELAS'}</small></header>
+          {remoteSharingParticipants.length ? <div className="screen-volume-list">{remoteSharingParticipants.map(participant => (
+            <div className="screen-volume-row" key={participant.id}>
+              <Avatar avatar={participant.avatar} name={participant.name} size="small"/>
+              <label htmlFor={`screen-volume-${participant.id}`}><strong>{participant.name}</strong><small>Som do compartilhamento</small></label>
+              <input id={`screen-volume-${participant.id}`} aria-label={`Volume da tela de ${participant.name}`} type="range" min="0" max="100" value={screenVolumes[participant.id] ?? 100} onChange={event => changeScreenVolume(participant.id, Number(event.target.value))}/>
+              <output>{screenVolumes[participant.id] ?? 100}%</output>
+            </div>
+          ))}</div> : <p className="screen-audio-empty"><Icon name="volumeOff"/>Os controles aparecem quando alguém compartilhar uma tela.</p>}
+        </section>
+        <section className="screen-menu-section bitrate-menu-section">
+          <header><strong>Bitrate de envio</strong><small>ATÉ {formatBitrate(effectiveBitrateMbps)}</small></header>
+          <button className={`compact-toggle ${adaptiveBitrate ? 'is-active' : ''}`} type="button" role="switch" aria-checked={adaptiveBitrate} onClick={() => changeAdaptiveBitrate(!adaptiveBitrate)}><span><strong>Bitrate adaptativo</strong><small>Ajusta o limite ao perfil de vídeo</small></span><i><b/></i></button>
+          <div className={`bitrate-control ${adaptiveBitrate ? 'is-disabled' : ''}`}><label htmlFor="popover-bitrate"><strong>Limite manual</strong><small>0,5 a 20 Mb/s</small></label><input id="popover-bitrate" aria-label="Bitrate manual do compartilhamento" type="range" min={MIN_BITRATE_MBPS} max={MAX_BITRATE_MBPS} step="0.5" value={bitrateMbps} disabled={adaptiveBitrate} onChange={event => changeBitrate(Number(event.target.value))}/><output>{formatBitrate(bitrateMbps)}</output></div>
+        </section>
+      </div>
     </section>
   ) : null;
 
@@ -1521,13 +1700,17 @@ export default function RoomApp() {
         {session && mobile && !screenShareSupported && <section className="panel-section mobile-screen-capability" role="status"><Icon name="screen"/><span><strong>Compartilhamento pelo celular</strong><small>Este navegador pode assistir à chamada, mas não consegue enviar a tela.</small></span></section>}
         <section className="panel-section quality-section">
           <div className="section-heading"><h3>Qualidade do vídeo</h3><small>{automaticQuality ? 'AUTOMÁTICA' : 'MANUAL'}</small></div>
-          <button className={`toggle-row ${automaticQuality ? 'is-active' : ''}`} type="button" role="switch" aria-checked={automaticQuality} onClick={() => { const next = !automaticQuality; setAutomaticQuality(next); if (next) void applyVideoProfile(720, 30); }}><Icon name="settings"/><span className="toggle-row-copy"><strong>Ajuste automático</strong><small>{activeResolution}p · até {activeFps} FPS</small></span><span className="toggle-row-switch"><i/></span></button>
+          <button className={`toggle-row ${automaticQuality ? 'is-active' : ''}`} type="button" role="switch" aria-checked={automaticQuality} onClick={() => changeAutomaticQuality(!automaticQuality)}><Icon name="settings"/><span className="toggle-row-copy"><strong>Resolução e fluidez automáticas</strong><small>{activeResolution}p · até {activeFps} FPS</small></span><span className="toggle-row-switch"><i/></span></button>
           <div className="quality-controls">
-            <SegmentedSelector label="Resolução" suffix="resolução" options={RESOLUTIONS} value={resolution} disabled={automaticQuality} premium={1080} onChange={value => { setAutomaticQuality(false); void applyVideoProfile(value, fps); }}/>
-            <SegmentedSelector label="Fluidez" suffix="FPS" options={FRAME_RATES} value={fps} disabled={automaticQuality} premium={60} onChange={value => { setAutomaticQuality(false); void applyVideoProfile(resolution, value); }}/>
+            <SegmentedSelector label="Resolução" suffix="resolução" options={RESOLUTIONS} value={resolution} disabled={automaticQuality} premium={1080} onChange={value => { automaticQualityRef.current = false; setAutomaticQuality(false); void applyVideoProfile(value, fpsRef.current); }}/>
+            <SegmentedSelector label="Fluidez" suffix="FPS" options={FRAME_RATES} value={fps} disabled={automaticQuality} premium={60} onChange={value => { automaticQualityRef.current = false; setAutomaticQuality(false); void applyVideoProfile(resolutionRef.current, value); }}/>
             {!session && <SegmentedSelector label="Participantes" suffix="máximo" options={PARTICIPANT_LIMITS} value={maxParticipants} fullWidth onChange={setMaxParticipants}/>}
           </div>
-          <p className="profile-summary"><i/>Bitrate adaptativo ativo</p>
+          <div className="sidebar-bitrate-settings">
+            <div className="subsection-heading"><strong>Transmissão</strong><small>ATÉ {formatBitrate(effectiveBitrateMbps)}</small></div>
+            <button className={`toggle-row bitrate-toggle ${adaptiveBitrate ? 'is-active' : ''}`} type="button" role="switch" aria-checked={adaptiveBitrate} onClick={() => changeAdaptiveBitrate(!adaptiveBitrate)}><Icon name="link"/><span className="toggle-row-copy"><strong>Bitrate adaptativo</strong><small>O WebRTC reduz o envio quando a rede apertar</small></span><span className="toggle-row-switch"><i/></span></button>
+            <div className={`bitrate-control sidebar-bitrate-control ${adaptiveBitrate ? 'is-disabled' : ''}`}><label htmlFor="sidebar-bitrate"><strong>Limite manual</strong><small>Disponível com o modo adaptativo desligado</small></label><input id="sidebar-bitrate" aria-label="Limite manual de bitrate" type="range" min={MIN_BITRATE_MBPS} max={MAX_BITRATE_MBPS} step="0.5" value={bitrateMbps} disabled={adaptiveBitrate} onChange={event => changeBitrate(Number(event.target.value))}/><output>{formatBitrate(bitrateMbps)}</output></div>
+          </div>
         </section>
     </div>
   );
