@@ -252,6 +252,10 @@
 .unified-stage-empty .stage-echo { margin-bottom: .4rem; animation: echo-idle 3.8s ease-in-out infinite; }
 .unified-stage-empty .stage-echo .preset-avatar { filter: drop-shadow(0 .75rem 1.15rem rgba(17,42,78,.28)); transition: transform 260ms var(--ease-out), filter 260ms ease; }
 .unified-stage-empty .stage-echo:hover .preset-avatar { transform: translateY(-.24rem) rotate(-2deg) scale(1.04); filter: drop-shadow(0 1rem 1.5rem rgba(68,106,174,.34)); }
+.unified-stage-empty .stage-echo .echo-owl-eye { transform-box: fill-box; transform-origin: center; animation: echo-owl-blink 5.2s ease-in-out infinite; }
+.unified-stage-empty .stage-echo .echo-owl-eye-right { animation-delay: .04s; }
+.unified-stage-empty .stage-echo .echo-owl-beak { transform-box: fill-box; transform-origin: center top; transition: transform 240ms var(--ease-out); }
+.unified-stage-empty .stage-echo:hover .echo-owl-beak { transform: scale(1.08) rotate(-3deg); }
 .unified-stage-empty .eyebrow { margin-bottom: .75rem; color: #9ca8ac; }
 .unified-stage-empty .stage-note { margin-top: 1rem; color: #667075; }
 .unified-screens-grid { position: absolute; z-index: 2; inset: .75rem .75rem 5.3rem; display: grid; gap: .55rem; }
@@ -410,7 +414,7 @@
 .unified-profile-bar strong { font-size: .66rem; font-weight: 590; }
 .unified-profile-bar small { color: #747d80; font-size: .54rem; }
 .unified-profile-bar > .icon { width: .95rem; color: #7e878a; transition: color 180ms ease, transform 220ms var(--ease-out); }
-.unified-profile-bar:hover > .icon { color: #eef2f3; transform: rotate(16deg); }
+.unified-profile-bar:hover > .icon { color: #eef2f3; transform: translateX(.08rem); }
 
 .stage-identities { min-height: 8rem; display: flex; align-items: flex-start; justify-content: center; gap: clamp(.8rem, 2vw, 1.4rem); }
 .stage-identity { min-width: 5.8rem; max-width: 8.5rem; display: grid; justify-items: center; gap: .28rem; }
@@ -606,4 +610,9 @@
 @keyframes unread-badge-enter {
   from { opacity: 0; transform: scale(.55); }
   to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes echo-owl-blink {
+  0%, 43%, 47%, 100% { transform: scaleY(1); }
+  45% { transform: scaleY(.08); }
 }

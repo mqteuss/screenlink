@@ -67,6 +67,7 @@ const PROFILE_KEY = 'screenlink-room-profile-v2';
 const INTERFACE_SOUNDS_KEY = 'screenlink-interface-sounds-v1';
 const INTERFACE_MOTION_KEY = 'screenlink-interface-motion-v1';
 const CHAT_APPEARANCE_KEY = 'screenlink-chat-appearance-v2';
+const CHAT_OWN_IDS_PREFIX = 'screenlink-chat-own:';
 const PEER_KEY_PREFIX = 'screenlink-room-peer:';
 const COMPACT_LAYOUT_QUERY = '(max-width: 1240px)';
 const MOBILE_DEVICE_QUERY = '(pointer: coarse) and (max-width: 980px)';
@@ -162,7 +163,7 @@ const AVATARS = [
   { id: 'pixel', label: 'Pixel', colors: ['#a9d18e', '#397266'], face: 'frog' },
   { id: 'lumen', label: 'Lumen', colors: ['#dbb5ff', '#6656ac'], face: 'cat' },
   { id: 'byte', label: 'Byte', colors: ['#ffd0d0', '#a55367'], face: 'bear' },
-  { id: 'echo', label: 'Echo', colors: ['#aec8ff', '#4d6099'], face: 'owl' }
+  { id: 'echo', label: 'Echo', colors: ['#bfd0ff', '#91a9ef'], face: 'owl' }
 ] as const;
 
 function Icon({ name }: { name: IconName }) {
@@ -177,7 +178,7 @@ function Icon({ name }: { name: IconName }) {
     hangup: <path d="M4.2 15.1c4.9-4.4 10.7-4.4 15.6 0 .7.6.7 1.7.1 2.3l-1.3 1.3c-.5.5-1.3.6-1.9.2l-2.2-1.5c-.4-.3-.7-.8-.6-1.3l.1-1.1a10.8 10.8 0 0 0-4 0l.1 1.1c.1.5-.2 1-.6 1.3l-2.2 1.5c-.6.4-1.4.3-1.9-.2l-1.3-1.3c-.6-.6-.6-1.7.1-2.3Z"/>,
     link: <><path d="M9.5 14.5 14.5 9"/><path d="M7.5 17H6a4 4 0 0 1 0-8h4M16.5 7H18a4 4 0 0 1 0 8h-4"/></>,
     copy: <><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></>,
-    settings: <><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9 7 7M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></>,
+    settings: <><path d="M4 6h5M13 6h7M4 12h10M18 12h2M4 18h3M11 18h9"/><circle cx="11" cy="6" r="2"/><circle cx="16" cy="12" r="2"/><circle cx="9" cy="18" r="2"/></>,
     users: <><circle cx="9" cy="9" r="3"/><path d="M3.5 20c.4-4 2.2-6 5.5-6s5.1 2 5.5 6M16 6.5a3 3 0 0 1 0 5.8M16.5 14c2.5.5 3.7 2.4 4 5"/></>,
     crown: <path d="m3 7 4.5 4L12 5l4.5 6L21 7l-2 11H5L3 7Z"/>,
     close: <path d="m6 6 12 12M18 6 6 18"/>,
@@ -197,10 +198,18 @@ function Icon({ name }: { name: IconName }) {
 function BrandMark() {
   return (
     <svg className="screenlink-brand-mark" viewBox="0 0 48 48" fill="none" aria-hidden="true">
-      <path d="M15 10.5h18c6.1 0 10.5 4.4 10.5 10.5v6c0 6.1-4.4 10.5-10.5 10.5H15C8.9 37.5 4.5 33.1 4.5 27v-6C4.5 14.9 8.9 10.5 15 10.5Z" stroke="currentColor" strokeWidth="3.2"/>
-      <path d="M4.8 19H2.5v10h2.3M43.2 19h2.3v10h-2.3" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round"/>
-      <path d="M17.5 22.5h.01M30.5 22.5h.01" stroke="currentColor" strokeWidth="4.4" strokeLinecap="round"/>
-      <path d="M16.5 29.2c4.6 4.2 10.4 4.2 15 0" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round"/>
+      <defs>
+        <mask id="screenlink-owl-cutouts">
+          <rect width="48" height="48" fill="white"/>
+          <circle cx="18.5" cy="22.8" r="7" fill="black"/>
+          <circle cx="29.5" cy="22.8" r="7" fill="black"/>
+          <path d="m21 31 3 4.2 3-4.2Z" fill="black"/>
+        </mask>
+      </defs>
+      <circle cx="24" cy="24" r="21" stroke="currentColor" strokeWidth="2.8"/>
+      <path d="M10.8 14.6c4-4 8.8-4.3 13.2-.9 4.4-3.4 9.2-3.1 13.2.9 4.2 4.2 4.7 13.3 1.4 19.5C35.8 39.4 30.9 42 24 42s-11.8-2.6-14.6-7.9c-3.3-6.2-2.8-15.3 1.4-19.5Z" fill="currentColor" mask="url(#screenlink-owl-cutouts)"/>
+      <circle cx="18.5" cy="22.8" r="2.15" fill="currentColor"/>
+      <circle cx="29.5" cy="22.8" r="2.15" fill="currentColor"/>
     </svg>
   );
 }
@@ -226,7 +235,7 @@ function Avatar({ avatar, name, speaking = false, leader = false, size = 'normal
         {preset.face === 'frog' && <><circle cx="21" cy="23" r="9" fill="#d9f3b8"/><circle cx="43" cy="23" r="9" fill="#d9f3b8"/><ellipse cx="32" cy="36" rx="21" ry="17" fill="#7db779"/><circle cx="21" cy="23" r="3"/><circle cx="43" cy="23" r="3"/><path d="M24 41c5 3 11 3 16 0" fill="none" stroke="#173c35" strokeWidth="2.5" strokeLinecap="round"/></>}
         {preset.face === 'cat' && <><path d="m14 23 5-13 10 9h6l10-9 5 13-4 29H18l-4-29Z" fill="rgba(45,32,81,.76)"/><path d="M23 31h5M36 31h5M28 42c3 2 5 2 8 0" fill="none" stroke="#fff" strokeWidth="2.6" strokeLinecap="round"/></>}
         {preset.face === 'bear' && <><circle cx="18" cy="20" r="8" fill="#784b52"/><circle cx="46" cy="20" r="8" fill="#784b52"/><circle cx="32" cy="34" r="20" fill="#a96f70"/><circle cx="25" cy="31" r="3"/><circle cx="39" cy="31" r="3"/><ellipse cx="32" cy="40" rx="7" ry="5" fill="#eed0bc"/></>}
-        {preset.face === 'owl' && <><path d="M16 18c4.7-4.7 10.8-4.8 16-1 5.2-3.8 11.3-3.7 16 1 4.3 4.3 5.7 12.9 3.2 22.1C48.8 49 41.8 54 32 54s-16.8-5-19.2-13.9C10.3 30.9 11.7 22.3 16 18Z" fill="rgba(27,40,82,.72)"/><circle cx="24" cy="31" r="9" fill="#e8f0ff"/><circle cx="40" cy="31" r="9" fill="#e8f0ff"/><circle cx="24" cy="31" r="3"/><circle cx="40" cy="31" r="3"/><path d="m29 40 3 4 3-4" fill="#ffd080"/></>}
+        {preset.face === 'owl' && <g className="echo-owl"><path d="M15.2 17.1c4.9-4.9 11.1-5.1 16.8-1 5.7-4.1 11.9-3.9 16.8 1 4.8 4.8 5.3 15.3 1.6 22.5C47.2 46 41.4 50 32 50s-15.2-4-18.4-10.4c-3.7-7.2-3.2-17.7 1.6-22.5Z" fill="#4d5f8f"/><g className="echo-owl-eye echo-owl-eye-left"><circle cx="24.2" cy="29.3" r="10.1" fill="#f5f7ff"/><circle cx="24.2" cy="29.3" r="3.15" fill="#05070b"/></g><g className="echo-owl-eye echo-owl-eye-right"><circle cx="39.8" cy="29.3" r="10.1" fill="#f5f7ff"/><circle cx="39.8" cy="29.3" r="3.15" fill="#05070b"/></g><path className="echo-owl-beak" d="m28.4 39.2 7.2-.05-3.55 5.25Z" fill="#f3c86f"/></g>}
       </svg>
       {leader && <span className="avatar-crown" aria-label="Líder da sala"><Icon name="crown"/></span>}
     </span>
@@ -285,6 +294,20 @@ function normalizeChatText(value: unknown) {
 function normalizeChatId(value: unknown) {
   const id = typeof value === 'string' ? value.slice(0, 200) : '';
   return /^[a-z0-9._:-]{1,200}$/i.test(id) ? id : '';
+}
+
+function loadOwnChatMessageIds(roomId: string) {
+  try {
+    const stored = JSON.parse(readStorage('sessionStorage', `${CHAT_OWN_IDS_PREFIX}${roomId}`) || '[]') as unknown;
+    if (!Array.isArray(stored)) return new Set<string>();
+    return new Set(stored.slice(-CHAT_LIMIT).map(normalizeChatId).filter(Boolean));
+  } catch {
+    return new Set<string>();
+  }
+}
+
+function saveOwnChatMessageIds(roomId: string, ids: Set<string>) {
+  writeStorage('sessionStorage', `${CHAT_OWN_IDS_PREFIX}${roomId}`, JSON.stringify([...ids].slice(-CHAT_LIMIT)));
 }
 
 function normalizeChatTimestamp(value: unknown) {
@@ -377,17 +400,16 @@ function detectVoiceSettingSupport(): VoiceSettingSupport {
   };
 }
 
-function voiceProcessingConstraints(settings: AudioSettings, support: VoiceSettingSupport): MediaTrackConstraints {
+function voiceProcessingConstraints(settings: AudioSettings, support: VoiceSettingSupport, exactSetting?: VoiceSettingKey): MediaTrackConstraints {
   const constraints: MediaTrackConstraints = {};
   for (const key of VOICE_SETTING_KEYS) {
-    if (support[key]) constraints[key] = settings[key];
+    if (support[key]) constraints[key] = exactSetting === key ? { exact: settings[key] } : settings[key];
   }
   return constraints;
 }
 
 function microphoneConstraints(settings: AudioSettings, support: VoiceSettingSupport, exactSetting?: VoiceSettingKey): MediaTrackConstraints {
-  const processing = voiceProcessingConstraints(settings, support);
-  if (exactSetting && support[exactSetting]) processing[exactSetting] = { exact: settings[exactSetting] };
+  const processing = voiceProcessingConstraints(settings, support, exactSetting);
   return {
     ...(settings.inputDeviceId ? { deviceId: { exact: settings.inputDeviceId } } : {}),
     ...processing
@@ -595,6 +617,7 @@ export default function RoomApp() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const chatMessagesRef = useRef<ChatMessage[]>([]);
   const seenMessageIdsRef = useRef(new Set<string>());
+  const ownChatMessageIdsRef = useRef(new Set<string>());
   const pendingChatMessagesRef = useRef(new Map<string, PendingChatMessage>());
   const chatOpenRef = useRef(chatOpen);
   const chatStickToBottomRef = useRef(true);
@@ -624,6 +647,7 @@ export default function RoomApp() {
   const [voiceSettingSupport, setVoiceSettingSupport] = useState(detectVoiceSettingSupport);
   const [voiceSettingPending, setVoiceSettingPending] = useState<VoiceSettingKey | null>(null);
   const [voiceSettingFeedback, setVoiceSettingFeedback] = useState('');
+  const [verifiedVoiceSettings, setVerifiedVoiceSettings] = useState<Partial<Record<VoiceSettingKey, boolean>>>({});
   const [interfaceSoundsEnabled, setInterfaceSoundsEnabled] = useState(() => readStorage('localStorage', INTERFACE_SOUNDS_KEY) !== 'false');
   const [animationsEnabled, setAnimationsEnabled] = useState(loadMotionPreference);
   const [microphonePending, setMicrophonePending] = useState(false);
@@ -651,6 +675,7 @@ export default function RoomApp() {
   const microphoneGainRef = useRef<GainNode | null>(null);
   const microphoneSourceStreamRef = useRef<MediaStream | null>(null);
   const audioSettingsRef = useRef(audioSettings);
+  const verifiedVoiceSettingsRef = useRef<Partial<Record<VoiceSettingKey, boolean>>>({});
   const resolutionRef = useRef(resolution);
   const fpsRef = useRef(fps);
   const automaticQualityRef = useRef(automaticQuality);
@@ -894,6 +919,22 @@ export default function RoomApp() {
     setNewMessagesBelow(0);
   }, []);
 
+  const isOwnChatMessage = useCallback((message: ChatMessage) => (
+    message.senderId === selfIdRef.current || ownChatMessageIdsRef.current.has(message.id)
+  ), []);
+
+  const rememberOwnChatMessage = useCallback((messageId: string) => {
+    const ids = ownChatMessageIdsRef.current;
+    ids.add(messageId);
+    while (ids.size > CHAT_LIMIT) {
+      const oldest = ids.values().next().value;
+      if (!oldest) break;
+      ids.delete(oldest);
+    }
+    const roomId = sessionRef.current?.invite.roomId;
+    if (roomId) saveOwnChatMessageIds(roomId, ids);
+  }, []);
+
   useLayoutEffect(() => {
     if (!chatOpen || !chatStickToBottomRef.current) return;
     scrollChatToLatest(false);
@@ -902,7 +943,7 @@ export default function RoomApp() {
   const appendMessage = useCallback((message: ChatMessage) => {
     if (seenMessageIdsRef.current.has(message.id)) return;
     seenMessageIdsRef.current.add(message.id);
-    const own = message.senderId === selfIdRef.current;
+    const own = isOwnChatMessage(message);
     if (!own && !message.system) {
       if (!chatOpenRef.current) setUnreadMessages(current => Math.min(99, current + 1));
       else if (!chatStickToBottomRef.current) setNewMessagesBelow(current => Math.min(99, current + 1));
@@ -916,14 +957,14 @@ export default function RoomApp() {
       }
       return next;
     });
-  }, []);
+  }, [isOwnChatMessage]);
 
   const mergeChatHistory = useCallback((history: ChatMessage[]) => {
     const incoming = history.filter(message => !seenMessageIdsRef.current.has(message.id));
     if (!incoming.length) return;
     for (const message of incoming) seenMessageIdsRef.current.add(message.id);
     setChatMessages(current => {
-      const merged = [...current, ...incoming.map(message => message.senderId === selfIdRef.current ? { ...message, delivery: 'delivered' as const } : message)]
+      const merged = [...current, ...incoming.map(message => isOwnChatMessage(message) ? { ...message, delivery: 'delivered' as const } : message)]
         .sort((left, right) => left.sentAt - right.sentAt || left.id.localeCompare(right.id))
         .slice(-CHAT_LIMIT);
       chatMessagesRef.current = merged;
@@ -931,7 +972,7 @@ export default function RoomApp() {
       for (const id of seenMessageIdsRef.current) if (!retained.has(id)) seenMessageIdsRef.current.delete(id);
       return merged;
     });
-  }, []);
+  }, [isOwnChatMessage]);
 
   const updateChatDelivery = useCallback((messageId: string, delivery: ChatDelivery) => {
     setChatMessages(current => {
@@ -1321,6 +1362,10 @@ export default function RoomApp() {
       }
       selfIdRef.current = message.selfId;
       setSelfId(message.selfId);
+      ownChatMessageIdsRef.current = new Set([
+        ...ownChatMessageIdsRef.current,
+        ...loadOwnChatMessageIds(message.roomId)
+      ]);
       setLeaderId(message.leaderId);
       if (message.maxParticipants) setMaxParticipants(message.maxParticipants);
       const next = Object.fromEntries(message.participants.map(participant => [participant.id, participant]));
@@ -1448,6 +1493,7 @@ export default function RoomApp() {
     if (message.type === 'pong') return;
     if (message.type === 'room-closed') {
       if (sessionRef.current?.ownerKey) removeStorage('localStorage', OWNER_ROOM_KEY);
+      if (sessionRef.current?.invite.roomId) removeStorage('sessionStorage', `${CHAT_OWN_IDS_PREFIX}${sessionRef.current.invite.roomId}`);
       failPendingChat();
       if (callSoundConnectedRef.current) playSound('callDisconnected');
       callSoundConnectedRef.current = false;
@@ -1461,6 +1507,9 @@ export default function RoomApp() {
       if (fatalBeforeJoining || message.code === 'ROOM_NOT_FOUND' || message.code === 'HOST_OFFLINE') {
         setMode('error');
         if (sessionRef.current?.ownerKey) removeStorage('localStorage', OWNER_ROOM_KEY);
+        if (message.code === 'ROOM_NOT_FOUND' && sessionRef.current?.invite.roomId) {
+          removeStorage('sessionStorage', `${CHAT_OWN_IDS_PREFIX}${sessionRef.current.invite.roomId}`);
+        }
       }
     }
   }, [acknowledgeChatDelivery, appendMessage, createPeer, destroyPeer, failPendingChat, flushPendingChat, playSound, settleDepartedChatRecipient, syncPeerMedia, systemMessage, updateParticipant, updateSelfMediaState]);
@@ -1622,6 +1671,8 @@ export default function RoomApp() {
       }
       setVoiceSettingSupport(detectVoiceTrackSupport(sourceTrack, voiceSettingSupport));
       const verifiedSettings = readVoiceTrackSettings(sourceTrack);
+      verifiedVoiceSettingsRef.current = verifiedSettings;
+      setVerifiedVoiceSettings(verifiedSettings);
       const effectiveSettings = { ...settings };
       let browserAdjustedSettings = false;
       for (const key of VOICE_SETTING_KEYS) {
@@ -1632,9 +1683,12 @@ export default function RoomApp() {
       }
       audioSettingsRef.current = effectiveSettings;
       setAudioSettings(effectiveSettings);
+      const hasVerifiedSettings = VOICE_SETTING_KEYS.some(key => typeof verifiedSettings[key] === 'boolean');
       setVoiceSettingFeedback(browserAdjustedSettings
-        ? 'O navegador ajustou os filtros disponíveis para este microfone.'
-        : 'Tratamento de voz aplicado ao microfone.');
+        ? 'O navegador ajustou os filtros; o estado exibido agora corresponde ao áudio enviado.'
+        : hasVerifiedSettings
+          ? 'Tratamentos confirmados no áudio enviado aos participantes.'
+          : 'O navegador aceitou os tratamentos, mas este driver não expõe a confirmação.');
       disposeMicrophonePipeline();
       microphoneSourceStreamRef.current = sourceStream;
       localMicrophoneStreamRef.current = sourceStream;
@@ -1668,6 +1722,8 @@ export default function RoomApp() {
         if (microphoneSourceStreamRef.current !== sourceStream) return;
         const wasEnabled = microphoneEnabledRef.current;
         disposeMicrophonePipeline();
+        verifiedVoiceSettingsRef.current = {};
+        setVerifiedVoiceSettings({});
         microphoneEnabledRef.current = false;
         setMicrophoneEnabled(false);
         updateSelfMediaState({ microphoneEnabled: false });
@@ -1737,6 +1793,9 @@ export default function RoomApp() {
     disposeMicrophonePipeline();
     microphoneEnabledRef.current = false;
     setMicrophoneEnabled(false);
+    verifiedVoiceSettingsRef.current = {};
+    setVerifiedVoiceSettings({});
+    setVoiceSettingFeedback('');
     sharingRef.current = false;
     setSharing(false);
     setSpeakingIds(new Set());
@@ -1944,13 +2003,18 @@ export default function RoomApp() {
     callSoundConnectedRef.current = false;
     const connectedCount = Object.values(participantsRef.current).filter(participant => participant.connected).length;
     const closeForEveryone = closeRequested || (Boolean(sessionRef.current?.ownerKey) && connectedCount <= 1);
+    const activeRoomId = sessionRef.current?.invite.roomId;
     send(socketRef.current, { type: closeForEveryone ? 'close-group-room' : 'leave-group-room' });
     if (closeForEveryone) removeStorage('localStorage', OWNER_ROOM_KEY);
+    if (closeForEveryone && activeRoomId) removeStorage('sessionStorage', `${CHAT_OWN_IDS_PREFIX}${activeRoomId}`);
     socketRef.current?.close(1000, closeForEveryone ? 'Room closed' : 'Participant left');
     for (const peerId of [...peersRef.current.keys()]) destroyPeer(peerId);
     stopScreenShare();
     disposeMicrophonePipeline();
     setMicrophoneEnabled(false);
+    verifiedVoiceSettingsRef.current = {};
+    setVerifiedVoiceSettings({});
+    setVoiceSettingFeedback('');
     participantsRef.current = {};
     setParticipants({});
     screenVolumesRef.current = {};
@@ -1962,6 +2026,7 @@ export default function RoomApp() {
     setLeaderId('');
     pendingChatMessagesRef.current.clear();
     seenMessageIdsRef.current.clear();
+    ownChatMessageIdsRef.current.clear();
     chatMessagesRef.current = [];
     setChatMessages([]);
     setChatValue('');
@@ -2077,13 +2142,15 @@ export default function RoomApp() {
     try {
       let appliedWithoutRestart = false;
       try {
-        await sourceTrack.applyConstraints(voiceProcessingConstraints(next, voiceSettingSupport));
+        await sourceTrack.applyConstraints(voiceProcessingConstraints(next, voiceSettingSupport, key));
         const verified = readVoiceTrackSettings(sourceTrack);
-        if (typeof verified[key] !== 'boolean' || verified[key] === next[key]) {
+        if (verified[key] === next[key]) {
           const effective = { ...next };
           for (const settingKey of VOICE_SETTING_KEYS) {
             if (typeof verified[settingKey] === 'boolean') effective[settingKey] = verified[settingKey];
           }
+          verifiedVoiceSettingsRef.current = verified;
+          setVerifiedVoiceSettings(verified);
           audioSettingsRef.current = effective;
           setAudioSettings(effective);
           appliedWithoutRestart = true;
@@ -2093,18 +2160,25 @@ export default function RoomApp() {
       }
 
       if (appliedWithoutRestart) {
-        setVoiceSettingFeedback(`${details.label} ${next[key] ? 'ativado' : 'desativado'} no microfone.`);
+        setVoiceSettingFeedback(`${details.label} ${next[key] ? 'ativado' : 'desativado'} e confirmado no áudio enviado.`);
         return;
       }
 
       const reopened = await acquireMicrophone(true, key);
-      if (reopened && audioSettingsRef.current[key] === next[key]) {
-        setVoiceSettingFeedback(`${details.label} ${next[key] ? 'ativado' : 'desativado'} após reiniciar a captura.`);
+      const reopenedVerification = verifiedVoiceSettingsRef.current[key];
+      if (reopened && reopenedVerification === next[key]) {
+        setVoiceSettingFeedback(`${details.label} ${next[key] ? 'ativado' : 'desativado'} e confirmado após reiniciar a captura.`);
+        return;
+      }
+      if (reopened && typeof reopenedVerification !== 'boolean') {
+        setVoiceSettingFeedback(`O navegador aceitou ${details.label.toLowerCase()}, mas este driver não expõe a confirmação.`);
         return;
       }
 
       const activeSource = microphoneSourceStreamRef.current?.getAudioTracks()[0] ?? sourceTrack;
       const verified = readVoiceTrackSettings(activeSource);
+      verifiedVoiceSettingsRef.current = verified;
+      setVerifiedVoiceSettings(verified);
       const restored = { ...next };
       for (const settingKey of VOICE_SETTING_KEYS) {
         restored[settingKey] = typeof verified[settingKey] === 'boolean' ? verified[settingKey] : previous[settingKey];
@@ -2233,6 +2307,7 @@ export default function RoomApp() {
       delivery: recipients.length ? 'pending' : 'sent'
     };
     chatStickToBottomRef.current = true;
+    rememberOwnChatMessage(message.id);
     appendMessage(message);
     if (recipients.length) {
       const now = Date.now();
@@ -2252,7 +2327,7 @@ export default function RoomApp() {
   }
 
   function retryChatMessage(messageId: string) {
-    const message = chatMessagesRef.current.find(item => item.id === messageId && item.senderId === selfIdRef.current);
+    const message = chatMessagesRef.current.find(item => item.id === messageId && isOwnChatMessage(item));
     if (!message || mode === 'error') return;
     const recipients = Object.values(participantsRef.current)
       .filter(participant => participant.connected && participant.id !== selfIdRef.current)
@@ -2378,7 +2453,7 @@ export default function RoomApp() {
       }}>
         {chatMessages.length ? chatMessages.map(message => {
           if (message.system) return <p className="chat-system" key={message.id}>{message.text}</p>;
-          const own = message.senderId === selfId;
+          const own = isOwnChatMessage(message);
           return (
             <article className={`chat-message ${own ? 'is-own' : ''}`} key={message.id}>
               <header><strong>{own ? 'Você' : message.senderName}</strong><time dateTime={new Date(message.sentAt).toISOString()}>{new Date(message.sentAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</time></header>
@@ -2436,7 +2511,17 @@ export default function RoomApp() {
               const details = VOICE_SETTING_DETAILS[key];
               const unsupported = !voiceSettingSupport[key];
               const applying = voiceSettingPending === key;
-              return <button key={key} className={`voice-setting ${applying ? 'is-applying' : ''}`} type="button" role="switch" aria-checked={audioSettings[key]} aria-busy={applying} disabled={unsupported || voiceSettingPending !== null} onClick={() => void changeVoiceSetting(key)}><span><strong>{details.label}</strong><small>{unsupported ? 'Fixado pelo dispositivo ou navegador' : applying ? 'Aplicando ao microfone…' : details.description}</small></span><i><b/></i></button>;
+              const verified = verifiedVoiceSettings[key];
+              const status = unsupported
+                ? 'Fixado pelo dispositivo ou navegador'
+                : applying
+                  ? 'Aplicando ao microfone…'
+                  : microphoneEnabled && typeof verified === 'boolean'
+                    ? `${verified ? 'Ativo' : 'Desativado'} no áudio enviado`
+                    : microphoneEnabled
+                      ? `${audioSettings[key] ? 'Ativado' : 'Desativado'} na captura · sem confirmação do driver`
+                      : details.description;
+              return <button key={key} className={`voice-setting ${applying ? 'is-applying' : ''}`} type="button" role="switch" aria-checked={audioSettings[key]} aria-busy={applying} disabled={unsupported || voiceSettingPending !== null} onClick={() => void changeVoiceSetting(key)}><span><strong>{details.label}</strong><small>{status}</small></span><i><b/></i></button>;
             })}
           </div>
           {voiceSettingFeedback && <p className="voice-processing-feedback" role="status">{voiceSettingFeedback}</p>}

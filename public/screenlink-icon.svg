@@ -4,9 +4,17 @@
     @media (prefers-color-scheme: dark) { .echo { color: #fff; } }
   </style>
   <g class="echo">
-    <path d="M15 10.5h18c6.1 0 10.5 4.4 10.5 10.5v6c0 6.1-4.4 10.5-10.5 10.5H15C8.9 37.5 4.5 33.1 4.5 27v-6C4.5 14.9 8.9 10.5 15 10.5Z" stroke="currentColor" stroke-width="3.2"/>
-    <path d="M4.8 19H2.5v10h2.3M43.2 19h2.3v10h-2.3" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
-    <path d="M17.5 22.5h.01M30.5 22.5h.01" stroke="currentColor" stroke-width="4.4" stroke-linecap="round"/>
-    <path d="M16.5 29.2c4.6 4.2 10.4 4.2 15 0" stroke="currentColor" stroke-width="3.2" stroke-linecap="round"/>
+    <defs>
+      <mask id="screenlink-owl-cutouts">
+        <rect width="48" height="48" fill="white"/>
+        <circle cx="18.5" cy="22.8" r="7" fill="black"/>
+        <circle cx="29.5" cy="22.8" r="7" fill="black"/>
+        <path d="m21 31 3 4.2 3-4.2Z" fill="black"/>
+      </mask>
+    </defs>
+    <circle cx="24" cy="24" r="21" stroke="currentColor" stroke-width="2.8"/>
+    <path d="M10.8 14.6c4-4 8.8-4.3 13.2-.9 4.4-3.4 9.2-3.1 13.2.9 4.2 4.2 4.7 13.3 1.4 19.5C35.8 39.4 30.9 42 24 42s-11.8-2.6-14.6-7.9c-3.3-6.2-2.8-15.3 1.4-19.5Z" fill="currentColor" mask="url(#screenlink-owl-cutouts)"/>
+    <circle cx="18.5" cy="22.8" r="2.15" fill="currentColor"/>
+    <circle cx="29.5" cy="22.8" r="2.15" fill="currentColor"/>
   </g>
 </svg>
