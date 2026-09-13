@@ -346,11 +346,12 @@
 .room-device-trigger:hover > .icon:last-child, .room-device-picker.is-open .room-device-trigger > .icon:last-child { color: #eef1f2; transform: translateX(.16rem); }
 .room-device-options { position: absolute; z-index: 28; top: 0; left: calc(100% + .55rem); width: 17rem; max-height: 14rem; padding: .42rem; border: 1px solid #343434; border-radius: .75rem; overflow-y: auto; overflow-x: hidden; background: #121212; box-shadow: 0 1.2rem 3.4rem rgba(0,0,0,.56); animation: submenu-enter 200ms var(--ease-out) both; }
 .room-device-options::before { content: ""; position: absolute; top: -.25rem; bottom: -.25rem; left: -.7rem; width: .75rem; }
-.room-device-options button { width: 100%; min-height: 2.6rem; padding: .38rem .48rem; border: 0; border-radius: .52rem; display: grid; grid-template-columns: .9rem minmax(0,1fr) .8rem; align-items: center; gap: .55rem; color: #cacaca; text-align: left; background: transparent; transition: color 180ms ease, background 220ms ease, transform 220ms var(--ease-out); }
-.room-device-options button:hover, .room-device-options button[aria-selected="true"] { color: #fff; background: #292929; transform: translateX(.12rem); }
-.room-device-options button .icon { width: .82rem; }
-.room-device-options button span { overflow: hidden; font-size: .63rem; text-overflow: ellipsis; white-space: nowrap; }
-.room-device-options button b { font-size: .68rem; }
+.room-device-options-header { display: none; }
+.room-device-options-list > button { width: 100%; min-height: 2.6rem; padding: .38rem .48rem; border: 0; border-radius: .52rem; display: grid; grid-template-columns: .9rem minmax(0,1fr) .8rem; align-items: center; gap: .55rem; color: #cacaca; text-align: left; background: transparent; transition: color 180ms ease, background 220ms ease, transform 220ms var(--ease-out); }
+.room-device-options-list > button:hover, .room-device-options-list > button[aria-selected="true"] { color: #fff; background: #292929; transform: translateX(.12rem); }
+.room-device-options-list > button .icon { width: .82rem; }
+.room-device-options-list > button span { overflow: hidden; font-size: .63rem; text-overflow: ellipsis; white-space: nowrap; }
+.room-device-options-list > button b { font-size: .68rem; }
 
 @media (max-width: 1240px) {
   .unified-room-app { overflow: hidden; }
@@ -616,4 +617,241 @@
 @keyframes echo-owl-blink {
   0%, 43%, 47%, 100% { transform: scaleY(1); }
   45% { transform: scaleY(.08); }
+}
+
+@keyframes mobile-sheet-backdrop-enter {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes mobile-sheet-enter {
+  from { opacity: .72; transform: translateY(100%); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes mobile-view-enter {
+  from { opacity: .72; transform: translateX(1.5rem); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes mobile-dock-enter {
+  from { opacity: .7; transform: translateY(1rem); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.mobile-sheet-layer, .mobile-overlay-backdrop, .mobile-sheet-close { display: none; }
+
+/* Phone UI: full-screen destinations for chat and native bottom sheets for transient controls. */
+@media (max-width: 760px), (pointer: coarse) and (max-width: 980px) {
+  .unified-room-app.is-phone-room { overscroll-behavior: none; }
+  .unified-room-app.is-phone-room .topbar { z-index: 46; padding-right: max(.8rem, env(safe-area-inset-right)); padding-left: max(.8rem, env(safe-area-inset-left)); }
+  .unified-room-app.is-phone-room .status-pill { min-height: 1.85rem; max-width: 6.8rem; padding: 0 .62rem; overflow: hidden; font-size: .69rem; text-overflow: ellipsis; white-space: nowrap; }
+
+  .unified-room-app.is-phone-room .unified-stage-empty { inset: 0 0 5rem; width: min(100%, 27rem); padding: 1.35rem 1rem; }
+  .unified-room-app.is-phone-room .unified-stage-empty .stage-echo .preset-avatar { width: 5.25rem; height: 5.25rem; }
+  .unified-room-app.is-phone-room .unified-stage-empty h1 { font-size: clamp(1.45rem, 7vw, 1.9rem); }
+  .unified-room-app.is-phone-room .unified-stage-empty p { max-width: 20rem; font-size: .75rem; line-height: 1.5; }
+  .unified-room-app.is-phone-room .stage-entry-actions { width: min(100%, 18rem); }
+  .unified-room-app.is-phone-room .stage-entry-actions > button { width: 100%; min-height: 2.85rem; justify-content: center; }
+
+  .unified-room-app.is-phone-room .unified-call-dock {
+    right: max(.25rem, env(safe-area-inset-right));
+    bottom: max(.45rem, env(safe-area-inset-bottom));
+    left: max(.25rem, env(safe-area-inset-left));
+    width: auto;
+    max-width: none;
+    min-height: 3.35rem;
+    padding: .25rem;
+    gap: .08rem;
+    justify-content: center;
+    border-radius: 1rem;
+    transform: none;
+    animation: mobile-dock-enter 260ms var(--ease-out) both;
+  }
+  .unified-room-app.is-phone-room .unified-call-dock > button,
+  .unified-room-app.is-phone-room .unified-call-dock > .dock-split-control > button { width: 2.75rem; height: 2.75rem; border-radius: .76rem; }
+  .unified-room-app.is-phone-room .unified-call-dock > .dock-split-control > button:first-child { border-radius: .76rem 0 0 .76rem; }
+  .unified-room-app.is-phone-room .unified-call-dock > .dock-split-control > .dock-chevron { width: 1.5rem; border-radius: 0 .76rem .76rem 0; }
+  .unified-room-app.is-phone-room .unified-call-dock > .dock-divider { display: none; }
+  .unified-room-app.is-phone-room.is-chat-open .unified-call-dock { display: none; }
+
+  .unified-room-app.is-phone-room .unified-chat-sidebar {
+    z-index: 50;
+    top: 3.5rem;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    grid-template-rows: 3.55rem minmax(0, 1fr) max(3.15rem, calc(2.9rem + env(safe-area-inset-bottom)));
+    border: 0;
+    border-radius: 0;
+    background: #090b0c;
+    box-shadow: none;
+    backdrop-filter: none;
+    animation: mobile-view-enter 280ms var(--ease-out) both;
+  }
+  .unified-room-app.is-phone-room .unified-chat-sidebar.is-closed { animation: none; transform: translateX(100%); }
+  .unified-room-app.is-phone-room .unified-sidebar-header { padding: 0 .75rem 0 .9rem; }
+  .unified-room-app.is-phone-room .unified-sidebar-actions .chat-settings-trigger,
+  .unified-room-app.is-phone-room .unified-sidebar-close { width: 2.75rem; height: 2.75rem; border-radius: .75rem; }
+  .unified-room-app.is-phone-room .unified-chat-sidebar .unified-chat-panel { padding: .25rem .72rem .65rem; }
+  .unified-room-app.is-phone-room .unified-chat-panel .chat-log { padding: .35rem .12rem .85rem; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+  .unified-room-app.is-phone-room .unified-chat-panel .chat-message { max-width: 82%; margin: .68rem 0; }
+  .unified-room-app.is-phone-room .unified-chat-panel .chat-message p { padding: .55rem .68rem; font-size: .73rem; line-height: 1.45; }
+  .unified-room-app.is-phone-room .unified-chat-panel .chat-composer { min-height: 3rem; padding: .28rem .32rem; grid-template-columns: 2.35rem minmax(0, 1fr) 2.4rem; }
+  .unified-room-app.is-phone-room .chat-composer .emoji-picker-anchor > button,
+  .unified-room-app.is-phone-room .unified-chat-panel .chat-composer > button { width: 2.4rem; height: 2.4rem; }
+  .unified-room-app.is-phone-room .unified-chat-panel .chat-composer textarea { min-height: 2.4rem; padding-top: .68rem; padding-bottom: .48rem; font-size: .78rem; }
+  .unified-room-app.is-phone-room .unified-profile-bar { min-height: max(3.15rem, calc(2.9rem + env(safe-area-inset-bottom))); padding: .35rem max(.8rem, env(safe-area-inset-right)) max(.35rem, env(safe-area-inset-bottom)) max(.8rem, env(safe-area-inset-left)); grid-template-columns: 1.9rem minmax(0, 1fr) 2.5rem; }
+  .unified-room-app.is-phone-room .unified-profile-bar .preset-avatar { width: 1.9rem; height: 1.9rem; }
+  .unified-room-app.is-phone-room .unified-profile-bar > .icon { justify-self: center; }
+
+  .unified-room-app.is-phone-room .unified-chat-settings-anchor .chat-settings-popover {
+    position: fixed;
+    z-index: 72;
+    top: auto;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    max-height: min(72dvh, 32rem);
+    padding: 1.15rem .65rem max(.8rem, env(safe-area-inset-bottom));
+    overflow-y: auto;
+    border-width: 1px 0 0;
+    border-radius: 1.3rem 1.3rem 0 0;
+    box-shadow: 0 -1rem 3.5rem rgba(0,0,0,.48);
+    transform-origin: 50% 100%;
+    animation: mobile-sheet-enter 280ms var(--ease-out) both;
+  }
+  .unified-room-app.is-phone-room .unified-chat-settings-anchor .chat-settings-popover::before { content: ""; position: absolute; top: .48rem; left: 50%; width: 2.25rem; height: .24rem; border-radius: 999px; background: #4f5557; transform: translateX(-50%); }
+  .unified-room-app.is-phone-room .chat-settings-popover > label { min-height: 3.5rem; }
+
+  .mobile-overlay-backdrop {
+    position: fixed;
+    z-index: 55;
+    inset: 3.5rem 0 0;
+    width: 100%;
+    height: auto;
+    padding: 0;
+    border: 0;
+    display: block;
+    background: rgba(0,0,0,.58);
+    backdrop-filter: blur(.28rem);
+    animation: mobile-sheet-backdrop-enter 200ms ease-out both;
+  }
+  .unified-room-app.is-phone-room.is-controls-open .unified-control-panel {
+    z-index: 60;
+    top: auto;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    height: min(86dvh, 45rem);
+    max-height: calc(100dvh - 1.25rem);
+    padding: 1rem .9rem max(.7rem, env(safe-area-inset-bottom));
+    border-width: 1px 0 0;
+    border-radius: 1.35rem 1.35rem 0 0;
+    background: rgba(10,12,13,.985);
+    box-shadow: 0 -1.2rem 4rem rgba(0,0,0,.55);
+    animation: mobile-sheet-enter 300ms var(--ease-out) both;
+  }
+  .unified-room-app.is-phone-room.is-controls-open .unified-control-panel::before,
+  .unified-room-app.is-phone-room .unified-profile-popover::before { content: ""; position: absolute; z-index: 2; top: .48rem; left: 50%; width: 2.35rem; height: .24rem; border-radius: 999px; background: #50575a; transform: translateX(-50%); }
+  .unified-room-app.is-phone-room.is-controls-open .unified-control-panel .panel-header { min-height: 3.15rem; padding: .35rem .05rem .65rem; }
+  .unified-room-app.is-phone-room .mobile-panel-close { width: 2.75rem; height: 2.75rem; border-radius: .75rem; }
+  .unified-room-app.is-phone-room .mobile-control-profile { min-height: 3.75rem; padding: .55rem .68rem; grid-template-columns: 2.15rem minmax(0, 1fr) 1.25rem; }
+  .unified-room-app.is-phone-room .unified-call-page { padding-bottom: max(.4rem, env(safe-area-inset-bottom)); -webkit-overflow-scrolling: touch; }
+  .unified-room-app.is-phone-room .unified-call-page .panel-section { padding: 1.1rem .05rem; }
+  .unified-room-app.is-phone-room .unified-call-page .panel-section + .panel-section { border-top-color: #292d2f; }
+  .unified-room-app.is-phone-room .unified-call-page .section-heading { margin-bottom: .75rem; }
+  .unified-room-app.is-phone-room .unified-call-page .section-heading h3 { font-size: .84rem; }
+  .unified-room-app.is-phone-room .unified-call-page .section-heading > small { font-size: .57rem; }
+
+  .unified-room-app.is-phone-room .unified-profile-popover {
+    z-index: 65;
+    top: auto;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    max-height: min(86dvh, 42rem);
+    padding: 1rem .35rem max(.85rem, env(safe-area-inset-bottom));
+    overflow-y: auto;
+    border-width: 1px 0 0;
+    border-radius: 1.35rem 1.35rem 0 0;
+    box-shadow: 0 -1.2rem 4rem rgba(0,0,0,.55);
+    animation: mobile-sheet-enter 300ms var(--ease-out) both;
+    -webkit-overflow-scrolling: touch;
+  }
+  .unified-room-app.is-phone-room .unified-profile-popover > header { min-height: 3.15rem; padding-top: .35rem; }
+  .unified-room-app.is-phone-room .unified-profile-popover > header > button { width: 2.75rem; height: 2.75rem; }
+  .unified-room-app.is-phone-room .unified-profile-popover > input { height: 2.75rem; font-size: .78rem; }
+  .unified-room-app.is-phone-room .profile-photo-actions > label,
+  .unified-room-app.is-phone-room .profile-photo-actions > button { min-height: 2.5rem; }
+  .unified-room-app.is-phone-room .unified-profile-popover .avatar-picker { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .35rem; }
+  .unified-room-app.is-phone-room .unified-profile-popover .avatar-picker button { min-height: 4.15rem; }
+
+  .mobile-sheet-layer { position: fixed; z-index: 70; inset: 0; display: block; pointer-events: none; }
+  .mobile-sheet-backdrop { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; display: block; pointer-events: auto; background: rgba(0,0,0,.62); backdrop-filter: blur(.3rem); animation: mobile-sheet-backdrop-enter 200ms ease-out both; }
+  .mobile-sheet-host { position: absolute; right: 0; bottom: 0; left: 0; pointer-events: none; }
+  .mobile-sheet-host > .dock-popover {
+    position: relative;
+    right: auto;
+    bottom: auto;
+    left: auto;
+    width: 100%;
+    max-height: min(86dvh, 46rem);
+    padding: 1.05rem .65rem max(.75rem, env(safe-area-inset-bottom));
+    overflow: hidden;
+    border-width: 1px 0 0;
+    border-radius: 1.35rem 1.35rem 0 0;
+    pointer-events: auto;
+    background: rgba(13,14,15,.99);
+    box-shadow: 0 -1.2rem 4rem rgba(0,0,0,.58);
+    transform: none;
+    animation: mobile-sheet-enter 300ms var(--ease-out) both;
+  }
+  .mobile-sheet-host > .dock-popover::before { content: ""; position: absolute; top: .48rem; left: 50%; width: 2.35rem; height: .24rem; border-radius: 999px; background: #50575a; transform: translateX(-50%); }
+  .mobile-sheet-host > .dock-popover > header { min-height: 3rem; padding: .25rem .2rem .55rem .35rem; }
+  .mobile-sheet-host > .dock-popover > header small { margin-left: auto; }
+  .mobile-sheet-close { flex: 0 0 auto; width: 2.75rem; height: 2.75rem; margin-left: .15rem; padding: 0; border: 0; border-radius: .75rem; display: grid; place-items: center; color: #aab1b3; background: #202324; }
+  .mobile-sheet-close .icon { width: .95rem; }
+  .mobile-sheet-host .audio-popover-scroll,
+  .mobile-sheet-host .screen-popover-scroll { overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+  .mobile-sheet-host .room-device-trigger,
+  .mobile-sheet-host .more-popover > button,
+  .mobile-sheet-host .exit-options > button { min-height: 3.35rem; }
+  .mobile-sheet-host .voice-setting { min-height: 3.2rem; }
+  .mobile-sheet-host .volume-control { min-height: 3.25rem; grid-template-columns: minmax(0, 1fr) minmax(5rem, 7rem) 2.2rem; gap: .5rem; }
+
+  .mobile-sheet-host .room-device-options {
+    position: fixed;
+    z-index: 12;
+    inset: 0;
+    width: 100%;
+    max-height: none;
+    padding: 1rem .65rem max(.75rem, env(safe-area-inset-bottom));
+    overflow: hidden;
+    border: 0;
+    border-radius: inherit;
+    background: #101213;
+    box-shadow: none;
+    transform-origin: 100% 50%;
+    animation: mobile-view-enter 240ms var(--ease-out) both;
+  }
+  .mobile-sheet-host .room-device-options::before { display: none; }
+  .mobile-sheet-host .room-device-options-header { min-height: 3.15rem; padding: .1rem 0 .6rem; display: grid; grid-template-columns: 2.75rem minmax(0, 1fr) 2.75rem; align-items: center; gap: .4rem; }
+  .mobile-sheet-host .room-device-options-header::after { content: ""; }
+  .mobile-sheet-host .room-device-options-header > button { width: 2.75rem; height: 2.75rem; padding: 0; border: 0; border-radius: .75rem; display: grid; place-items: center; color: #d8dddf; background: #202324; }
+  .mobile-sheet-host .room-device-options-header > button .icon { width: .9rem; transform: rotate(180deg); }
+  .mobile-sheet-host .room-device-options-header > strong { overflow: hidden; font-size: .84rem; font-weight: 620; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+  .mobile-sheet-host .room-device-options-list { max-height: calc(min(86dvh, 46rem) - 5.5rem); overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+  .mobile-sheet-host .room-device-options-list > button { min-height: 3.25rem; padding: .48rem .62rem; border-radius: .7rem; }
+
+  .unified-room-app.is-phone-room .modal-backdrop { align-items: end; padding: 0; }
+  .unified-room-app.is-phone-room .qr-modal { width: 100%; max-height: calc(100dvh - 1rem); padding: 1.5rem 1rem max(1rem, env(safe-area-inset-bottom)); overflow-y: auto; border-width: 1px 0 0; border-radius: 1.35rem 1.35rem 0 0; animation: mobile-sheet-enter 300ms var(--ease-out) both; }
+  .unified-room-app.is-phone-room .qr-modal img { width: min(15.5rem, 62dvh); }
+  .unified-room-app.is-phone-room .qr-modal > button { width: 100%; min-height: 3rem; }
+
+  .unified-room-app.is-phone-room button,
+  .unified-room-app.is-phone-room input[type="range"] { touch-action: manipulation; }
 }

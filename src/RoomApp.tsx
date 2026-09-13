@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import QRCode from 'qrcode';
-import { playInterfaceSound as playCallSound, unlockInterfaceSounds, type InterfaceSoundName } from './callSounds';
+import { playInterfaceSound as playCallSound, setInterfaceSoundOutputDevice, unlockInterfaceSounds, type InterfaceSoundName } from './callSounds';
 import GradientWaves from './GradientWaves';
 import { createPrivateRoom, parseInvite, signalUrl, type IceServerConfig, type Invite, type RoomParticipant, type RoomProfile, type SessionDescription } from './protocol';
 import { loadStoredProfile, prepareAvatar, profileStorageKind, saveStoredProfile } from './profileStore';
@@ -70,6 +70,7 @@ const CHAT_APPEARANCE_KEY = 'screenlink-chat-appearance-v2';
 const CHAT_OWN_IDS_PREFIX = 'screenlink-chat-own:';
 const PEER_KEY_PREFIX = 'screenlink-room-peer:';
 const COMPACT_LAYOUT_QUERY = '(max-width: 1240px)';
+const PHONE_LAYOUT_QUERY = '(max-width: 760px), (pointer: coarse) and (max-width: 980px)';
 const MOBILE_DEVICE_QUERY = '(pointer: coarse) and (max-width: 980px)';
 const CHAT_LIMIT = 160;
 const CHAT_CHANNEL_PAYLOAD_LIMIT = 64_000;
@@ -277,7 +278,10 @@ function RoomDevicePicker({ label, input = false, devices, value, onChange }: { 
     <button type="button" className="room-device-trigger" onClick={openPicker} aria-expanded={open}>
       <Icon name={kind === 'audioinput' ? 'microphone' : 'volume'}/><span><strong>{label}</strong><small>{selected?.label || 'Padrão do sistema'}</small></span><Icon name="chevron"/>
     </button>
-    {open && <div className="room-device-options" role="listbox" aria-label={label} onPointerEnter={openPicker} onPointerLeave={scheduleClose}>{[{ deviceId: '', label: 'Padrão do sistema' }, ...available].map((device, index) => <button key={`${device.deviceId || 'default'}-${index}`} type="button" role="option" aria-selected={device.deviceId === value} onClick={() => { onChange(device.deviceId); setOpen(false); }}><Icon name={kind === 'audioinput' ? 'microphone' : 'volume'}/><span>{device.label || `${label} ${index + 1}`}</span>{device.deviceId === value && <b>✓</b>}</button>)}</div>}
+    {open && <div className="room-device-options" aria-label={label} onPointerEnter={openPicker} onPointerLeave={scheduleClose}>
+      <header className="room-device-options-header"><button type="button" onClick={() => setOpen(false)} aria-label="Voltar para configurações de áudio"><Icon name="chevron"/></button><strong>{label}</strong></header>
+      <div className="room-device-options-list" role="listbox" aria-label={label}>{[{ deviceId: '', label: 'Padrão do sistema' }, ...available].map((device, index) => <button key={`${device.deviceId || 'default'}-${index}`} type="button" role="option" aria-selected={device.deviceId === value} onClick={() => { onChange(device.deviceId); setOpen(false); }}><Icon name={kind === 'audioinput' ? 'microphone' : 'volume'}/><span>{device.label || `${label} ${index + 1}`}</span>{device.deviceId === value && <b>✓</b>}</button>)}</div>
+    </div>}
   </div>;
 }
 
@@ -389,6 +393,10 @@ function isMobileDevice() {
 
 function usesCompactLayout() {
   return window.matchMedia(COMPACT_LAYOUT_QUERY).matches;
+}
+
+function usesPhoneLayout() {
+  return window.matchMedia(PHONE_LAYOUT_QUERY).matches;
 }
 
 function detectVoiceSettingSupport(): VoiceSettingSupport {
@@ -637,6 +645,7 @@ export default function RoomApp() {
   const [mediaLatency, setMediaLatency] = useState<number | null>(null);
   const [peerVersion, setPeerVersion] = useState(0);
   const [mobile, setMobile] = useState(usesCompactLayout);
+  const [phone, setPhone] = useState(usesPhoneLayout);
   const [audioMenuOpen, setAudioMenuOpen] = useState(false);
   const [screenMenuOpen, setScreenMenuOpen] = useState(false);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
@@ -649,6 +658,7 @@ export default function RoomApp() {
   const [voiceSettingFeedback, setVoiceSettingFeedback] = useState('');
   const [verifiedVoiceSettings, setVerifiedVoiceSettings] = useState<Partial<Record<VoiceSettingKey, boolean>>>({});
   const [interfaceSoundsEnabled, setInterfaceSoundsEnabled] = useState(() => readStorage('localStorage', INTERFACE_SOUNDS_KEY) !== 'false');
+  const [interfaceSoundFeedback, setInterfaceSoundFeedback] = useState('');
   const [animationsEnabled, setAnimationsEnabled] = useState(loadMotionPreference);
   const [microphonePending, setMicrophonePending] = useState(false);
   const [screenSharePending, setScreenSharePending] = useState(false);
@@ -687,6 +697,7 @@ export default function RoomApp() {
   const callSoundConnectedRef = useRef(false);
   const endingCallRef = useRef(false);
   const dockRef = useRef<HTMLDivElement>(null);
+  const mobileSheetRef = useRef<HTMLDivElement>(null);
   const profileBarRef = useRef<HTMLButtonElement>(null);
   const profilePopoverRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLElement>(null);
@@ -731,6 +742,22 @@ export default function RoomApp() {
     writeStorage('localStorage', INTERFACE_SOUNDS_KEY, String(interfaceSoundsEnabled));
   }, [interfaceSoundsEnabled]);
   useEffect(() => {
+    const unlock = () => {
+      if (interfaceSoundsEnabledRef.current) void unlockInterfaceSounds();
+    };
+    const resumeWhenVisible = () => {
+      if (document.visibilityState === 'visible') unlock();
+    };
+    document.addEventListener('pointerdown', unlock, { capture: true, passive: true });
+    document.addEventListener('keydown', unlock, { capture: true });
+    document.addEventListener('visibilitychange', resumeWhenVisible);
+    return () => {
+      document.removeEventListener('pointerdown', unlock, { capture: true });
+      document.removeEventListener('keydown', unlock, { capture: true });
+      document.removeEventListener('visibilitychange', resumeWhenVisible);
+    };
+  }, []);
+  useEffect(() => {
     writeStorage('localStorage', INTERFACE_MOTION_KEY, String(animationsEnabled));
   }, [animationsEnabled]);
   useEffect(() => { profileNameDraftRef.current = profileNameDraft; }, [profileNameDraft]);
@@ -761,6 +788,14 @@ export default function RoomApp() {
   useEffect(() => {
     const query = window.matchMedia(COMPACT_LAYOUT_QUERY);
     const syncViewport = () => setMobile(query.matches);
+    syncViewport();
+    query.addEventListener('change', syncViewport);
+    return () => query.removeEventListener('change', syncViewport);
+  }, []);
+
+  useEffect(() => {
+    const query = window.matchMedia(PHONE_LAYOUT_QUERY);
+    const syncViewport = () => setPhone(query.matches);
     syncViewport();
     query.addEventListener('change', syncViewport);
     return () => query.removeEventListener('change', syncViewport);
@@ -812,7 +847,8 @@ export default function RoomApp() {
   useEffect(() => {
     if (!audioMenuOpen && !screenMenuOpen && !moreMenuOpen && !leaveMenuOpen) return;
     const dismiss = (event: PointerEvent) => {
-      if (!dockRef.current?.contains(event.target as Node)) {
+      const target = event.target as Node;
+      if (!dockRef.current?.contains(target) && !mobileSheetRef.current?.contains(target)) {
         setAudioMenuOpen(false);
         setScreenMenuOpen(false);
         setMoreMenuOpen(false);
@@ -1094,7 +1130,7 @@ export default function RoomApp() {
 
   const playSound = useCallback((name: InterfaceSoundName) => {
     if (!interfaceSoundsEnabledRef.current) return;
-    playCallSound(name, audioSettingsRef.current.outputVolume / 100);
+    void playCallSound(name, audioSettingsRef.current.outputVolume / 100);
   }, []);
 
   useEffect(() => {
@@ -2062,6 +2098,7 @@ export default function RoomApp() {
     const next = { ...audioSettingsRef.current, outputDeviceId: deviceId };
     audioSettingsRef.current = next;
     setAudioSettings(next);
+    void setInterfaceSoundOutputDevice(deviceId);
     for (const peer of peersRef.current.values()) {
       for (const audioElement of [peer.callAudio, peer.screenAudio]) {
         if (!audioElement) continue;
@@ -2209,13 +2246,24 @@ export default function RoomApp() {
 
   function toggleInterfaceSounds() {
     const next = !interfaceSoundsEnabledRef.current;
-    if (!next) playCallSound('outputMuted', audioSettingsRef.current.outputVolume / 100);
+    if (!next) void playCallSound('outputMuted', audioSettingsRef.current.outputVolume / 100);
     interfaceSoundsEnabledRef.current = next;
     setInterfaceSoundsEnabled(next);
+    setInterfaceSoundFeedback(next ? 'Sons ativados neste dispositivo.' : 'Sons desativados neste dispositivo.');
     if (next) {
-      void unlockInterfaceSounds();
       playSound('outputEnabled');
     }
+  }
+
+  async function testInterfaceSound() {
+    if (!interfaceSoundsEnabledRef.current) {
+      interfaceSoundsEnabledRef.current = true;
+      setInterfaceSoundsEnabled(true);
+    }
+    const played = await playCallSound('participantJoined', audioSettingsRef.current.outputVolume / 100);
+    setInterfaceSoundFeedback(played
+      ? 'Som de teste reproduzido na saída selecionada.'
+      : 'O navegador ainda bloqueou o som. Toque em Testar novamente.');
   }
 
   const releaseWakeLock = useCallback(async () => {
@@ -2480,8 +2528,8 @@ export default function RoomApp() {
   );
 
   const audioPopover = audioMenuOpen ? (
-    <section className="dock-popover audio-popover unified-audio-popover" aria-label="Configurações de áudio">
-      <header><strong>Áudio</strong><small>DISPOSITIVOS E VOZ</small></header>
+    <section className="dock-popover audio-popover unified-audio-popover" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="audio-sheet-title">
+      <header><strong id="audio-sheet-title">Áudio</strong><small>DISPOSITIVOS E VOZ</small><button className="mobile-sheet-close" type="button" onClick={() => setAudioMenuOpen(false)} aria-label="Fechar configurações de áudio"><Icon name="close"/></button></header>
       <div className="room-device-stack">
         <RoomDevicePicker input label="Dispositivo de entrada" value={audioSettings.inputDeviceId} devices={audioDevices} onChange={deviceId => void changeInputDevice(deviceId)}/>
         <RoomDevicePicker label="Dispositivo de saída" value={audioSettings.outputDeviceId} devices={audioDevices} onChange={changeOutputDevice}/>
@@ -2491,7 +2539,11 @@ export default function RoomApp() {
           <header><strong>Volumes</strong><small>LOCAL</small></header>
           <div className="volume-control"><label htmlFor="room-input-volume"><strong>Volume de entrada</strong><small>Ganho do seu microfone</small></label><input id="room-input-volume" type="range" min="0" max="150" value={audioSettings.inputVolume} onChange={event => changeInputVolume(Number(event.target.value))}/><output>{audioSettings.inputVolume}%</output></div>
           <div className="volume-control"><label htmlFor="room-output-volume"><strong>Volume de saída</strong><small>Áudio recebido da chamada</small></label><input id="room-output-volume" type="range" min="0" max="100" value={audioSettings.outputVolume} onChange={event => changeOutputVolume(Number(event.target.value))}/><output>{audioSettings.outputVolume}%</output></div>
-          <button className="voice-setting interface-sound-setting" type="button" role="switch" aria-checked={interfaceSoundsEnabled} onClick={toggleInterfaceSounds}><span><strong>Sons da interface</strong><small>Chamada, microfone e participantes</small></span><i><b/></i></button>
+          <div className="interface-sound-controls">
+            <button className="voice-setting interface-sound-setting" type="button" role="switch" aria-checked={interfaceSoundsEnabled} onClick={toggleInterfaceSounds}><span><strong>Sons da interface</strong><small>Chamada, microfone e participantes</small></span><i><b/></i></button>
+            <button className="interface-sound-test" type="button" onClick={() => void testInterfaceSound()}>Testar</button>
+          </div>
+          {interfaceSoundFeedback && <p className="interface-sound-feedback" role="status">{interfaceSoundFeedback}</p>}
         </section>
         <section className="audio-menu-section participant-volume-section">
           <header><strong>Voz dos participantes</strong><small>{remoteParticipants.length ? `${remoteParticipants.length} PESSOA${remoteParticipants.length === 1 ? '' : 'S'}` : 'SÓ VOCÊ'}</small></header>
@@ -2531,8 +2583,8 @@ export default function RoomApp() {
   ) : null;
 
   const screenPopover = screenMenuOpen ? (
-    <section className="dock-popover more-popover screen-popover unified-screen-popover" aria-label="Configurações do compartilhamento">
-      <header><strong>Compartilhamento</strong><small>{sharing ? 'ATIVO' : 'PRONTO'}</small></header>
+    <section className="dock-popover more-popover screen-popover unified-screen-popover" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="screen-sheet-title">
+      <header><strong id="screen-sheet-title">Compartilhamento</strong><small>{sharing ? 'ATIVO' : 'PRONTO'}</small><button className="mobile-sheet-close" type="button" onClick={() => setScreenMenuOpen(false)} aria-label="Fechar configurações do compartilhamento"><Icon name="close"/></button></header>
       <button type="button" onClick={() => { void toggleScreenShare(); setScreenMenuOpen(false); }} disabled={screenSharePending || (!sharing && !screenShareSupported)}><Icon name="screen"/><span><strong>{screenSharePending ? 'Abrindo seletor…' : sharing ? 'Parar compartilhamento' : 'Compartilhar tela'}</strong><small>{sharing ? 'A chamada continuará ativa' : screenShareSupported ? 'Escolha uma tela, janela ou aba' : 'Não disponível neste navegador'}</small></span></button>
       <div className="screen-popover-scroll">
         <section className="screen-menu-section">
@@ -2556,8 +2608,8 @@ export default function RoomApp() {
   ) : null;
 
   const morePopover = moreMenuOpen ? (
-    <section className="dock-popover more-popover viewing-popover" aria-label="Mais opções da chamada">
-      <header><strong>Visualização</strong><small>ESTE DISPOSITIVO</small></header>
+    <section className="dock-popover more-popover viewing-popover" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="more-sheet-title">
+      <header><strong id="more-sheet-title">Mais opções</strong><small>ESTE DISPOSITIVO</small><button className="mobile-sheet-close" type="button" onClick={() => setMoreMenuOpen(false)} aria-label="Fechar mais opções"><Icon name="close"/></button></header>
       {mobile && <button type="button" onClick={() => { setMoreMenuOpen(false); setScreenMenuOpen(true); }}><Icon name="screen"/><span><strong>Compartilhamentos</strong><small>{remoteSharingParticipants.length ? `Ajustar áudio de ${remoteSharingParticipants.length} tela${remoteSharingParticipants.length === 1 ? '' : 's'}` : screenShareSupported ? 'Tela, áudio e bitrate' : 'Áudio das telas recebidas'}</small></span><Icon name="chevron"/></button>}
       <button type="button" onClick={() => void toggleFullscreen()}><Icon name="expand"/><span><strong>{document.fullscreenElement ? 'Sair da tela cheia' : 'Tela cheia'}</strong><small>Amplia a área compartilhada</small></span></button>
       <button type="button" onClick={() => void togglePictureInPicture()} disabled={!sharingParticipants.length}><Icon name="pip"/><span><strong>Miniplayer</strong><small>{sharingParticipants.length ? 'Mantém uma tela sobre as outras janelas' : 'Disponível quando alguém compartilhar'}</small></span></button>
@@ -2566,14 +2618,23 @@ export default function RoomApp() {
   ) : null;
 
   const exitPopover = leaveMenuOpen ? (
-    <section className="dock-popover audio-popover exit-popover" aria-label="Opções para sair da chamada">
-      <header><strong>Sair da chamada</strong><small>AÇÕES DA SALA</small></header>
+    <section className="dock-popover audio-popover exit-popover" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="exit-sheet-title">
+      <header><strong id="exit-sheet-title">Sair da chamada</strong><small>AÇÕES DA SALA</small><button className="mobile-sheet-close" type="button" onClick={() => setLeaveMenuOpen(false)} aria-label="Fechar opções para sair"><Icon name="close"/></button></header>
       <div className="exit-options">
         <button type="button" onClick={leaveRoom}><Icon name="hangup"/><span><strong>Sair da chamada</strong><small>A sala continua para quem permanecer</small></span></button>
         {isOwner && <button className="is-danger" type="button" onClick={closeRoom}><Icon name="close"/><span><strong>Encerrar sala</strong><small>Desconecta todas as pessoas agora</small></span></button>}
       </div>
     </section>
   ) : null;
+
+  const closeDockSheets = () => {
+    setAudioMenuOpen(false);
+    setScreenMenuOpen(false);
+    setMoreMenuOpen(false);
+    setLeaveMenuOpen(false);
+  };
+  const dockSheetOpen = phone && (audioMenuOpen || screenMenuOpen || moreMenuOpen || leaveMenuOpen);
+  const dockPopovers = <>{audioPopover}{screenPopover}{morePopover}{exitPopover}</>;
 
   const callPanel = (
     <div className="panel-page unified-call-page">
@@ -2633,10 +2694,7 @@ export default function RoomApp() {
       {mobile && <button className={controlsOpen ? 'is-on mobile-controls-trigger' : 'mobile-controls-trigger'} type="button" onClick={() => { setControlsOpen(open => !open); setChatOpen(false); setProfileOpen(false); setAudioMenuOpen(false); setScreenMenuOpen(false); setMoreMenuOpen(false); setLeaveMenuOpen(false); }} aria-expanded={controlsOpen} aria-label="Abrir controles" data-label="Controles"><Icon name="settings"/></button>}
       <span className="dock-divider"/>
       <button className="hangup" type="button" onClick={() => { setLeaveMenuOpen(open => !open); setAudioMenuOpen(false); setScreenMenuOpen(false); setMoreMenuOpen(false); }} aria-expanded={leaveMenuOpen} aria-label="Opções para sair da chamada" data-label="Sair"><Icon name="hangup"/></button>
-      {audioPopover}
-      {screenPopover}
-      {morePopover}
-      {exitPopover}
+      {!phone && dockPopovers}
     </div>
   ) : null;
 
@@ -2663,7 +2721,7 @@ export default function RoomApp() {
   );
 
   return (
-    <div className={`app room-app unified-room-app ${mobile ? 'viewer-mode is-mobile-room' : ''} ${activeChat ? 'is-chat-open' : ''} ${controlsOpen ? 'is-controls-open' : ''} ${animationsEnabled ? '' : 'animations-disabled'}`}>
+    <div className={`app room-app unified-room-app ${mobile ? 'viewer-mode is-mobile-room' : ''} ${phone ? 'is-phone-room' : ''} ${activeChat ? 'is-chat-open' : ''} ${controlsOpen ? 'is-controls-open' : ''} ${animationsEnabled ? '' : 'animations-disabled'}`}>
       <header className="topbar">
         <div className="brand"><BrandMark/><strong>ScreenLink</strong></div>
         <div className={`status-pill room-status-${connectionQuality}`}><i/>{session ? connectionStatusLabel : 'Pronto'}</div>
@@ -2724,15 +2782,29 @@ export default function RoomApp() {
           )}
           {callDock}
         </section>
-        <aside className={`control-panel unified-control-panel ${controlsOpen ? 'is-open' : ''}`} aria-hidden={mobile && !controlsOpen}>
+        <aside className={`control-panel unified-control-panel ${controlsOpen ? 'is-open' : ''}`} role={phone && controlsOpen ? 'dialog' : undefined} aria-modal={phone && controlsOpen || undefined} aria-hidden={mobile && !controlsOpen}>
           <div className="panel-header"><div><h2>Controles</h2></div><span className="audience-count">{connectedParticipants.length}/{maxParticipants}</span>{mobile && <button className="mobile-panel-close" type="button" onClick={() => setControlsOpen(false)} aria-label="Fechar controles"><Icon name="close"/></button>}</div>
           {mobile && <button className="mobile-control-profile" type="button" onClick={() => { setProfileOpen(true); setControlsOpen(false); }}><Avatar avatar={profile.avatar} name={profile.name} leader={Boolean(selfId && selfId === leaderId)} size="small"/><span><strong>{profile.name}</strong><small>{profile.status}</small></span><Icon name="settings"/></button>}
           <div className="panel-view">{callPanel}</div>
         </aside>
       </main>
+      {phone && (controlsOpen || profileOpen) && (
+        <button className="mobile-overlay-backdrop" type="button" tabIndex={-1} aria-label="Fechar painel" onClick={() => {
+          if (profileOpen) {
+            commitProfileName();
+            commitProfileStatus();
+            setProfileOpen(false);
+          }
+          setControlsOpen(false);
+        }}/>
+      )}
+      {dockSheetOpen && <div ref={mobileSheetRef} className="mobile-sheet-layer">
+        <button className="mobile-sheet-backdrop" type="button" tabIndex={-1} aria-label="Fechar painel" onClick={closeDockSheets}/>
+        <div className="mobile-sheet-host">{dockPopovers}</div>
+      </div>}
       {profileOpen && (
-        <div ref={profilePopoverRef} className="room-popover profile-popover unified-profile-popover">
-          <header><div><span className="eyebrow">SEU PERFIL</span><h3>Como você aparece</h3></div><button type="button" onClick={() => { commitProfileName(); commitProfileStatus(); setProfileOpen(false); }} aria-label="Fechar perfil"><Icon name="close"/></button></header>
+        <div ref={profilePopoverRef} className="room-popover profile-popover unified-profile-popover" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="profile-sheet-title">
+          <header><div><span className="eyebrow">SEU PERFIL</span><h3 id="profile-sheet-title">Como você aparece</h3></div><button type="button" onClick={() => { commitProfileName(); commitProfileStatus(); setProfileOpen(false); }} aria-label="Fechar perfil"><Icon name="close"/></button></header>
           <label htmlFor="profile-name">Nome</label><input id="profile-name" value={profileNameDraft} onChange={event => { profileEditRevisionRef.current += 1; profileNameDraftRef.current = event.target.value; setProfileNameDraft(event.target.value); }} onBlur={commitProfileName} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { profileNameDraftRef.current = profileRef.current.name; setProfileNameDraft(profileRef.current.name); event.currentTarget.blur(); } }} maxLength={28}/>
           <label htmlFor="profile-status">Mensagem de status</label><input id="profile-status" value={profileStatusDraft} onChange={event => { profileEditRevisionRef.current += 1; profileStatusDraftRef.current = event.target.value; setProfileStatusDraft(event.target.value); }} onBlur={commitProfileStatus} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { profileStatusDraftRef.current = profileRef.current.status; setProfileStatusDraft(profileRef.current.status); event.currentTarget.blur(); } }} maxLength={64} placeholder="Disponível"/>
           <div className="profile-photo-heading"><label>Foto</label><small>{profileSaveState === 'saving' ? 'SALVANDO…' : profileSaveState === 'saved' ? profileStorageKind() === 'sqlite' ? 'SALVO NO SQLITE LOCAL' : 'SALVO NESTE NAVEGADOR' : profileSaveState === 'error' ? 'ERRO AO SALVAR' : 'ARMAZENAMENTO LOCAL'}</small></div>

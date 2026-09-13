@@ -15,6 +15,10 @@ type SoundGraph = {
   output: GainNode;
 };
 
+type SinkableAudioContext = AudioContext & {
+  setSinkId?: (sinkId: string) => Promise<void>;
+};
+
 type ToneOptions = {
   at: number;
   frequency: number;
@@ -39,7 +43,9 @@ type NoiseOptions = {
 
 let graph: SoundGraph | null = null;
 let noiseBuffer: AudioBuffer | null = null;
+let outputDeviceId = '';
 const lastPlayed = new Map<InterfaceSoundName, number>();
+const SOUND_GAIN = 1.55;
 
 function clamp(value: number, minimum: number, maximum: number) {
   return Math.min(maximum, Math.max(minimum, value));
@@ -51,7 +57,13 @@ function ensureGraph(): SoundGraph | null {
     ?? (globalThis as typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
   if (!AudioContextClass) return null;
 
-  const context = new AudioContextClass({ latencyHint: 'interactive' });
+  let context: AudioContext;
+  try {
+    context = new AudioContextClass({ latencyHint: 'interactive' });
+  } catch {
+    // Alguns WebViews/Safaris antigos expõem AudioContext, mas rejeitam opções no construtor.
+    context = new AudioContextClass();
+  }
   const output = context.createGain();
   const compressor = context.createDynamicsCompressor();
   compressor.threshold.value = -22;
@@ -63,7 +75,33 @@ function ensureGraph(): SoundGraph | null {
   compressor.connect(context.destination);
   graph = { context, output };
   noiseBuffer = null;
+  void applyOutputDevice(context);
   return graph;
+}
+
+async function applyOutputDevice(context: AudioContext) {
+  const sinkable = context as SinkableAudioContext;
+  if (typeof sinkable.setSinkId !== 'function') return;
+  await sinkable.setSinkId(outputDeviceId).catch(() => undefined);
+}
+
+function primeContext(soundGraph: SoundGraph) {
+  // Um buffer silencioso iniciado dentro do gesto destrava Web Audio no Safari/iOS.
+  const source = soundGraph.context.createBufferSource();
+  source.buffer = soundGraph.context.createBuffer(1, 1, soundGraph.context.sampleRate);
+  source.connect(soundGraph.output);
+  source.start();
+}
+
+async function startContext(soundGraph: SoundGraph) {
+  const { context } = soundGraph;
+  if (context.state === 'closed') return false;
+  if (context.state !== 'running') {
+    await context.resume().catch(() => undefined);
+  }
+  if (context.state !== 'running') return false;
+  primeContext(soundGraph);
+  return true;
 }
 
 function connectWithPan(context: AudioContext, source: AudioNode, destination: AudioNode, pan = 0) {
@@ -97,8 +135,8 @@ function tone(soundGraph: SoundGraph, options: ToneOptions) {
   filter.Q.value = 0.72;
 
   envelope.gain.setValueAtTime(0.0001, options.at);
-  envelope.gain.exponentialRampToValueAtTime(Math.max(0.0001, options.gain), options.at + attack);
-  envelope.gain.setValueAtTime(Math.max(0.0001, options.gain * 0.82), releaseAt);
+  envelope.gain.exponentialRampToValueAtTime(Math.max(0.0001, options.gain * SOUND_GAIN), options.at + attack);
+  envelope.gain.setValueAtTime(Math.max(0.0001, options.gain * SOUND_GAIN * 0.82), releaseAt);
   envelope.gain.exponentialRampToValueAtTime(0.0001, options.at + options.duration);
 
   oscillator.connect(filter);
@@ -132,7 +170,7 @@ function noise(soundGraph: SoundGraph, options: NoiseOptions) {
   filter.frequency.value = options.frequency;
   filter.Q.value = 1.4;
   envelope.gain.setValueAtTime(0.0001, options.at);
-  envelope.gain.exponentialRampToValueAtTime(options.gain, options.at + 0.006);
+  envelope.gain.exponentialRampToValueAtTime(options.gain * SOUND_GAIN, options.at + 0.006);
   envelope.gain.exponentialRampToValueAtTime(0.0001, options.at + options.duration);
   source.connect(filter);
   filter.connect(envelope);
@@ -202,22 +240,26 @@ function scheduleSound(name: InterfaceSoundName, soundGraph: SoundGraph) {
 
 export async function unlockInterfaceSounds() {
   const soundGraph = ensureGraph();
-  if (!soundGraph || soundGraph.context.state === 'running') return;
-  await soundGraph.context.resume().catch(() => undefined);
+  if (!soundGraph) return false;
+  return startContext(soundGraph);
 }
 
-export function playInterfaceSound(name: InterfaceSoundName, volume = 1) {
+export async function setInterfaceSoundOutputDevice(deviceId: string) {
+  outputDeviceId = deviceId;
   const soundGraph = ensureGraph();
   if (!soundGraph) return;
+  await applyOutputDevice(soundGraph.context);
+}
+
+export async function playInterfaceSound(name: InterfaceSoundName, volume = 1) {
+  const soundGraph = ensureGraph();
+  if (!soundGraph) return false;
+  if (!await startContext(soundGraph)) return false;
+
   const now = performance.now();
-  if (now - (lastPlayed.get(name) ?? 0) < 90) return;
+  if (now - (lastPlayed.get(name) ?? 0) < 90) return true;
   lastPlayed.set(name, now);
   soundGraph.output.gain.setTargetAtTime(clamp(volume, 0, 1) * 0.82, soundGraph.context.currentTime, 0.012);
-
-  const play = () => scheduleSound(name, soundGraph);
-  if (soundGraph.context.state === 'suspended') {
-    void soundGraph.context.resume().then(play).catch(() => undefined);
-    return;
-  }
-  if (soundGraph.context.state === 'running') play();
+  scheduleSound(name, soundGraph);
+  return true;
 }
