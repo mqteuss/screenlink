@@ -696,6 +696,8 @@
   .unified-room-app.is-phone-room .unified-chat-sidebar .unified-chat-panel { padding: .25rem .72rem .65rem; }
   .unified-room-app.is-phone-room .unified-chat-panel .chat-log { padding: .35rem .12rem .85rem; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
   .unified-room-app.is-phone-room .unified-chat-panel .chat-message { max-width: 82%; margin: .68rem 0; }
+  .unified-room-app.is-phone-room .unified-chat-panel .chat-message.is-own { margin-right: 0; margin-left: auto; }
+  .unified-room-app.is-phone-room .unified-chat-panel .chat-message.is-own header { justify-content: flex-end; }
   .unified-room-app.is-phone-room .unified-chat-panel .chat-message p { padding: .55rem .68rem; font-size: .73rem; line-height: 1.45; }
   .unified-room-app.is-phone-room .unified-chat-panel .chat-composer { min-height: 3rem; padding: .28rem .32rem; grid-template-columns: 2.35rem minmax(0, 1fr) 2.4rem; }
   .unified-room-app.is-phone-room .chat-composer .emoji-picker-anchor > button,
@@ -735,7 +737,7 @@
     border: 0;
     display: block;
     background: rgba(0,0,0,.58);
-    backdrop-filter: blur(.28rem);
+    backdrop-filter: none;
     animation: mobile-sheet-backdrop-enter 200ms ease-out both;
   }
   .unified-room-app.is-phone-room.is-controls-open .unified-control-panel {
@@ -751,7 +753,8 @@
     border-width: 1px 0 0;
     border-radius: 1.35rem 1.35rem 0 0;
     background: rgba(10,12,13,.985);
-    box-shadow: 0 -1.2rem 4rem rgba(0,0,0,.55);
+    box-shadow: 0 -1rem 2.6rem rgba(0,0,0,.48);
+    backdrop-filter: none;
     animation: mobile-sheet-enter 300ms var(--ease-out) both;
   }
   .unified-room-app.is-phone-room.is-controls-open .unified-control-panel::before,
@@ -778,7 +781,8 @@
     overflow-y: auto;
     border-width: 1px 0 0;
     border-radius: 1.35rem 1.35rem 0 0;
-    box-shadow: 0 -1.2rem 4rem rgba(0,0,0,.55);
+    box-shadow: 0 -1rem 2.6rem rgba(0,0,0,.48);
+    backdrop-filter: none;
     animation: mobile-sheet-enter 300ms var(--ease-out) both;
     -webkit-overflow-scrolling: touch;
   }
@@ -791,7 +795,7 @@
   .unified-room-app.is-phone-room .unified-profile-popover .avatar-picker button { min-height: 4.15rem; }
 
   .mobile-sheet-layer { position: fixed; z-index: 70; inset: 0; display: block; pointer-events: none; }
-  .mobile-sheet-backdrop { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; display: block; pointer-events: auto; background: rgba(0,0,0,.62); backdrop-filter: blur(.3rem); animation: mobile-sheet-backdrop-enter 200ms ease-out both; }
+  .mobile-sheet-backdrop { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; display: block; pointer-events: auto; background: rgba(0,0,0,.62); backdrop-filter: none; animation: mobile-sheet-backdrop-enter 180ms ease-out both; }
   .mobile-sheet-host { position: absolute; right: 0; bottom: 0; left: 0; pointer-events: none; }
   .mobile-sheet-host > .dock-popover {
     position: relative;
@@ -806,9 +810,13 @@
     border-radius: 1.35rem 1.35rem 0 0;
     pointer-events: auto;
     background: rgba(13,14,15,.99);
-    box-shadow: 0 -1.2rem 4rem rgba(0,0,0,.58);
+    box-shadow: 0 -1rem 2.8rem rgba(0,0,0,.5);
+    backdrop-filter: none;
     transform: none;
     animation: mobile-sheet-enter 300ms var(--ease-out) both;
+    backface-visibility: hidden;
+    contain: layout paint;
+    touch-action: pan-y;
   }
   .mobile-sheet-host > .dock-popover::before { content: ""; position: absolute; top: .48rem; left: 50%; width: 2.35rem; height: .24rem; border-radius: 999px; background: #50575a; transform: translateX(-50%); }
   .mobile-sheet-host > .dock-popover > header { min-height: 3rem; padding: .25rem .2rem .55rem .35rem; }
@@ -816,7 +824,13 @@
   .mobile-sheet-close { flex: 0 0 auto; width: 2.75rem; height: 2.75rem; margin-left: .15rem; padding: 0; border: 0; border-radius: .75rem; display: grid; place-items: center; color: #aab1b3; background: #202324; }
   .mobile-sheet-close .icon { width: .95rem; }
   .mobile-sheet-host .audio-popover-scroll,
-  .mobile-sheet-host .screen-popover-scroll { overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+  .mobile-sheet-host .screen-popover-scroll { overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; touch-action: pan-y; -webkit-overflow-scrolling: touch; }
+  .mobile-sheet-host .audio-popover-scroll::-webkit-scrollbar,
+  .mobile-sheet-host .screen-popover-scroll::-webkit-scrollbar,
+  .unified-room-app.is-phone-room .unified-call-page::-webkit-scrollbar,
+  .unified-room-app.is-phone-room .unified-profile-popover::-webkit-scrollbar,
+  .unified-room-app.is-phone-room .qr-modal::-webkit-scrollbar,
+  .unified-room-app.is-phone-room .chat-log::-webkit-scrollbar { display: none; }
   .mobile-sheet-host .room-device-trigger,
   .mobile-sheet-host .more-popover > button,
   .mobile-sheet-host .exit-options > button { min-height: 3.35rem; }
@@ -847,10 +861,23 @@
   .mobile-sheet-host .room-device-options-list { max-height: calc(min(86dvh, 46rem) - 5.5rem); overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
   .mobile-sheet-host .room-device-options-list > button { min-height: 3.25rem; padding: .48rem .62rem; border-radius: .7rem; }
 
-  .unified-room-app.is-phone-room .modal-backdrop { align-items: end; padding: 0; }
+  .unified-room-app.is-phone-room .modal-backdrop { align-items: end; padding: 0; backdrop-filter: none; }
   .unified-room-app.is-phone-room .qr-modal { width: 100%; max-height: calc(100dvh - 1rem); padding: 1.5rem 1rem max(1rem, env(safe-area-inset-bottom)); overflow-y: auto; border-width: 1px 0 0; border-radius: 1.35rem 1.35rem 0 0; animation: mobile-sheet-enter 300ms var(--ease-out) both; }
   .unified-room-app.is-phone-room .qr-modal img { width: min(15.5rem, 62dvh); }
   .unified-room-app.is-phone-room .qr-modal > button { width: 100%; min-height: 3rem; }
+
+  .unified-room-app.is-phone-room [data-mobile-sheet="true"] { touch-action: pan-y; backface-visibility: hidden; }
+  .unified-room-app.is-phone-room [data-mobile-sheet="true"].is-sheet-dragging,
+  .unified-room-app.is-phone-room [data-mobile-sheet="true"].is-sheet-settling,
+  .unified-room-app.is-phone-room [data-mobile-sheet="true"].is-sheet-dismissing {
+    animation: none !important;
+    transform: translate3d(0, var(--sheet-drag-y, 0px), 0) !important;
+  }
+  .unified-room-app.is-phone-room [data-mobile-sheet="true"].is-sheet-dragging { transition: none !important; user-select: none; will-change: transform; }
+  .unified-room-app.is-phone-room [data-mobile-sheet="true"].is-sheet-settling { transition: transform 220ms var(--ease-out) !important; }
+  .unified-room-app.is-phone-room [data-mobile-sheet="true"].is-sheet-dismissing { transition: transform 190ms cubic-bezier(.4, 0, 1, 1) !important; }
+  .unified-room-app.is-phone-room.has-mobile-overlay .room-gradient-waves { pointer-events: none; }
+  .unified-room-app.is-phone-room.has-mobile-overlay .unified-call-dock { backdrop-filter: none; }
 
   .unified-room-app.is-phone-room button,
   .unified-room-app.is-phone-room input[type="range"] { touch-action: manipulation; }

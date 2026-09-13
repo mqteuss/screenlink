@@ -179,6 +179,9 @@ export default function GradientWaves({
 }: GradientWavesProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const enableMouseRef = useRef(mouseInteraction);
+  const animatedRef = useRef(animated);
+  const animationControlRef = useRef<{ start: () => void; stop: () => void } | null>(null);
+  animatedRef.current = animated;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -268,7 +271,7 @@ export default function GradientWaves({
       targetMouse[0] = inside ? (event.clientX - rect.left) / rect.width : 0.5;
       targetMouse[1] = inside ? 1 - (event.clientY - rect.top) / rect.height : 0.5;
     };
-    if (animated) window.addEventListener('pointermove', onPointerMove, { passive: true });
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
 
     let frame = 0;
     let intersecting = true;
@@ -291,8 +294,9 @@ export default function GradientWaves({
       frame = 0;
     };
     const start = () => {
-      if (animated && intersecting && pageVisible && !frame) frame = requestAnimationFrame(loop);
+      if (animatedRef.current && intersecting && pageVisible && !frame) frame = requestAnimationFrame(loop);
     };
+    animationControlRef.current = { start, stop };
 
     const intersectionObserver = typeof IntersectionObserver === 'function'
       ? new IntersectionObserver(([entry]) => {
@@ -315,12 +319,18 @@ export default function GradientWaves({
       resizeObserver?.disconnect();
       intersectionObserver?.disconnect();
       document.removeEventListener('visibilitychange', onVisibilityChange);
-      if (animated) window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointermove', onPointerMove);
+      animationControlRef.current = null;
       contexts.delete(container);
       canvas.remove();
       gl.getExtension('WEBGL_lose_context')?.loseContext();
     };
-  }, [animated, detail]);
+  }, [detail]);
+
+  useEffect(() => {
+    if (animated) animationControlRef.current?.start();
+    else animationControlRef.current?.stop();
+  }, [animated]);
 
   useEffect(() => {
     const container = containerRef.current;

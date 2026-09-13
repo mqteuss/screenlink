@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type TouchEvent as ReactTouchEvent } from 'react';
 import QRCode from 'qrcode';
 import { playInterfaceSound as playCallSound, setInterfaceSoundOutputDevice, unlockInterfaceSounds, type InterfaceSoundName } from './callSounds';
 import GradientWaves from './GradientWaves';
@@ -25,6 +25,20 @@ type VoiceSettingKey = 'echoCancellation' | 'noiseSuppression' | 'autoGainContro
 type VoiceSettingSupport = Record<VoiceSettingKey, boolean>;
 type RuntimeConfig = { viewerOrigin?: string; mode?: string; turnEnabled?: boolean };
 type ScreenWakeLock = { released: boolean; release: () => Promise<void>; addEventListener: (type: 'release', listener: () => void, options?: AddEventListenerOptions) => void };
+type SheetDragSession = {
+  element: HTMLElement;
+  scroller: HTMLElement | null;
+  touchId: number;
+  startX: number;
+  startY: number;
+  lastY: number;
+  lastTime: number;
+  offset: number;
+  velocity: number;
+  dragging: boolean;
+  horizontal: boolean;
+  frame: number | null;
+};
 
 type PeerRecord = {
   id: string;
@@ -383,6 +397,171 @@ function resizeChatInput(input: HTMLTextAreaElement | null) {
   input.style.height = `${Math.min(input.scrollHeight, 96)}px`;
 }
 
+function closestVerticalScroller(target: EventTarget | null, sheet: HTMLElement) {
+  let element = target instanceof HTMLElement ? target : target instanceof Element ? target.parentElement : null;
+  while (element) {
+    const overflowY = window.getComputedStyle(element).overflowY;
+    if ((overflowY === 'auto' || overflowY === 'scroll') && element.scrollHeight > element.clientHeight + 1) return element;
+    if (element === sheet) break;
+    element = element.parentElement;
+  }
+  return null;
+}
+
+function touchById(touches: TouchList, touchId: number) {
+  for (let index = 0; index < touches.length; index += 1) {
+    if (touches[index].identifier === touchId) return touches[index];
+  }
+  return null;
+}
+
+function useBottomSheetGesture(enabled: boolean, onDismiss: () => void) {
+  const dismissRef = useRef(onDismiss);
+  const dragRef = useRef<SheetDragSession | null>(null);
+  const removeNativeListenersRef = useRef<(() => void) | null>(null);
+  dismissRef.current = onDismiss;
+
+  const removeNativeListeners = useCallback(() => {
+    removeNativeListenersRef.current?.();
+    removeNativeListenersRef.current = null;
+  }, []);
+
+  const releaseSession = useCallback((settle = true) => {
+    removeNativeListeners();
+    const session = dragRef.current;
+    dragRef.current = null;
+    if (!session) return;
+    if (session.frame !== null) window.cancelAnimationFrame(session.frame);
+    const { element } = session;
+    element.classList.remove('is-sheet-dragging');
+    if (!settle || !session.dragging) {
+      element.classList.remove('is-sheet-settling', 'is-sheet-dismissing');
+      element.style.removeProperty('--sheet-drag-y');
+      return;
+    }
+    element.classList.add('is-sheet-settling');
+    element.style.setProperty('--sheet-drag-y', '0px');
+    window.setTimeout(() => {
+      element.classList.remove('is-sheet-settling');
+      element.style.removeProperty('--sheet-drag-y');
+    }, 240);
+  }, [removeNativeListeners]);
+
+  useEffect(() => {
+    if (!enabled) releaseSession(false);
+    return () => releaseSession(false);
+  }, [enabled, releaseSession]);
+
+  const onNativeTouchMove = useCallback((event: TouchEvent) => {
+    const session = dragRef.current;
+    if (!session) return;
+    const touch = touchById(event.touches, session.touchId);
+    if (!touch) return;
+    const deltaX = touch.clientX - session.startX;
+    let deltaY = touch.clientY - session.startY;
+    if (!session.dragging && Math.abs(deltaX) > Math.abs(deltaY) && Math.abs(deltaX) > 8) {
+      session.horizontal = true;
+      return;
+    }
+    if (session.horizontal) return;
+
+    if (!session.dragging && session.scroller && session.scroller.scrollTop > .5) {
+      session.startY = touch.clientY;
+      session.lastY = touch.clientY;
+      session.lastTime = event.timeStamp;
+      return;
+    }
+    deltaY = touch.clientY - session.startY;
+    if (!session.dragging && deltaY <= 5) return;
+    if (!session.dragging) {
+      session.dragging = true;
+      session.element.classList.add('is-sheet-dragging');
+    }
+
+    if (event.cancelable) event.preventDefault();
+    const elapsed = Math.max(1, event.timeStamp - session.lastTime);
+    const instantVelocity = (touch.clientY - session.lastY) / elapsed;
+    session.velocity = session.velocity * .68 + instantVelocity * .32;
+    session.lastY = touch.clientY;
+    session.lastTime = event.timeStamp;
+    const height = Math.max(1, session.element.clientHeight);
+    const positiveOffset = Math.max(0, deltaY);
+    session.offset = positiveOffset > height * .72
+      ? height * .72 + (positiveOffset - height * .72) * .18
+      : positiveOffset;
+    if (session.frame !== null) return;
+    session.frame = window.requestAnimationFrame(() => {
+      session.frame = null;
+      session.element.style.setProperty('--sheet-drag-y', `${session.offset}px`);
+    });
+  }, []);
+
+  const finishGesture = useCallback((event: TouchEvent, cancelled = false) => {
+    const session = dragRef.current;
+    if (!session) return;
+    if (session.frame !== null) {
+      window.cancelAnimationFrame(session.frame);
+      session.frame = null;
+      session.element.style.setProperty('--sheet-drag-y', `${session.offset}px`);
+    }
+    const dismiss = !cancelled && session.dragging && (
+      session.offset >= Math.min(112, session.element.clientHeight * .2) || session.velocity > .58
+    );
+    if (!dismiss) {
+      releaseSession(true);
+      return;
+    }
+    if (event.cancelable) event.preventDefault();
+    dragRef.current = null;
+    removeNativeListeners();
+    session.element.classList.remove('is-sheet-dragging');
+    session.element.classList.add('is-sheet-dismissing');
+    session.element.style.setProperty('--sheet-drag-y', `${Math.max(window.innerHeight, session.element.clientHeight + 48)}px`);
+    window.setTimeout(() => dismissRef.current(), 190);
+  }, [releaseSession, removeNativeListeners]);
+
+  const onNativeTouchEnd = useCallback((event: TouchEvent) => finishGesture(event), [finishGesture]);
+  const onNativeTouchCancel = useCallback((event: TouchEvent) => finishGesture(event, true), [finishGesture]);
+
+  const onTouchStart = useCallback((event: ReactTouchEvent<HTMLElement>) => {
+    if (!enabled || event.touches.length !== 1) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+    removeNativeListeners();
+    const touch = event.touches[0];
+    const element = event.currentTarget;
+    element.classList.remove('is-sheet-settling', 'is-sheet-dismissing');
+    element.style.removeProperty('--sheet-drag-y');
+    dragRef.current = {
+      element,
+      scroller: closestVerticalScroller(event.target, element),
+      touchId: touch.identifier,
+      startX: touch.clientX,
+      startY: touch.clientY,
+      lastY: touch.clientY,
+      lastTime: event.timeStamp,
+      offset: 0,
+      velocity: 0,
+      dragging: false,
+      horizontal: false,
+      frame: null
+    };
+    window.addEventListener('touchmove', onNativeTouchMove, { passive: false });
+    window.addEventListener('touchend', onNativeTouchEnd, { passive: false });
+    window.addEventListener('touchcancel', onNativeTouchCancel, { passive: false });
+    removeNativeListenersRef.current = () => {
+      window.removeEventListener('touchmove', onNativeTouchMove);
+      window.removeEventListener('touchend', onNativeTouchEnd);
+      window.removeEventListener('touchcancel', onNativeTouchCancel);
+    };
+  }, [enabled, onNativeTouchCancel, onNativeTouchEnd, onNativeTouchMove, removeNativeListeners]);
+
+  return {
+    'data-mobile-sheet': enabled ? 'true' : undefined,
+    onTouchStart
+  };
+}
+
 function normalizeStatus(value: string) {
   return value.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 64) || 'Disponível';
 }
@@ -588,6 +767,7 @@ function ScreenTile({ stream, name, local }: { stream: MediaStream; name: string
 export default function RoomApp() {
   const initialInvite = useMemo(() => parseInvite(), []);
   const initialOwner = useMemo(() => initialInvite ? null : loadOwnerSession(), [initialInvite]);
+  const mobileOverlayMarker = useMemo(() => `screenlink-${randomSecret(8)}`, []);
   const [profile, setProfile] = useState<RoomProfile>(() => loadProfile());
   const profileRef = useRef(profile);
   const profileEditRevisionRef = useRef(0);
@@ -714,6 +894,23 @@ export default function RoomApp() {
   const microphoneRequestIdRef = useRef(0);
   const screenShareRequestIdRef = useRef(0);
   const disposedRef = useRef(false);
+  const mobileOverlayHistoryActiveRef = useRef(false);
+  const dismissMobileOverlayRef = useRef<() => void>(() => undefined);
+  const staleMobileOverlayCleanedRef = useRef(false);
+
+  useEffect(() => {
+    if (staleMobileOverlayCleanedRef.current) return;
+    staleMobileOverlayCleanedRef.current = true;
+    const historyState = window.history.state;
+    if (!historyState || typeof historyState !== 'object' || !('__screenlinkMobileOverlay' in historyState)) return;
+    if (window.history.length > 1) {
+      window.history.back();
+      return;
+    }
+    const cleanedState = { ...historyState };
+    delete cleanedState.__screenlinkMobileOverlay;
+    window.history.replaceState(cleanedState, '', window.location.href);
+  }, []);
 
   useEffect(() => {
     profileRef.current = profile;
@@ -2491,6 +2688,91 @@ export default function RoomApp() {
           : 'Escrever mensagem…';
   void peerVersion;
 
+  const closeDockSheets = useCallback(() => {
+    setAudioMenuOpen(false);
+    setScreenMenuOpen(false);
+    setMoreMenuOpen(false);
+    setLeaveMenuOpen(false);
+  }, []);
+  const closeProfileSheet = () => {
+    commitProfileName();
+    commitProfileStatus();
+    setProfileOpen(false);
+  };
+  const dockSheetOpen = phone && (audioMenuOpen || screenMenuOpen || moreMenuOpen || leaveMenuOpen);
+  const mobileOverlayKey = !phone
+    ? ''
+    : qrOpen
+      ? 'qr'
+      : profileOpen
+        ? 'profile'
+        : chatSettingsOpen
+          ? 'chat-settings'
+          : emojiOpen
+            ? 'emoji'
+            : dockSheetOpen
+              ? 'dock'
+              : controlsOpen
+                ? 'controls'
+                : activeChat
+                  ? 'chat'
+                  : '';
+  const mobilePresentationOpen = phone && Boolean(mobileOverlayKey);
+  const dockSheetGesture = useBottomSheetGesture(dockSheetOpen, closeDockSheets);
+  const controlsSheetGesture = useBottomSheetGesture(phone && controlsOpen, () => setControlsOpen(false));
+  const profileSheetGesture = useBottomSheetGesture(phone && profileOpen, closeProfileSheet);
+  const chatSettingsSheetGesture = useBottomSheetGesture(phone && chatSettingsOpen, () => setChatSettingsOpen(false));
+  const qrSheetGesture = useBottomSheetGesture(phone && qrOpen, () => setQrOpen(false));
+  dismissMobileOverlayRef.current = () => {
+    if (mobileOverlayKey === 'qr') setQrOpen(false);
+    else if (mobileOverlayKey === 'profile') closeProfileSheet();
+    else if (mobileOverlayKey === 'chat-settings') setChatSettingsOpen(false);
+    else if (mobileOverlayKey === 'emoji') setEmojiOpen(false);
+    else if (mobileOverlayKey === 'dock') closeDockSheets();
+    else if (mobileOverlayKey === 'controls') setControlsOpen(false);
+    else if (mobileOverlayKey === 'chat') {
+      setChatOpen(false);
+      setProfileOpen(false);
+      setChatSettingsOpen(false);
+      setEmojiOpen(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!phone) return;
+    const handlePlatformBack = () => {
+      if (!mobileOverlayHistoryActiveRef.current) return;
+      mobileOverlayHistoryActiveRef.current = false;
+      dismissMobileOverlayRef.current();
+    };
+    window.addEventListener('popstate', handlePlatformBack);
+    return () => window.removeEventListener('popstate', handlePlatformBack);
+  }, [phone]);
+
+  useEffect(() => {
+    const historyState = window.history.state;
+    const currentMarker = historyState && typeof historyState === 'object'
+      ? historyState.__screenlinkMobileOverlay
+      : undefined;
+    if (!phone) {
+      if (mobileOverlayHistoryActiveRef.current) {
+        mobileOverlayHistoryActiveRef.current = false;
+        if (currentMarker === mobileOverlayMarker) window.history.back();
+      }
+      return;
+    }
+    if (mobileOverlayKey && !mobileOverlayHistoryActiveRef.current) {
+      const baseState = historyState && typeof historyState === 'object' ? historyState : {};
+      window.history.pushState({ ...baseState, __screenlinkMobileOverlay: mobileOverlayMarker }, '', window.location.href);
+      mobileOverlayHistoryActiveRef.current = true;
+      return;
+    }
+    if (!mobileOverlayKey && mobileOverlayHistoryActiveRef.current) {
+      mobileOverlayHistoryActiveRef.current = false;
+      if (currentMarker === mobileOverlayMarker) window.history.back();
+    }
+  }, [mobileOverlayKey, mobileOverlayMarker, phone]);
+
   const chatPanel = (
     <div className="chat-panel unified-chat-panel" style={{ '--chat-own-bubble': chatAppearance.ownBubble, '--chat-other-bubble': chatAppearance.otherBubble, '--chat-name-color': chatAppearance.nameColor } as React.CSSProperties}>
       <div className="chat-log" ref={chatLogRef} role="log" aria-live="polite" aria-relevant="additions text" aria-label="Mensagens da chamada" tabIndex={0} onScroll={event => {
@@ -2528,7 +2810,7 @@ export default function RoomApp() {
   );
 
   const audioPopover = audioMenuOpen ? (
-    <section className="dock-popover audio-popover unified-audio-popover" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="audio-sheet-title">
+    <section className="dock-popover audio-popover unified-audio-popover" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="audio-sheet-title" {...dockSheetGesture}>
       <header><strong id="audio-sheet-title">Áudio</strong><small>DISPOSITIVOS E VOZ</small><button className="mobile-sheet-close" type="button" onClick={() => setAudioMenuOpen(false)} aria-label="Fechar configurações de áudio"><Icon name="close"/></button></header>
       <div className="room-device-stack">
         <RoomDevicePicker input label="Dispositivo de entrada" value={audioSettings.inputDeviceId} devices={audioDevices} onChange={deviceId => void changeInputDevice(deviceId)}/>
@@ -2583,7 +2865,7 @@ export default function RoomApp() {
   ) : null;
 
   const screenPopover = screenMenuOpen ? (
-    <section className="dock-popover more-popover screen-popover unified-screen-popover" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="screen-sheet-title">
+    <section className="dock-popover more-popover screen-popover unified-screen-popover" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="screen-sheet-title" {...dockSheetGesture}>
       <header><strong id="screen-sheet-title">Compartilhamento</strong><small>{sharing ? 'ATIVO' : 'PRONTO'}</small><button className="mobile-sheet-close" type="button" onClick={() => setScreenMenuOpen(false)} aria-label="Fechar configurações do compartilhamento"><Icon name="close"/></button></header>
       <button type="button" onClick={() => { void toggleScreenShare(); setScreenMenuOpen(false); }} disabled={screenSharePending || (!sharing && !screenShareSupported)}><Icon name="screen"/><span><strong>{screenSharePending ? 'Abrindo seletor…' : sharing ? 'Parar compartilhamento' : 'Compartilhar tela'}</strong><small>{sharing ? 'A chamada continuará ativa' : screenShareSupported ? 'Escolha uma tela, janela ou aba' : 'Não disponível neste navegador'}</small></span></button>
       <div className="screen-popover-scroll">
@@ -2608,7 +2890,7 @@ export default function RoomApp() {
   ) : null;
 
   const morePopover = moreMenuOpen ? (
-    <section className="dock-popover more-popover viewing-popover" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="more-sheet-title">
+    <section className="dock-popover more-popover viewing-popover" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="more-sheet-title" {...dockSheetGesture}>
       <header><strong id="more-sheet-title">Mais opções</strong><small>ESTE DISPOSITIVO</small><button className="mobile-sheet-close" type="button" onClick={() => setMoreMenuOpen(false)} aria-label="Fechar mais opções"><Icon name="close"/></button></header>
       {mobile && <button type="button" onClick={() => { setMoreMenuOpen(false); setScreenMenuOpen(true); }}><Icon name="screen"/><span><strong>Compartilhamentos</strong><small>{remoteSharingParticipants.length ? `Ajustar áudio de ${remoteSharingParticipants.length} tela${remoteSharingParticipants.length === 1 ? '' : 's'}` : screenShareSupported ? 'Tela, áudio e bitrate' : 'Áudio das telas recebidas'}</small></span><Icon name="chevron"/></button>}
       <button type="button" onClick={() => void toggleFullscreen()}><Icon name="expand"/><span><strong>{document.fullscreenElement ? 'Sair da tela cheia' : 'Tela cheia'}</strong><small>Amplia a área compartilhada</small></span></button>
@@ -2618,7 +2900,7 @@ export default function RoomApp() {
   ) : null;
 
   const exitPopover = leaveMenuOpen ? (
-    <section className="dock-popover audio-popover exit-popover" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="exit-sheet-title">
+    <section className="dock-popover audio-popover exit-popover" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="exit-sheet-title" {...dockSheetGesture}>
       <header><strong id="exit-sheet-title">Sair da chamada</strong><small>AÇÕES DA SALA</small><button className="mobile-sheet-close" type="button" onClick={() => setLeaveMenuOpen(false)} aria-label="Fechar opções para sair"><Icon name="close"/></button></header>
       <div className="exit-options">
         <button type="button" onClick={leaveRoom}><Icon name="hangup"/><span><strong>Sair da chamada</strong><small>A sala continua para quem permanecer</small></span></button>
@@ -2627,13 +2909,6 @@ export default function RoomApp() {
     </section>
   ) : null;
 
-  const closeDockSheets = () => {
-    setAudioMenuOpen(false);
-    setScreenMenuOpen(false);
-    setMoreMenuOpen(false);
-    setLeaveMenuOpen(false);
-  };
-  const dockSheetOpen = phone && (audioMenuOpen || screenMenuOpen || moreMenuOpen || leaveMenuOpen);
   const dockPopovers = <>{audioPopover}{screenPopover}{morePopover}{exitPopover}</>;
 
   const callPanel = (
@@ -2721,7 +2996,7 @@ export default function RoomApp() {
   );
 
   return (
-    <div className={`app room-app unified-room-app ${mobile ? 'viewer-mode is-mobile-room' : ''} ${phone ? 'is-phone-room' : ''} ${activeChat ? 'is-chat-open' : ''} ${controlsOpen ? 'is-controls-open' : ''} ${animationsEnabled ? '' : 'animations-disabled'}`}>
+    <div className={`app room-app unified-room-app ${mobile ? 'viewer-mode is-mobile-room' : ''} ${phone ? 'is-phone-room' : ''} ${activeChat ? 'is-chat-open' : ''} ${controlsOpen ? 'is-controls-open' : ''} ${mobilePresentationOpen ? 'has-mobile-overlay' : ''} ${animationsEnabled ? '' : 'animations-disabled'}`}>
       <header className="topbar">
         <div className="brand"><BrandMark/><strong>ScreenLink</strong></div>
         <div className={`status-pill room-status-${connectionQuality}`}><i/>{session ? connectionStatusLabel : 'Pronto'}</div>
@@ -2733,7 +3008,7 @@ export default function RoomApp() {
               <div className="unified-sidebar-actions">
                 <div className="unified-chat-settings-anchor" ref={chatSettingsRef}>
                   <button className={`chat-settings-trigger ${chatSettingsOpen ? 'is-open' : ''}`} type="button" aria-label="Personalizar aparência do chat" aria-expanded={chatSettingsOpen} onClick={() => setChatSettingsOpen(open => !open)}><Icon name="settings"/></button>
-                  {chatSettingsOpen && <section className="chat-settings-popover" aria-label="Aparência do chat">
+                  {chatSettingsOpen && <section className="chat-settings-popover" aria-label="Aparência do chat" {...chatSettingsSheetGesture}>
                     <header><strong>Aparência do chat</strong><small>SÓ NESTE DISPOSITIVO</small></header>
                     <label><span><strong>Seu balão</strong><small>Destaque das suas mensagens</small></span><input type="color" value={chatAppearance.ownBubble} aria-label="Cor do seu balão" onChange={event => setChatAppearance(current => ({ ...current, ownBubble: event.currentTarget.value }))}/></label>
                     <label><span><strong>Outros balões</strong><small>Mensagens dos participantes</small></span><input type="color" value={chatAppearance.otherBubble} aria-label="Cor dos outros balões" onChange={event => setChatAppearance(current => ({ ...current, otherBubble: event.currentTarget.value }))}/></label>
@@ -2770,11 +3045,11 @@ export default function RoomApp() {
             detail={mobile ? 'low' : 'medium'}
             brightness={1}
             opacity={1}
-            mouseInteraction={animationsEnabled}
+            mouseInteraction={animationsEnabled && !mobilePresentationOpen}
             parallaxStrength={0.5}
-            grain={animationsEnabled}
+            grain={animationsEnabled && !mobilePresentationOpen}
             grainIntensity={0.05}
-            animated={animationsEnabled}
+            animated={animationsEnabled && !mobilePresentationOpen}
           />
           {stageContent}
           {session && sharingParticipants.length > 0 && mode === 'connected' && (
@@ -2782,7 +3057,7 @@ export default function RoomApp() {
           )}
           {callDock}
         </section>
-        <aside className={`control-panel unified-control-panel ${controlsOpen ? 'is-open' : ''}`} role={phone && controlsOpen ? 'dialog' : undefined} aria-modal={phone && controlsOpen || undefined} aria-hidden={mobile && !controlsOpen}>
+        <aside className={`control-panel unified-control-panel ${controlsOpen ? 'is-open' : ''}`} role={phone && controlsOpen ? 'dialog' : undefined} aria-modal={phone && controlsOpen || undefined} aria-hidden={mobile && !controlsOpen} {...controlsSheetGesture}>
           <div className="panel-header"><div><h2>Controles</h2></div><span className="audience-count">{connectedParticipants.length}/{maxParticipants}</span>{mobile && <button className="mobile-panel-close" type="button" onClick={() => setControlsOpen(false)} aria-label="Fechar controles"><Icon name="close"/></button>}</div>
           {mobile && <button className="mobile-control-profile" type="button" onClick={() => { setProfileOpen(true); setControlsOpen(false); }}><Avatar avatar={profile.avatar} name={profile.name} leader={Boolean(selfId && selfId === leaderId)} size="small"/><span><strong>{profile.name}</strong><small>{profile.status}</small></span><Icon name="settings"/></button>}
           <div className="panel-view">{callPanel}</div>
@@ -2803,7 +3078,7 @@ export default function RoomApp() {
         <div className="mobile-sheet-host">{dockPopovers}</div>
       </div>}
       {profileOpen && (
-        <div ref={profilePopoverRef} className="room-popover profile-popover unified-profile-popover" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="profile-sheet-title">
+        <div ref={profilePopoverRef} className="room-popover profile-popover unified-profile-popover" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="profile-sheet-title" {...profileSheetGesture}>
           <header><div><span className="eyebrow">SEU PERFIL</span><h3 id="profile-sheet-title">Como você aparece</h3></div><button type="button" onClick={() => { commitProfileName(); commitProfileStatus(); setProfileOpen(false); }} aria-label="Fechar perfil"><Icon name="close"/></button></header>
           <label htmlFor="profile-name">Nome</label><input id="profile-name" value={profileNameDraft} onChange={event => { profileEditRevisionRef.current += 1; profileNameDraftRef.current = event.target.value; setProfileNameDraft(event.target.value); }} onBlur={commitProfileName} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { profileNameDraftRef.current = profileRef.current.name; setProfileNameDraft(profileRef.current.name); event.currentTarget.blur(); } }} maxLength={28}/>
           <label htmlFor="profile-status">Mensagem de status</label><input id="profile-status" value={profileStatusDraft} onChange={event => { profileEditRevisionRef.current += 1; profileStatusDraftRef.current = event.target.value; setProfileStatusDraft(event.target.value); }} onBlur={commitProfileStatus} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { profileStatusDraftRef.current = profileRef.current.status; setProfileStatusDraft(profileRef.current.status); event.currentTarget.blur(); } }} maxLength={64} placeholder="Disponível"/>
@@ -2812,7 +3087,7 @@ export default function RoomApp() {
           <label>Avatares do app</label><div className="avatar-picker">{AVATARS.map(avatar => <button className={profile.avatar === avatar.id ? 'selected' : ''} type="button" key={avatar.id} onClick={() => updateProfile({ avatar: avatar.id })}><Avatar avatar={avatar.id} name={avatar.label}/><span>{avatar.label}</span></button>)}</div>
         </div>
       )}
-      {qrOpen && <div className="modal-backdrop" role="presentation" onPointerDown={event => { if (event.target === event.currentTarget) setQrOpen(false); }}><section className="qr-modal" role="dialog" aria-modal="true" aria-labelledby="room-qr-title"><span className="eyebrow">SALA {roomLabel}</span><h2 id="room-qr-title">Entrar pelo QR Code</h2><p>Aponte a câmera do celular para abrir o convite completo.</p>{qrCode ? <img src={qrCode} alt={`QR Code da sala ${roomLabel}`}/> : <div className="qr-loading">Gerando QR Code…</div>}<button type="button" onClick={() => setQrOpen(false)}>Fechar</button></section></div>}
+      {qrOpen && <div className="modal-backdrop" role="presentation" onPointerDown={event => { if (event.target === event.currentTarget) setQrOpen(false); }}><section className="qr-modal" role="dialog" aria-modal="true" aria-labelledby="room-qr-title" {...qrSheetGesture}><span className="eyebrow">SALA {roomLabel}</span><h2 id="room-qr-title">Entrar pelo QR Code</h2><p>Aponte a câmera do celular para abrir o convite completo.</p>{qrCode ? <img src={qrCode} alt={`QR Code da sala ${roomLabel}`}/> : <div className="qr-loading">Gerando QR Code…</div>}<button type="button" onClick={() => setQrOpen(false)}>Fechar</button></section></div>}
       {error && mode !== 'error' && <button className="call-error" type="button" onClick={() => setError('')}>{error}<Icon name="close"/></button>}
     </div>
   );
