@@ -13,7 +13,7 @@
     "test": "node scripts/smoke-signaling.mjs",
     "desktop": "npm run build && electron .",
     "desktop:pack": "npm run build && electron-builder --dir",
-    "desktop:dist": "npm run build && electron-builder --win"
+    "desktop:dist": "npm run build && electron-builder --win --publish never"
   },
   "engines": {
     "node": ">=22"
