@@ -395,6 +395,7 @@
 .unified-chat-sidebar .unified-chat-panel { grid-template-rows: minmax(0, 1fr) auto; padding: .35rem .72rem .72rem; overflow: hidden; }
 .unified-chat-panel .chat-log { padding: .45rem .08rem 1rem; }
 .unified-chat-panel .chat-message { max-width: 84%; margin: .72rem 0; }
+.unified-chat-panel .chat-message.is-own { margin-right: 0; margin-left: auto; }
 .unified-chat-panel .chat-message p { font-size: .67rem; }
 .chat-delivery { min-height: .92rem; margin: .18rem .22rem 0; display: flex; justify-content: flex-end; color: #697174; font-size: .52rem; line-height: 1; }
 .chat-delivery.is-delivered { color: #7faab3; }
