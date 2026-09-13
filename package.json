@@ -1,13 +1,19 @@
 {
   "name": "screenlink-web",
   "version": "1.0.0",
+  "description": "Chamadas P2P, voz, chat e compartilhamento de tela no navegador e no desktop.",
+  "author": "ScreenLink",
   "private": true,
   "type": "module",
+  "main": "electron/main.mjs",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "tsc --noEmit && vite build",
     "start": "node --env-file-if-exists=.env server.mjs",
-    "test": "node scripts/smoke-signaling.mjs"
+    "test": "node scripts/smoke-signaling.mjs",
+    "desktop": "npm run build && electron .",
+    "desktop:pack": "npm run build && electron-builder --dir",
+    "desktop:dist": "npm run build && electron-builder --win"
   },
   "engines": {
     "node": ">=22"
@@ -26,7 +32,52 @@
     "@types/react-dom": "^19.2.3",
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^6.0.2",
+    "electron": "^44.3.0",
+    "electron-builder": "^26.15.3",
     "typescript": "^6.0.3",
     "vite": "^8.0.16"
+  },
+  "build": {
+    "appId": "app.screenlink.desktop",
+    "productName": "ScreenLink",
+    "asar": true,
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "server.mjs",
+      "package.json"
+    ],
+    "win": {
+      "icon": "build/icon.svg",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "ScreenLink",
+      "artifactName": "ScreenLink-Setup-${version}-${arch}.${ext}"
+    },
+    "portable": {
+      "artifactName": "ScreenLink-Portable-${version}-${arch}.${ext}"
+    }
   }
 }

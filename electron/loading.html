@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self';" />
+    <title>ScreenLink</title>
+    <link rel="stylesheet" href="./loading.css" />
+  </head>
+  <body>
+    <div class="horizon" aria-hidden="true"></div>
+    <main>
+      <svg class="echo" viewBox="0 0 48 48" role="img" aria-label="Echo">
+        <defs>
+          <mask id="loading-echo-cutouts">
+            <rect width="48" height="48" fill="white"/>
+            <circle cx="18.5" cy="22.8" r="7" fill="black"/>
+            <circle cx="29.5" cy="22.8" r="7" fill="black"/>
+            <path d="m21 31 3 4.2 3-4.2Z" fill="black"/>
+          </mask>
+        </defs>
+        <circle cx="24" cy="24" r="21" stroke="currentColor" stroke-width="2.8" fill="none"/>
+        <path d="M10.8 14.6c4-4 8.8-4.3 13.2-.9 4.4-3.4 9.2-3.1 13.2.9 4.2 4.2 4.7 13.3 1.4 19.5C35.8 39.4 30.9 42 24 42s-11.8-2.6-14.6-7.9c-3.3-6.2-2.8-15.3 1.4-19.5Z" fill="currentColor" mask="url(#loading-echo-cutouts)"/>
+        <circle cx="18.5" cy="22.8" r="2.15" fill="currentColor"/>
+        <circle cx="29.5" cy="22.8" r="2.15" fill="currentColor"/>
+      </svg>
+      <h1>Conectando ao ScreenLink</h1>
+      <p>Acordando o servidor e preparando sua sala<span class="dots" aria-hidden="true"><i></i><i></i><i></i></span></p>
+    </main>
+  </body>
+</html>

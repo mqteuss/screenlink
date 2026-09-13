@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none">
+  <defs>
+    <mask id="echo-cutouts">
+      <rect width="48" height="48" fill="white"/>
+      <circle cx="18.5" cy="22.8" r="7" fill="black"/>
+      <circle cx="29.5" cy="22.8" r="7" fill="black"/>
+      <path d="m21 31 3 4.2 3-4.2Z" fill="black"/>
+    </mask>
+  </defs>
+  <circle cx="24" cy="24" r="23" fill="#0b1014"/>
+  <circle cx="24" cy="24" r="20.5" stroke="#f5f7f8" stroke-width="2.3"/>
+  <path d="M10.8 14.6c4-4 8.8-4.3 13.2-.9 4.4-3.4 9.2-3.1 13.2.9 4.2 4.2 4.7 13.3 1.4 19.5C35.8 39.4 30.9 42 24 42s-11.8-2.6-14.6-7.9c-3.3-6.2-2.8-15.3 1.4-19.5Z" fill="#f5f7f8" mask="url(#echo-cutouts)"/>
+  <circle cx="18.5" cy="22.8" r="2.15" fill="#f5f7f8"/>
+  <circle cx="29.5" cy="22.8" r="2.15" fill="#f5f7f8"/>
+</svg>

@@ -93,6 +93,37 @@ npm start
 npm run dev
 ```
 
+## Aplicativo para Windows (Electron)
+
+O aplicativo desktop reutiliza a mesma interface e o mesmo protocolo WebRTC do site. Ele
+mantém `contextIsolation` e sandbox ativos, usa uma ponte IPC pequena para o perfil e abre
+um seletor próprio de telas e janelas. No Windows, o áudio do sistema acompanha a captura
+quando o compartilhamento solicita áudio.
+
+```powershell
+npm run desktop       # compila e abre o aplicativo local
+npm run desktop:pack  # cria uma pasta não instalável para inspeção
+npm run desktop:dist  # gera instalador e versão portátil x64 em release/
+```
+
+Por padrão, o Electron se conecta ao deploy HTTPS oficial do ScreenLink, inclusive depois
+de um cold start do Render. Se ele não responder, o aplicativo cai automaticamente para o
+servidor local empacotado. Também é possível apontar para outro deploy HTTPS:
+
+```powershell
+$env:SCREENLINK_APP_URL = 'https://seu-screenlink.onrender.com'
+npm run desktop
+```
+
+Para forçar uma sessão apenas na rede local, use
+`$env:SCREENLINK_APP_URL = 'local'`. Convites pela internet e permissões completas de mídia
+em navegadores móveis continuam dependendo do deploy HTTPS.
+
+O nome, status e avatar do perfil desktop ficam somente no SQLite local
+`%APPDATA%\ScreenLink\screenlink.sqlite`. Nenhuma mensagem de chat é gravada nele.
+O workflow **Electron Windows** também permite gerar os dois `.exe` pela aba Actions do
+GitHub ou automaticamente ao enviar uma tag `v*`.
+
 ## Uso em redes diferentes
 
 O endereço público HTTPS do Render permite que os dispositivos entrem na mesma sala.
@@ -131,4 +162,6 @@ npm run dev    # interface local com atualização automática
 npm run build  # checagem TypeScript e build de produção
 npm test       # teste do site e do protocolo de sinalização
 npm start      # servidor único de produção
+npm run desktop       # abre o app Electron
+npm run desktop:dist  # gera os executáveis do Windows
 ```

@@ -65,10 +65,19 @@ export function createProfileStore(userDataDirectory) {
   };
 }
 
-export function registerProfileIpc({ ipcMain, userDataDirectory }) {
+export function registerProfileIpc({ ipcMain, userDataDirectory, isTrustedSender = () => true }) {
   const store = createProfileStore(userDataDirectory);
-  ipcMain.handle('screenlink:profile:load', () => store.load());
-  ipcMain.handle('screenlink:profile:save', (_event, profile) => store.save(profile));
+  function assertTrusted(event) {
+    if (!isTrustedSender(event)) throw new Error('Origem não autorizada para acessar o perfil local.');
+  }
+  ipcMain.handle('screenlink:profile:load', event => {
+    assertTrusted(event);
+    return store.load();
+  });
+  ipcMain.handle('screenlink:profile:save', (event, profile) => {
+    assertTrusted(event);
+    return store.save(profile);
+  });
   return () => {
     ipcMain.removeHandler('screenlink:profile:load');
     ipcMain.removeHandler('screenlink:profile:save');
