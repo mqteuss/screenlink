@@ -10,9 +10,14 @@ const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DIST_DIR = path.join(APP_DIR, 'dist');
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || '0.0.0.0';
-const PUBLIC_ORIGIN = normalizeOrigin(process.env.PUBLIC_ORIGIN);
+const PUBLIC_ORIGIN = normalizeOrigin(process.env.PUBLIC_ORIGIN, true);
+const EXTRA_ALLOWED_ORIGINS = new Set(splitUrls(process.env.ALLOWED_ORIGINS).map(normalizeOrigin).filter(Boolean));
 const MIN_VIEWERS = 1;
 const MAX_VIEWERS = 8;
+const configuredRoomLimit = Number(process.env.MAX_ACTIVE_ROOMS || 2_500);
+const MAX_ACTIVE_ROOMS = Number.isSafeInteger(configuredRoomLimit) && configuredRoomLimit >= 10 ? configuredRoomLimit : 2_500;
+const configuredConnectionLimit = Number(process.env.MAX_CONNECTIONS || 10_000);
+const MAX_CONNECTIONS = Number.isSafeInteger(configuredConnectionLimit) && configuredConnectionLimit >= 10 ? configuredConnectionLimit : 10_000;
 const SIGNAL_GRACE_MS = 5 * 60_000;
 
 const MIME_TYPES = new Map([
@@ -33,14 +38,14 @@ function splitUrls(value, fallback = '') {
   return String(value || fallback).split(',').map(item => item.trim()).filter(Boolean);
 }
 
-function normalizeOrigin(value) {
+function normalizeOrigin(value, warn = false) {
   if (!value) return '';
   try {
     const url = new URL(value);
     if (url.protocol !== 'http:' && url.protocol !== 'https:') return '';
     return url.origin;
   } catch {
-    console.warn('PUBLIC_ORIGIN is invalid; using the request or local network address.');
+    if (warn) console.warn('PUBLIC_ORIGIN is invalid; using the request or local network address.');
     return '';
   }
 }
@@ -131,7 +136,13 @@ function tokenMatches(expected, candidate) {
 }
 
 function sendJson(socket, payload) {
-  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
+  if (socket?.readyState !== WebSocket.OPEN) return false;
+  try {
+    socket.send(JSON.stringify(payload));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function fail(socket, code, message) {
@@ -147,14 +158,27 @@ function validToken(value) {
 }
 
 function validJoinCode(value) {
-  return typeof value === 'string' && /^[A-Z2-9]{4}$/.test(value.trim().toUpperCase());
+  return typeof value === 'string' && /^[A-Z2-9]{6,8}$/.test(value.trim().toUpperCase());
+}
+
+function normalizeIceCandidate(value) {
+  if (!value || typeof value !== 'object') return null;
+  const candidate = typeof value.candidate === 'string' ? value.candidate : '';
+  if (!candidate || candidate.length > 8_192) return null;
+  const sdpMid = value.sdpMid === null || typeof value.sdpMid === 'undefined' ? null : String(value.sdpMid);
+  const sdpMLineIndex = value.sdpMLineIndex === null || typeof value.sdpMLineIndex === 'undefined' ? null : Number(value.sdpMLineIndex);
+  const usernameFragment = typeof value.usernameFragment === 'string' ? value.usernameFragment : undefined;
+  if ((sdpMid?.length ?? 0) > 128 || (usernameFragment?.length ?? 0) > 256) return null;
+  if (sdpMLineIndex !== null && (!Number.isInteger(sdpMLineIndex) || sdpMLineIndex < 0 || sdpMLineIndex > 128)) return null;
+  if (sdpMLineIndex === null && !sdpMid) return null;
+  return { candidate, sdpMid, sdpMLineIndex, ...(usernameFragment ? { usernameFragment } : {}) };
 }
 
 const JOIN_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
 function allocateJoinCode() {
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    const bytes = randomBytes(4);
+    const bytes = randomBytes(6);
     const code = Array.from(bytes, byte => JOIN_CODE_ALPHABET[byte % JOIN_CODE_ALPHABET.length]).join('');
     if (![...groupRooms.values()].some(room => room.joinCode === code)) return code;
   }
@@ -170,7 +194,7 @@ function normalizeProfile(value) {
   const name = String(source.name || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 28) || 'Participante';
   const avatarValue = String(source.avatar || '');
   const isPreset = /^[a-z0-9-]{1,24}$/i.test(avatarValue);
-  const isLocalPhoto = /^data:image\/(?:jpeg|png|webp);base64,[a-z0-9+/=]+$/i.test(avatarValue) && avatarValue.length <= 120_000;
+  const isLocalPhoto = /^data:image\/(?:jpeg|png|webp);base64,[a-z0-9+/=]+$/i.test(avatarValue) && avatarValue.length <= 32_000;
   const avatar = isPreset || isLocalPhoto ? avatarValue : 'orbit';
   const status = String(source.status || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 64) || 'Disponível';
   const device = source.device === 'mobile' ? 'mobile' : 'desktop';
@@ -385,7 +409,47 @@ function setSecurityHeaders(response) {
   response.setHeader('X-Content-Type-Options', 'nosniff');
   response.setHeader('Referrer-Policy', 'no-referrer');
   response.setHeader('Permissions-Policy', 'camera=(self), microphone=(self), display-capture=(self)');
-  response.setHeader('Content-Security-Policy', "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; media-src 'self' blob:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
+  response.setHeader('Content-Security-Policy', "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; media-src 'self' blob:; style-src 'self'; style-src-elem 'self'; style-src-attr 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
+}
+
+function websocketOriginAllowed(request) {
+  const supplied = request.headers.origin;
+  if (!supplied) return true;
+  const origin = normalizeOrigin(supplied);
+  if (!origin) return false;
+  return origin === requestOrigin(request) || origin === PUBLIC_ORIGIN || EXTRA_ALLOWED_ORIGINS.has(origin);
+}
+
+const socketRateLimits = new WeakMap();
+const joinAttemptBuckets = new Map();
+
+function consumeSocketBudget(socket, type) {
+  const now = Date.now();
+  let state = socketRateLimits.get(socket);
+  if (!state || now - state.startedAt >= 10_000) state = { startedAt: now, total: 0, chat: 0, stateUpdates: 0 };
+  state.total += 1;
+  if (type === 'chat-fallback' || type === 'chat-ack') state.chat += 1;
+  if (type === 'participant-state' || type === 'media-state') state.stateUpdates += 1;
+  socketRateLimits.set(socket, state);
+  return state.total <= 360 && state.chat <= 30 && state.stateUpdates <= 80;
+}
+
+function clientAddress(request) {
+  const forwarded = String(request.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return forwarded || request.socket.remoteAddress || 'unknown';
+}
+
+function allowJoinAttempt(address) {
+  const now = Date.now();
+  let bucket = joinAttemptBuckets.get(address);
+  if (!bucket || now >= bucket.resetAt) bucket = { count: 0, resetAt: now + 60_000 };
+  bucket.count += 1;
+  joinAttemptBuckets.set(address, bucket);
+  if (joinAttemptBuckets.size > 5_000) {
+    for (const [key, value] of joinAttemptBuckets) if (now >= value.resetAt) joinAttemptBuckets.delete(key);
+    while (joinAttemptBuckets.size > 5_000) joinAttemptBuckets.delete(joinAttemptBuckets.keys().next().value);
+  }
+  return bucket.count <= 24;
 }
 
 async function serveFile(request, response) {
@@ -453,7 +517,10 @@ async function serveFile(request, response) {
 }
 
 const server = http.createServer((request, response) => {
-  void serveFile(request, response);
+  void serveFile(request, response).catch(() => {
+    if (!response.headersSent) response.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+    if (!response.writableEnded) response.end('Não foi possível atender esta solicitação.');
+  });
 });
 const websocketServer = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: 256 * 1024 });
 
@@ -464,14 +531,26 @@ server.on('upgrade', (request, socket, head) => {
     socket.destroy();
     return;
   }
+  if (!websocketOriginAllowed(request)) {
+    socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+  if (websocketServer.clients.size >= MAX_CONNECTIONS) {
+    socket.write('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nRetry-After: 5\r\n\r\n');
+    socket.destroy();
+    return;
+  }
   websocketServer.handleUpgrade(request, socket, head, webSocket => websocketServer.emit('connection', webSocket, request));
 });
 
-websocketServer.on('connection', socket => {
+websocketServer.on('connection', (socket, request) => {
+  const address = clientAddress(request);
   socket.isAlive = true;
   socket.on('pong', () => { socket.isAlive = true; });
 
   socket.on('message', async raw => {
+    try {
     let message;
     try {
       message = JSON.parse(raw.toString());
@@ -481,6 +560,11 @@ websocketServer.on('connection', socket => {
     }
     if (!message || typeof message.type !== 'string') {
       fail(socket, 'BAD_MESSAGE', 'Mensagem inválida.');
+      return;
+    }
+    if (!consumeSocketBudget(socket, message.type)) {
+      fail(socket, 'RATE_LIMITED', 'Muitas ações em pouco tempo. Aguarde alguns segundos.');
+      socket.close(1008, 'Rate limit exceeded');
       return;
     }
 
@@ -524,6 +608,11 @@ websocketServer.on('connection', socket => {
         return;
       }
 
+      if (rooms.size + groupRooms.size >= MAX_ACTIVE_ROOMS) {
+        fail(socket, 'SERVER_BUSY', 'O servidor atingiu o limite temporário de salas. Tente novamente em instantes.');
+        return;
+      }
+
       const ownerId = validPeerId(message.participantId) ? message.participantId : randomUUID();
       const owner = {
         id: ownerId,
@@ -558,6 +647,10 @@ websocketServer.on('connection', socket => {
       }
       const joiningByCode = message.type === 'join-group-room-code';
       const normalizedCode = String(message.code || '').trim().toUpperCase();
+      if (joiningByCode && !allowJoinAttempt(address)) {
+        fail(socket, 'RATE_LIMITED', 'Muitas tentativas de código. Aguarde um minuto antes de tentar novamente.');
+        return;
+      }
       if (joiningByCode ? !validJoinCode(normalizedCode) : !validRoomId(message.roomId) || !validToken(message.token)) {
         fail(socket, 'BAD_ROOM', 'O código da sala não é válido.');
         return;
@@ -634,8 +727,13 @@ websocketServer.on('connection', socket => {
           sendJson(target.socket, { type: 'peer-signal', fromId: participant.id, kind: message.kind, sdp: message.sdp });
           return;
         }
-        if (message.kind === 'ice-candidate' && message.candidate && typeof message.candidate === 'object') {
-          sendJson(target.socket, { type: 'peer-signal', fromId: participant.id, kind: 'ice-candidate', candidate: message.candidate });
+        if (message.kind === 'ice-candidate') {
+          const candidate = normalizeIceCandidate(message.candidate);
+          if (!candidate) {
+            fail(socket, 'BAD_SIGNAL', 'Candidato ICE inválido.');
+            return;
+          }
+          sendJson(target.socket, { type: 'peer-signal', fromId: participant.id, kind: 'ice-candidate', candidate });
           return;
         }
         fail(socket, 'BAD_SIGNAL', 'Sinal WebRTC inválido.');
@@ -644,7 +742,7 @@ websocketServer.on('connection', socket => {
 
       if (message.type === 'chat-fallback') {
         const incoming = message.message;
-        const id = typeof incoming?.id === 'string' ? incoming.id.slice(0, 200) : '';
+        const id = typeof incoming?.id === 'string' && /^[a-z0-9._:-]{1,200}$/i.test(incoming.id) ? incoming.id : '';
         const text = typeof incoming?.text === 'string' ? incoming.text.trim().slice(0, 1_000) : '';
         const sentAt = Number(incoming?.sentAt);
         if (!id || !text) {
@@ -661,6 +759,20 @@ websocketServer.on('connection', socket => {
             sentAt: Number.isFinite(sentAt) && sentAt > 0 ? sentAt : Date.now()
           }
         }, participant.id);
+        return;
+      }
+
+      if (message.type === 'chat-ack') {
+        const targetId = typeof message.targetId === 'string' ? message.targetId : '';
+        const messageId = typeof message.messageId === 'string' && /^[a-z0-9._:-]{1,200}$/i.test(message.messageId) ? message.messageId : '';
+        if (!validPeerId(targetId) || targetId === participant.id || !messageId) {
+          fail(socket, 'BAD_CHAT_ACK', 'A confirmação da mensagem é inválida.');
+          return;
+        }
+        const target = room.participants.get(targetId);
+        if (target?.socket?.readyState === WebSocket.OPEN) {
+          sendJson(target.socket, { type: 'chat-ack', fromId: participant.id, messageId });
+        }
         return;
       }
 
@@ -710,6 +822,11 @@ websocketServer.on('connection', socket => {
           maxViewers: existing.maxViewers,
           viewerIds: [...existing.viewers.keys()]
         });
+        return;
+      }
+
+      if (rooms.size + groupRooms.size >= MAX_ACTIVE_ROOMS) {
+        fail(socket, 'SERVER_BUSY', 'O servidor atingiu o limite temporário de salas. Tente novamente em instantes.');
         return;
       }
 
@@ -817,11 +934,15 @@ websocketServer.on('connection', socket => {
     }
 
     if (message.type === 'ice-candidate') {
-      if (typeof message.peerId !== 'string' || !message.candidate || typeof message.candidate !== 'object') return;
+      const candidate = normalizeIceCandidate(message.candidate);
+      if (typeof message.peerId !== 'string' || !candidate) {
+        fail(socket, 'BAD_CANDIDATE', 'Candidato ICE inválido.');
+        return;
+      }
       if (client.role === 'host') {
-        relayToViewer(room, message.peerId, { type: 'ice-candidate', peerId: message.peerId, candidate: message.candidate });
+        relayToViewer(room, message.peerId, { type: 'ice-candidate', peerId: message.peerId, candidate });
       } else if (client.peerId === message.peerId && room.host?.readyState === WebSocket.OPEN) {
-        sendJson(room.host, { type: 'ice-candidate', peerId: message.peerId, candidate: message.candidate });
+        sendJson(room.host, { type: 'ice-candidate', peerId: message.peerId, candidate });
       }
       return;
     }
@@ -850,6 +971,14 @@ websocketServer.on('connection', socket => {
     }
 
     fail(socket, 'UNKNOWN_MESSAGE', 'Mensagem não reconhecida.');
+    } catch {
+      fail(socket, 'SERVER_ERROR', 'Não foi possível processar esta ação.');
+      try {
+        socket.close(1011, 'Message processing failed');
+      } catch {
+        socket.terminate();
+      }
+    }
   });
 
   socket.on('close', () => {

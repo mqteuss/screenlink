@@ -6,12 +6,13 @@ Chamada de voz, compartilhamento de tela e chat temporário em tempo real entre 
 
 1. Abra o ScreenLink no Chrome ou Edge do computador.
 2. Clique em **Iniciar chamada**. A sala e o convite são criados antes de qualquer captura de tela.
-3. Copie o link privado e abra-o em até oito celulares ou computadores, conforme o limite escolhido pelo host.
+3. Copie o link privado e abra-o em outros celulares ou computadores, respeitando o limite total escolhido pelo host.
 4. Converse por voz ou pelo chat P2P temporário.
 5. Clique em **Compartilhar tela** quando quiser; é possível trocar ou parar a tela sem encerrar a chamada.
-6. Clique em **Encerrar chamada** quando terminar.
+6. Ajuste separadamente o volume da voz de cada pessoa e o som de cada tela compartilhada.
+7. Clique em **Encerrar chamada** quando terminar.
 
-Cada sala permite escolher de 1 a 8 espectadores. O compartilhamento oferece até 1080p/60 FPS, áudio da tela, microfone bidirecional e chat efêmero, sempre sujeitos à capacidade real de CPU e rede.
+Cada sala permite escolher de 2 a 8 participantes ao todo. O compartilhamento oferece até 1080p/60 FPS, áudio da tela, microfone bidirecional e chat efêmero, sempre sujeitos à capacidade real de CPU e rede.
 
 ## Sala multiusuário
 
@@ -22,8 +23,10 @@ O ScreenLink usa uma única interface para criar uma sala ou entrar com um códi
 - várias telas podem ficar ativas ao mesmo tempo;
 - se o criador sair, o participante conectado há mais tempo assume a liderança;
 - quando o criador retorna com a chave privada salva neste navegador, ele retoma a liderança;
-- nomes e avatares predefinidos ficam salvos somente no armazenamento local do navegador;
+- nome, status, avatar ou foto personalizada ficam salvos somente no armazenamento local deste dispositivo;
 - a interface compacta para celular mantém voz, visualização, participantes e chat, sem expor o controle de compartilhar tela.
+- tela cheia, miniplayer e bloqueio de suspensão ficam reunidos em **Mais opções** durante a chamada.
+- o fundo Gradient Waves adapta o nível de detalhe ao dispositivo e pode ser pausado em **Interface > Animações e movimento**; a preferência fica salva localmente e respeita `prefers-reduced-motion` no primeiro acesso.
 
 A sala em grupo usa uma malha WebRTC: cada participante mantém uma conexão direta com cada um dos demais. É adequada para grupos pequenos, mas várias telas simultâneas multiplicam upload, CPU e consumo de bateria. Para grupos grandes, a evolução indicada é usar uma SFU.
 
@@ -33,9 +36,14 @@ Existe apenas um serviço Node.js:
 
 - entrega a interface web;
 - mantém a sala privada temporária;
-- encaminha somente as mensagens necessárias para formar a conexão WebRTC.
+- encaminha as mensagens necessárias para formar e recuperar a conexão WebRTC;
+- retransmite temporariamente uma mensagem de chat somente quando algum DataChannel ainda não está pronto.
 
-O vídeo, o áudio e as mensagens viajam diretamente entre os dispositivos por WebRTC P2P. O STUN
+O vídeo e o áudio viajam diretamente entre os dispositivos por WebRTC P2P. O chat usa
+RTCDataChannel sempre que o canal está disponível e possui o fallback temporário de sinalização
+descrito acima. Confirmações de entrega, fila com reenvio e sincronização entre os participantes
+recuperam mensagens durante reconexões e para quem entra depois, sem banco de dados; nenhuma
+mensagem é persistida. O STUN
 ajuda os navegadores a descobrir esse caminho, e o próprio WebRTC adapta bitrate,
 resolução e quadros conforme a rede. Um servidor TURN pode ser configurado como
 fallback para redes que bloqueiam P2P; ele não é usado quando existe um caminho
@@ -44,8 +52,9 @@ direto melhor. O ScreenLink não grava o conteúdo.
 Cada conexão pré-negocia três trilhas independentes — voz, vídeo da tela e áudio da
 tela — além de um RTCDataChannel para o chat. A captura de tela usa replaceTrack(),
 por isso iniciar, trocar ou parar a tela normalmente não exige recriar a conexão.
-As mensagens existem apenas na memória durante a chamada; com vários espectadores,
-o host distribui cada mensagem pelos canais P2P já abertos.
+As mensagens existem apenas na memória durante a chamada; cada participante envia aos
+DataChannels abertos dos demais participantes. Links `http`/`https` são abertos separadamente,
+e cores dos balões e nomes podem ser personalizadas apenas no dispositivo local.
 
 Com vários espectadores, o computador cria uma conexão P2P por pessoa. Isso preserva baixa latência em grupos pequenos, mas multiplica o upload e o trabalho de codificação; para audiências maiores, uma arquitetura SFU é mais eficiente.
 
@@ -73,6 +82,17 @@ Para testar no celular, abra primeiro `http://IP-DO-PC:8787/health`. Se não abr
 É possível forçar a origem colocada nos convites com `PUBLIC_ORIGIN`, por exemplo
 ao usar um domínio público ou túnel HTTPS.
 
+Para desenvolver com atualização automática, mantenha o servidor Node em um terminal e
+o Vite em outro. O Vite encaminha `/ws`, `/runtime-config` e `/health` para a porta 8787:
+
+```powershell
+# terminal 1 (depois de ao menos um npm run build)
+npm start
+
+# terminal 2
+npm run dev
+```
+
 ## Uso em redes diferentes
 
 O endereço público HTTPS do Render permite que os dispositivos entrem na mesma sala.
@@ -98,10 +118,11 @@ O plano gratuito do Render pode adormecer após um período sem uso. O primeiro 
 
 - O identificador e a chave da sala são gerados aleatoriamente no navegador.
 - A chave fica no fragmento `#` do link, que não é enviado durante a requisição HTTP da página.
-- O servidor mantém somente o hash SHA-256 da chave enquanto a transmissão está ativa.
-- A sala é apagada imediatamente quando o transmissor encerra; perdas inesperadas de sinalização recebem uma janela curta de recuperação.
+- A chave do proprietário é mantida somente como hash SHA-256. A chave de entrada da sala permanece apenas na memória do processo enquanto a sala existe, pois é necessária para transformar o código curto de seis caracteres em um convite completo.
+- A sala é apagada quando o proprietário escolhe **Encerrar sala** ou quando fica vazia após a janela de recuperação; sair sem encerrar permite que outro participante assuma a liderança.
 - O limite de espectadores é definido pelo apresentador antes de iniciar a sala.
-- Cabeçalhos de segurança bloqueiam câmera, incorporação em outros sites e carregamento de scripts externos; microfone e captura de tela são permitidos somente para a própria origem.
+- Cabeçalhos de segurança bloqueiam incorporação em outros sites e carregamento de scripts externos; microfone e captura de tela são permitidos somente para a própria origem.
+- O WebSocket valida a origem, limita tentativas de código, frequência de mensagens e conexões simultâneas; o servidor também limita a quantidade total de salas. Use `ALLOWED_ORIGINS` apenas quando frontend e backend realmente estiverem em origens diferentes.
 
 ## Comandos
 

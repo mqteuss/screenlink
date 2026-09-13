@@ -1,12 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none">
   <style>
-    .mark { stroke: #111; }
-    @media (prefers-color-scheme: dark) { .mark { stroke: #fff; } }
+    .echo { color: #111; }
+    @media (prefers-color-scheme: dark) { .echo { color: #fff; } }
   </style>
-  <g class="mark" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round">
-    <rect x="5.5" y="7" width="37" height="29" rx="7" />
-    <path d="M17 42h14M24 36v6" />
-    <path d="M21.5 18.5h-2.25a5.5 5.5 0 0 0 0 11h5.5a5.5 5.5 0 0 0 4.78-2.77" />
-    <path d="M26.5 29.5h2.25a5.5 5.5 0 0 0 0-11h-5.5a5.5 5.5 0 0 0-4.78 2.77" />
+  <g class="echo">
+    <path d="M15 10.5h18c6.1 0 10.5 4.4 10.5 10.5v6c0 6.1-4.4 10.5-10.5 10.5H15C8.9 37.5 4.5 33.1 4.5 27v-6C4.5 14.9 8.9 10.5 15 10.5Z" stroke="currentColor" stroke-width="3.2"/>
+    <path d="M4.8 19H2.5v10h2.3M43.2 19h2.3v10h-2.3" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M17.5 22.5h.01M30.5 22.5h.01" stroke="currentColor" stroke-width="4.4" stroke-linecap="round"/>
+    <path d="M16.5 29.2c4.6 4.2 10.4 4.2 15 0" stroke="currentColor" stroke-width="3.2" stroke-linecap="round"/>
   </g>
 </svg>

@@ -73,7 +73,46 @@ export async function saveStoredProfile(profile: StoredProfile) {
   else await writeBrowserProfile(profile);
 }
 
-function canvasDataUrl(image: ImageBitmap, size: number, quality: number) {
+type DecodedAvatarImage = {
+  source: CanvasImageSource;
+  width: number;
+  height: number;
+  close: () => void;
+};
+
+async function decodeAvatarImage(file: File): Promise<DecodedAvatarImage> {
+  if (typeof createImageBitmap === 'function') {
+    try {
+      const bitmap = await createImageBitmap(file);
+      return { source: bitmap, width: bitmap.width, height: bitmap.height, close: () => bitmap.close() };
+    } catch {
+      // Safari e alguns formatos aceitos pelo input precisam do decodificador de imagem do DOM.
+    }
+  }
+
+  const objectUrl = URL.createObjectURL(file);
+  const image = new Image();
+  image.decoding = 'async';
+  image.src = objectUrl;
+  try {
+    if (image.decode) await image.decode();
+    else await new Promise<void>((resolve, reject) => {
+      image.onload = () => resolve();
+      image.onerror = () => reject(new Error('Não foi possível abrir essa imagem.'));
+    });
+    return {
+      source: image,
+      width: image.naturalWidth,
+      height: image.naturalHeight,
+      close: () => URL.revokeObjectURL(objectUrl)
+    };
+  } catch (error) {
+    URL.revokeObjectURL(objectUrl);
+    throw error;
+  }
+}
+
+function canvasDataUrl(image: DecodedAvatarImage, size: number, quality: number) {
   const canvas = document.createElement('canvas');
   canvas.width = size;
   canvas.height = size;
@@ -85,7 +124,7 @@ function canvasDataUrl(image: ImageBitmap, size: number, quality: number) {
   const sourceY = (image.height - crop) / 2;
   context.imageSmoothingEnabled = true;
   context.imageSmoothingQuality = 'high';
-  context.drawImage(image, sourceX, sourceY, crop, crop, 0, 0, size, size);
+  context.drawImage(image.source, sourceX, sourceY, crop, crop, 0, 0, size, size);
   return canvas.toDataURL('image/webp', quality);
 }
 
@@ -94,7 +133,7 @@ export async function prepareAvatar(file: File) {
     throw new Error('Escolha uma imagem de até 12 MB.');
   }
 
-  const image = await createImageBitmap(file);
+  const image = await decodeAvatarImage(file);
   try {
     for (const [size, quality] of [[160, .82], [144, .76], [128, .7], [112, .64]] as const) {
       const dataUrl = canvasDataUrl(image, size, quality);

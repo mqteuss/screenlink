@@ -1,0 +1,22 @@
+.gradient-waves-container {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  pointer-events: none;
+  background: radial-gradient(ellipse 90% 64% at 52% 110%, rgba(0, 151, 194, .5), rgba(3, 41, 58, .22) 48%, transparent 76%);
+}
+
+.gradient-waves-container canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.gradient-waves-container[data-webgl="unavailable"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, transparent 32%, rgba(14, 104, 132, .35) 70%, rgba(69, 193, 218, .54));
+}

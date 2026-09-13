@@ -68,7 +68,9 @@ export function parseInvite(hash = window.location.hash): Invite | null {
   const params = new URLSearchParams(hash.replace(/^#/, ''));
   const roomId = params.get('room')?.trim();
   const token = params.get('key')?.trim();
-  return roomId && token ? { roomId, token } : null;
+  if (!roomId || !token) return null;
+  if (!/^[A-Za-z0-9_-]{12,64}$/.test(roomId) || !/^[A-Za-z0-9_-]{32,128}$/.test(token)) return null;
+  return { roomId, token };
 }
 
 export function createPrivateRoom(): Invite {

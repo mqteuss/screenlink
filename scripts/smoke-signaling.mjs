@@ -47,15 +47,38 @@ async function waitForServer() {
   throw new Error(`Server did not start.\n${childOutput}`);
 }
 
-function connect() {
+function connect(options) {
   return new Promise((resolve, reject) => {
-    const socket = new WebSocket(WS_URL);
+    const socket = new WebSocket(WS_URL, options);
     const timer = setTimeout(() => reject(new Error('WebSocket connection timed out')), 3_000);
     socket.once('open', () => {
       clearTimeout(timer);
       resolve(socket);
     });
     socket.once('error', reject);
+  });
+}
+
+function expectOriginRejected(origin) {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(WS_URL, { origin });
+    const timer = setTimeout(() => reject(new Error('Disallowed WebSocket origin was not rejected')), 3_000);
+    socket.once('unexpected-response', (_request, response) => {
+      clearTimeout(timer);
+      response.resume();
+      try {
+        assert.equal(response.statusCode, 403);
+        resolve();
+      } catch (error) {
+        reject(error);
+      }
+    });
+    socket.once('open', () => {
+      clearTimeout(timer);
+      socket.close();
+      reject(new Error('Disallowed WebSocket origin connected successfully'));
+    });
+    socket.once('error', () => undefined);
   });
 }
 
@@ -101,11 +124,16 @@ try {
   const page = await fetch(HTTP_URL);
   assert.equal(page.status, 200);
   assert.equal(page.headers.get('permissions-policy'), 'camera=(self), microphone=(self), display-capture=(self)');
+  assert.match(page.headers.get('content-security-policy') || '', /style-src-attr 'unsafe-inline'/);
+  assert.match(page.headers.get('content-security-policy') || '', /script-src 'self'/);
   assert.match(await page.text(), /<div id="root"><\/div>/);
 
   const runtimeConfig = await (await fetch(`${HTTP_URL}/runtime-config`)).json();
   assert.equal(runtimeConfig.viewerOrigin, 'https://screenlink.example.test');
   assert.equal(runtimeConfig.mode, 'p2p-mesh');
+  await expectOriginRejected('https://malicious.example.test');
+  const sameDeploymentOrigin = await connect({ origin: 'https://screenlink.example.test' });
+  sameDeploymentOrigin.close();
 
   let host = await connect();
   const viewer = await connect();
@@ -156,7 +184,7 @@ try {
   assert.equal((await answerReceived).peerId, joined.peerId);
 
   const candidateReceived = nextMessage(viewer, 'ice-candidate');
-  send(host, { type: 'ice-candidate', peerId: joined.peerId, candidate: { candidate: 'candidate:test' } });
+  send(host, { type: 'ice-candidate', peerId: joined.peerId, candidate: { candidate: 'candidate:test', sdpMid: '0', sdpMLineIndex: 0 } });
   assert.equal((await candidateReceived).candidate.candidate, 'candidate:test');
 
   const viewerMicrophoneOffer = nextMessage(host, 'offer');
@@ -202,6 +230,12 @@ try {
   send(host, { type: 'leave-room' });
   await Promise.all([hostEndedTwo, hostEndedThree, hostEndedExtra]);
 
+  const invalidCodeClient = await connect();
+  sockets.push(invalidCodeClient);
+  const invalidCode = nextMessage(invalidCodeClient, 'error');
+  send(invalidCodeClient, { type: 'join-group-room-code', code: 'ABCD', profile: { name: 'Teste', avatar: 'orbit', status: 'Teste', device: 'desktop' } });
+  assert.equal((await invalidCode).code, 'BAD_ROOM');
+
   let roomOwner = await connect();
   const roomMember = await connect();
   const roomMemberTwo = await connect();
@@ -219,7 +253,7 @@ try {
   const ownerSession = await ownerReady;
   assert.equal(ownerSession.leaderId, ownerSession.selfId);
   assert.equal(ownerSession.participants.length, 1);
-  assert.match(ownerSession.joinCode, /^[A-Z2-9]{4}$/);
+  assert.match(ownerSession.joinCode, /^[A-Z2-9]{6}$/);
   assert.deepEqual(ownerSession.invite, { roomId, token });
   assert.equal(ownerSession.participants[0].status, 'Pronto para jogar');
 
@@ -251,6 +285,10 @@ try {
   const relayedGroupOffer = await memberSignal;
   assert.equal(relayedGroupOffer.fromId, memberTwoSession.selfId);
 
+  const invalidCandidate = nextMessage(roomMemberTwo, 'error');
+  send(roomMemberTwo, { type: 'peer-signal', targetId: memberSession.selfId, kind: 'ice-candidate', candidate: { candidate: 'candidate:missing-mid' } });
+  assert.equal((await invalidCandidate).code, 'BAD_SIGNAL');
+
   const ownerChatFallback = nextMessage(roomOwner, 'chat-fallback');
   const memberTwoChatFallback = nextMessage(roomMemberTwo, 'chat-fallback');
   send(roomMember, { type: 'chat-fallback', message: { id: 'fallback-chat-1', text: 'mensagem de fallback', sentAt: 123456789 } });
@@ -261,6 +299,16 @@ try {
   assert.equal(ownerFallbackMessage.message.senderName, 'Membro 1');
   assert.equal(memberTwoFallbackMessage.message.id, 'fallback-chat-1');
   assert.equal(memberTwoFallbackMessage.message.senderId, memberSession.selfId);
+
+  const memberChatAck = nextMessage(roomMember, 'chat-ack');
+  send(roomOwner, { type: 'chat-ack', targetId: memberSession.selfId, messageId: 'fallback-chat-1' });
+  const relayedChatAck = await memberChatAck;
+  assert.equal(relayedChatAck.fromId, ownerSession.selfId);
+  assert.equal(relayedChatAck.messageId, 'fallback-chat-1');
+
+  const invalidChatAck = nextMessage(roomMemberTwo, 'error');
+  send(roomMemberTwo, { type: 'chat-ack', targetId: memberTwoSession.selfId, messageId: 'fallback-chat-1' });
+  assert.equal((await invalidChatAck).code, 'BAD_CHAT_ACK');
 
   const ownerState = nextMessage(roomOwner, 'participant-state');
   send(roomMember, {
@@ -304,7 +352,7 @@ try {
   const finalHealth = await (await fetch(`${HTTP_URL}/health`)).json();
   assert.equal(finalHealth.rooms, 0);
 
-  console.log('PASS: legacy signaling plus mesh room relay, presence, screen state, leader migration, owner reclaim, STUN/TURN fallback, and shutdown flow.');
+  console.log('PASS: security headers/origin checks, validated signaling, mesh presence/chat delivery/screen state, leader migration, owner reclaim, STUN/TURN fallback, and shutdown flow.');
 } finally {
   for (const socket of sockets) {
     if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) socket.close();

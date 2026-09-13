@@ -1,20 +1,30 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import QRCode from 'qrcode';
 import { playInterfaceSound as playCallSound, unlockInterfaceSounds, type InterfaceSoundName } from './callSounds';
+import GradientWaves from './GradientWaves';
 import { createPrivateRoom, parseInvite, signalUrl, type IceServerConfig, type Invite, type RoomParticipant, type RoomProfile, type SessionDescription } from './protocol';
 import { loadStoredProfile, prepareAvatar, profileStorageKind, saveStoredProfile } from './profileStore';
-import './room.css';
 
 type RoomMode = 'landing' | 'connecting' | 'connected' | 'error';
-type IconName = 'screen' | 'microphone' | 'microphoneOff' | 'volume' | 'volumeOff' | 'chat' | 'send' | 'hangup' | 'link' | 'copy' | 'settings' | 'users' | 'crown' | 'close' | 'chevron' | 'chevronDown' | 'smile' | 'qr';
+type IconName = 'screen' | 'microphone' | 'microphoneOff' | 'volume' | 'volumeOff' | 'chat' | 'send' | 'hangup' | 'link' | 'copy' | 'settings' | 'users' | 'crown' | 'close' | 'chevron' | 'chevronDown' | 'smile' | 'qr' | 'more' | 'expand' | 'pip' | 'wake' | 'motion';
 type Session = { invite: Invite; joinCode?: string; joinByCode?: boolean; ownerKey?: string; participantId?: string; maxParticipants?: number };
 type RoomEntry = { kind: 'invite'; invite: Invite } | { kind: 'code'; code: string };
-type ChatMessage = { id: string; senderId: string; senderName: string; text: string; sentAt: number; system?: boolean };
+type ChatDelivery = 'pending' | 'sent' | 'delivered' | 'failed';
+type ChatMessage = { id: string; senderId: string; senderName: string; text: string; sentAt: number; system?: boolean; delivery?: ChatDelivery };
+type ChatWireMessage = Pick<ChatMessage, 'id' | 'senderId' | 'senderName' | 'text' | 'sentAt'>;
+type ChatChannelPayload =
+  | { type: 'chat-message'; message: ChatWireMessage }
+  | { type: 'chat-ack'; messageId: string }
+  | { type: 'chat-history'; messages: ChatWireMessage[] };
+type ChatAppearance = { ownBubble: string; otherBubble: string; nameColor: string };
+type PendingChatMessage = { message: ChatMessage; awaiting: Set<string>; attempts: number; firstAttemptAt: number; lastAttemptAt: number; fallbackAccepted: boolean };
 type Resolution = 360 | 480 | 720 | 1080;
 type FrameRate = 15 | 30 | 45 | 60;
 type AudioSettings = { inputDeviceId: string; outputDeviceId: string; inputVolume: number; outputVolume: number; echoCancellation: boolean; noiseSuppression: boolean; autoGainControl: boolean };
 type VoiceSettingKey = 'echoCancellation' | 'noiseSuppression' | 'autoGainControl';
 type VoiceSettingSupport = Record<VoiceSettingKey, boolean>;
+type RuntimeConfig = { viewerOrigin?: string; mode?: string; turnEnabled?: boolean };
+type ScreenWakeLock = { released: boolean; release: () => Promise<void>; addEventListener: (type: 'release', listener: () => void, options?: AddEventListenerOptions) => void };
 
 type PeerRecord = {
   id: string;
@@ -30,6 +40,11 @@ type PeerRecord = {
   callAudio: HTMLAudioElement | null;
   screenAudio: HTMLAudioElement | null;
   screenStream: MediaStream;
+  recoveryTimer: number | null;
+  recoveryAttempts: number;
+  makingOffer: boolean;
+  ignoreOffer: boolean;
+  polite: boolean;
 };
 
 type RoomMessage =
@@ -42,6 +57,7 @@ type RoomMessage =
   | { type: 'peer-signal'; fromId: string; kind: 'answer'; sdp: SessionDescription }
   | { type: 'peer-signal'; fromId: string; kind: 'ice-candidate'; candidate: RTCIceCandidateInit }
   | { type: 'chat-fallback'; message: ChatMessage }
+  | { type: 'chat-ack'; fromId: string; messageId: string }
   | { type: 'room-closed' }
   | { type: 'pong'; at: number }
   | { type: 'error'; code: string; message: string };
@@ -49,9 +65,18 @@ type RoomMessage =
 const OWNER_ROOM_KEY = 'screenlink-owner-room-v2';
 const PROFILE_KEY = 'screenlink-room-profile-v2';
 const INTERFACE_SOUNDS_KEY = 'screenlink-interface-sounds-v1';
+const INTERFACE_MOTION_KEY = 'screenlink-interface-motion-v1';
+const CHAT_APPEARANCE_KEY = 'screenlink-chat-appearance-v2';
 const PEER_KEY_PREFIX = 'screenlink-room-peer:';
-const MOBILE_MEDIA_QUERY = '(max-width: 760px), (pointer: coarse) and (max-width: 980px)';
+const COMPACT_LAYOUT_QUERY = '(max-width: 1240px)';
+const MOBILE_DEVICE_QUERY = '(pointer: coarse) and (max-width: 980px)';
 const CHAT_LIMIT = 160;
+const CHAT_CHANNEL_PAYLOAD_LIMIT = 64_000;
+const CHAT_HISTORY_PAYLOAD_LIMIT = 48_000;
+const CHAT_BUFFER_LIMIT = 512_000;
+const CHAT_RETRY_INTERVAL_MS = 1_750;
+const CHAT_FAILURE_TIMEOUT_MS = 12_000;
+const DEFAULT_CHAT_APPEARANCE: ChatAppearance = { ownBubble: '#383838', otherBubble: '#1c1c1c', nameColor: '#ffffff' };
 const RESOLUTIONS: Resolution[] = [360, 480, 720, 1080];
 const FRAME_RATES: FrameRate[] = [15, 30, 45, 60];
 const PARTICIPANT_LIMITS = [2, 3, 4, 5, 6, 7, 8];
@@ -82,6 +107,55 @@ const VIDEO_PRESETS: Record<Resolution, { width: number; height: number; bitrate
   1080: { width: 1920, height: 1080, bitrate: 7_000_000 }
 };
 
+type WebStorageName = 'localStorage' | 'sessionStorage';
+
+function readStorage(storageName: WebStorageName, key: string) {
+  try {
+    return window[storageName].getItem(key);
+  } catch {
+    return null;
+  }
+}
+function writeStorage(storageName: WebStorageName, key: string, value: string) {
+  try {
+    window[storageName].setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function removeStorage(storageName: WebStorageName, key: string) {
+  try {
+    window[storageName].removeItem(key);
+  } catch {
+    // A chamada continua mesmo quando o navegador bloqueia armazenamento local.
+  }
+}
+
+function normalizeChatColor(value: unknown, fallback: string) {
+  return typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value) ? value.toLowerCase() : fallback;
+}
+
+function loadChatAppearance(): ChatAppearance {
+  try {
+    const stored = JSON.parse(readStorage('localStorage', CHAT_APPEARANCE_KEY) || '{}') as Partial<ChatAppearance>;
+    return {
+      ownBubble: normalizeChatColor(stored.ownBubble, DEFAULT_CHAT_APPEARANCE.ownBubble),
+      otherBubble: normalizeChatColor(stored.otherBubble, DEFAULT_CHAT_APPEARANCE.otherBubble),
+      nameColor: normalizeChatColor(stored.nameColor, DEFAULT_CHAT_APPEARANCE.nameColor)
+    };
+  } catch {
+    return DEFAULT_CHAT_APPEARANCE;
+  }
+}
+
+function loadMotionPreference() {
+  const stored = readStorage('localStorage', INTERFACE_MOTION_KEY);
+  if (stored === 'true' || stored === 'false') return stored === 'true';
+  return !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
 const AVATARS = [
   { id: 'orbit', label: 'Órbita', colors: ['#8ee6ed', '#387f99'], face: 'robot' },
   { id: 'nova', label: 'Nova', colors: ['#ffcf91', '#9c5e7e'], face: 'fox' },
@@ -110,9 +184,25 @@ function Icon({ name }: { name: IconName }) {
     chevron: <path d="m9 6 6 6-6 6"/>,
     chevronDown: <path d="m6 9 6 6 6-6"/>,
     smile: <><circle cx="12" cy="12" r="9"/><path d="M8.5 14.5c2 2 5 2 7 0M9 9.5h.01M15 9.5h.01"/></>,
-    qr: <><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM18 14h3M21 14v3M14 19h3v2M19 18h2v3"/></>
+    qr: <><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM18 14h3M21 14v3M14 19h3v2M19 18h2v3"/></>,
+    more: <><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none"/></>,
+    expand: <><path d="M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5"/></>,
+    pip: <><rect x="3" y="4" width="18" height="16" rx="2.5"/><rect x="12" y="11" width="7" height="6" rx="1.2"/></>,
+    wake: <><path d="M12 3v2M5.6 5.6 7 7M3 12h2M19 12h2M17 7l1.4-1.4"/><path d="M8 16a5 5 0 1 1 8 0l-1.2 1.3V20H9.2v-2.7L8 16ZM9.5 22h5"/></>,
+    motion: <><path d="M3 8.5c2.1-2.4 4.2-2.4 6.3 0s4.2 2.4 6.3 0 4.2-2.4 6.4 0"/><path d="M3 15.5c2.1-2.4 4.2-2.4 6.3 0s4.2 2.4 6.3 0 4.2-2.4 6.4 0"/></>
   };
   return <svg className={`room-icon icon icon-${name}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
+}
+
+function BrandMark() {
+  return (
+    <svg className="screenlink-brand-mark" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+      <path d="M15 10.5h18c6.1 0 10.5 4.4 10.5 10.5v6c0 6.1-4.4 10.5-10.5 10.5H15C8.9 37.5 4.5 33.1 4.5 27v-6C4.5 14.9 8.9 10.5 15 10.5Z" stroke="currentColor" strokeWidth="3.2"/>
+      <path d="M4.8 19H2.5v10h2.3M43.2 19h2.3v10h-2.3" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round"/>
+      <path d="M17.5 22.5h.01M30.5 22.5h.01" stroke="currentColor" strokeWidth="4.4" strokeLinecap="round"/>
+      <path d="M16.5 29.2c4.6 4.2 10.4 4.2 15 0" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round"/>
+    </svg>
+  );
 }
 
 function SegmentedSelector<T extends number>({ label, suffix, options, value, disabled = false, premium, fullWidth = false, onChange }: { label: string; suffix: string; options: T[]; value: T; disabled?: boolean; premium?: T; fullWidth?: boolean; onChange: (value: T) => void }) {
@@ -120,24 +210,12 @@ function SegmentedSelector<T extends number>({ label, suffix, options, value, di
   return <fieldset className={`profile-fieldset ${fullWidth ? 'is-full-width' : ''}`}><legend><span>{label}</span><small>{suffix}</small></legend><div className={`segmented-control ${premium === value ? 'is-premium-selected' : ''}`} style={{ '--active-index': activeIndex, '--option-count': options.length } as React.CSSProperties}>{premium === value && <span className="premium-particles" aria-hidden="true">{PREMIUM_PARTICLES.map(([x, y, size, duration, delay, jitter], index) => <i key={index} style={{ '--particle-x': x, '--particle-y': y, '--particle-size': size, '--particle-duration': duration, '--particle-delay': delay, '--particle-jitter': jitter } as React.CSSProperties}/>)}</span>}{options.map(option => <button key={option} className={`${option === value ? 'is-active' : ''} ${option === premium ? 'is-premium' : ''}`} type="button" disabled={disabled} onClick={() => onChange(option)}>{option}{label === 'Resolução' ? 'p' : ''}</button>)}</div></fieldset>;
 }
 
-function MascotMark() {
-  return (
-    <svg className="room-mascot" viewBox="0 0 64 64" aria-hidden="true">
-      <path d="M32 13V8" fill="none" stroke="#79ced9" strokeWidth="3" strokeLinecap="round"/><circle cx="32" cy="6" r="3" fill="#a6edf2"/>
-      <path d="M17 22c-5-4-10-4-13-1 5 1 7 5 8 10l5-9Zm30 0c5-4 10-4 13-1-5 1-7 5-8 10l-5-9Z" fill="#58b7c8"/>
-      <path d="M17 17c8-5 22-5 30 0 8 5 11 15 9 25-2 9-7 14-15 16-5 1-13 1-18 0-8-2-13-7-15-16-2-10 1-20 9-25Z" fill="#72cfdb" stroke="#b9f0f3" strokeWidth="2"/>
-      <ellipse cx="24" cy="35" rx="3.2" ry="3.6" fill="#082b35"/><ellipse cx="40" cy="35" rx="3.2" ry="3.6" fill="#082b35"/>
-      <path d="M26.5 43c3.6 3.5 7.4 3.5 11 0" fill="none" stroke="#082b35" strokeWidth="2.4" strokeLinecap="round"/><circle cx="18.5" cy="43" r="2.3" fill="#f3a09c"/><circle cx="45.5" cy="43" r="2.3" fill="#f3a09c"/>
-    </svg>
-  );
-}
-
 function Avatar({ avatar, name, speaking = false, leader = false, size = 'normal' }: { avatar: string; name: string; speaking?: boolean; leader?: boolean; size?: 'small' | 'normal' | 'large' }) {
+  const gradientId = `avatar-bg-${useId().replace(/:/g, '')}`;
   if (/^data:image\/(?:jpeg|png|webp);base64,/i.test(avatar)) {
     return <span className={`preset-avatar avatar-${size} custom-avatar ${speaking ? 'is-speaking' : ''}`} title={name}><img src={avatar} alt="" draggable={false}/>{leader && <span className="avatar-crown" aria-label="Líder da sala"><Icon name="crown"/></span>}</span>;
   }
   const preset = AVATARS.find(item => item.id === avatar) ?? AVATARS[0];
-  const gradientId = `avatar-bg-${preset.id}`;
   return (
     <span className={`preset-avatar avatar-${size} ${speaking ? 'is-speaking' : ''}`} style={{ '--avatar-a': preset.colors[0], '--avatar-b': preset.colors[1] } as React.CSSProperties} title={name}>
       <svg viewBox="0 0 64 64" aria-hidden="true">
@@ -198,12 +276,96 @@ function normalizeName(value: string) {
   return value.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 28) || 'Você';
 }
 
+function normalizeChatText(value: unknown) {
+  return typeof value === 'string'
+    ? value.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim().slice(0, 1_000)
+    : '';
+}
+
+function normalizeChatId(value: unknown) {
+  const id = typeof value === 'string' ? value.slice(0, 200) : '';
+  return /^[a-z0-9._:-]{1,200}$/i.test(id) ? id : '';
+}
+
+function normalizeChatTimestamp(value: unknown) {
+  const timestamp = Number(value);
+  const now = Date.now();
+  return Number.isFinite(timestamp) && timestamp > 0 && Math.abs(timestamp - now) <= 86_400_000 ? timestamp : now;
+}
+
+function normalizeChatWireMessage(value: unknown, sender?: { id: string; name: string }): ChatMessage | null {
+  if (!value || typeof value !== 'object') return null;
+  const incoming = value as Partial<ChatWireMessage>;
+  const id = normalizeChatId(incoming.id);
+  const text = normalizeChatText(incoming.text);
+  const senderId = sender?.id || normalizeChatId(incoming.senderId);
+  const senderName = sender?.name || normalizeName(String(incoming.senderName || 'Participante'));
+  if (!id || !text || !senderId) return null;
+  return { id, senderId, senderName, text, sentAt: normalizeChatTimestamp(incoming.sentAt) };
+}
+
+function chatWireMessage(message: ChatMessage): ChatWireMessage {
+  return { id: message.id, senderId: message.senderId, senderName: message.senderName, text: message.text, sentAt: message.sentAt };
+}
+
+function chatPayloadSize(serialized: string) {
+  return new TextEncoder().encode(serialized).byteLength;
+}
+
+function sendChatChannelPayload(channel: RTCDataChannel | null, payload: ChatChannelPayload | ChatWireMessage) {
+  if (channel?.readyState !== 'open' || channel.bufferedAmount > CHAT_BUFFER_LIMIT) return false;
+  try {
+    const serialized = JSON.stringify(payload);
+    if (chatPayloadSize(serialized) > CHAT_CHANNEL_PAYLOAD_LIMIT) return false;
+    channel.send(serialized);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function sendChatHistory(channel: RTCDataChannel, messages: ChatMessage[]) {
+  let history = messages
+    .filter(message => !message.system && message.delivery !== 'pending' && message.delivery !== 'failed')
+    .slice(-CHAT_LIMIT)
+    .map(chatWireMessage);
+  let serialized = JSON.stringify({ type: 'chat-history', messages: history } satisfies ChatChannelPayload);
+  while (history.length > 1 && chatPayloadSize(serialized) > CHAT_HISTORY_PAYLOAD_LIMIT) {
+    history = history.slice(1);
+    serialized = JSON.stringify({ type: 'chat-history', messages: history } satisfies ChatChannelPayload);
+  }
+  if (!history.length || chatPayloadSize(serialized) > CHAT_HISTORY_PAYLOAD_LIMIT || channel.readyState !== 'open' || channel.bufferedAmount > CHAT_BUFFER_LIMIT) return false;
+  try {
+    channel.send(serialized);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function renderChatText(text: string) {
+  return text.split(/(https?:\/\/[^\s<>"']+)/gi).map((part, index) => /^https?:\/\//i.test(part)
+    ? <a key={`${part}-${index}`} href={part} target="_blank" rel="noreferrer noopener">{part}</a>
+    : part
+  );
+}
+
+function resizeChatInput(input: HTMLTextAreaElement | null) {
+  if (!input) return;
+  input.style.height = 'auto';
+  input.style.height = `${Math.min(input.scrollHeight, 96)}px`;
+}
+
 function normalizeStatus(value: string) {
   return value.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 64) || 'Disponível';
 }
 
 function isMobileDevice() {
-  return window.matchMedia(MOBILE_MEDIA_QUERY).matches;
+  return window.matchMedia(MOBILE_DEVICE_QUERY).matches;
+}
+
+function usesCompactLayout() {
+  return window.matchMedia(COMPACT_LAYOUT_QUERY).matches;
 }
 
 function detectVoiceSettingSupport(): VoiceSettingSupport {
@@ -276,7 +438,7 @@ async function configureScreenSender(sender: RTCRtpSender | null, resolution: Re
 
 function loadProfile(): RoomProfile {
   try {
-    const stored = JSON.parse(localStorage.getItem(PROFILE_KEY) || '{}') as Partial<RoomProfile>;
+    const stored = JSON.parse(readStorage('localStorage', PROFILE_KEY) || '{}') as Partial<RoomProfile>;
     return {
       name: normalizeName(String(stored.name || 'Você')),
       avatar: normalizeAvatar(stored.avatar),
@@ -290,7 +452,7 @@ function loadProfile(): RoomProfile {
 
 function loadOwnerSession(): Session | null {
   try {
-    const stored = JSON.parse(localStorage.getItem(OWNER_ROOM_KEY) || 'null') as Session | null;
+    const stored = JSON.parse(readStorage('localStorage', OWNER_ROOM_KEY) || 'null') as Session | null;
     return stored?.invite?.roomId && stored.invite.token && stored.ownerKey ? stored : null;
   } catch {
     return null;
@@ -303,14 +465,23 @@ function randomSecret(length = 32) {
   return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-function roomCode(invite: Invite) {
-  return `${invite.roomId}.${invite.token}`;
-}
-
-function groupInviteUrl(invite: Invite) {
-  const url = new URL(window.location.origin);
+function groupInviteUrl(invite: Invite, origin = window.location.origin) {
+  const url = new URL(origin);
   url.hash = new URLSearchParams({ room: invite.roomId, key: invite.token }).toString();
   return url.toString();
+}
+
+function normalizedShareOrigin(value: unknown) {
+  try {
+    const url = new URL(String(value || ''));
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : window.location.origin;
+  } catch {
+    return window.location.origin;
+  }
+}
+
+function hasTurnServer(servers: IceServerConfig[]) {
+  return servers.some(server => (Array.isArray(server.urls) ? server.urls : [server.urls]).some(url => /^turns?:/i.test(url)));
 }
 
 function parseRoomEntry(value: string): RoomEntry | null {
@@ -324,14 +495,20 @@ function parseRoomEntry(value: string): RoomEntry | null {
     return null;
   }
   const shortCode = trimmed.toUpperCase().replace(/\s+/g, '');
-  if (/^[A-Z2-9]{4}$/.test(shortCode)) return { kind: 'code', code: shortCode };
+  if (/^[A-Z2-9]{6,8}$/.test(shortCode)) return { kind: 'code', code: shortCode };
   const [roomId, token, extra] = trimmed.split('.');
   if (extra || !/^[A-Za-z0-9_-]{12,64}$/.test(roomId || '') || !/^[A-Za-z0-9_-]{32,128}$/.test(token || '')) return null;
   return { kind: 'invite', invite: { roomId, token } };
 }
 
 function send(socket: WebSocket | null, payload: object) {
-  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
+  if (socket?.readyState !== WebSocket.OPEN) return false;
+  try {
+    socket.send(JSON.stringify(payload));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function mediaStreamWith(...tracks: Array<MediaStreamTrack | null | undefined>) {
@@ -365,7 +542,7 @@ async function readPeerRttMs(pc: RTCPeerConnection): Promise<number | null> {
   return rtt === null ? null : Math.round(rtt);
 }
 
-function ScreenTile({ stream, name, local }: { stream: MediaStream; name: string; local?: boolean; playbackEnabled?: boolean; volume?: number; outputDeviceId?: string }) {
+function ScreenTile({ stream, name, local }: { stream: MediaStream; name: string; local?: boolean }) {
   const ref = useRef<HTMLVideoElement>(null);
   useEffect(() => {
     const video = ref.current;
@@ -414,32 +591,43 @@ export default function RoomApp() {
   const [playbackEnabled, setPlaybackEnabled] = useState(true);
   const playbackEnabledRef = useRef(true);
   const [speakingIds, setSpeakingIds] = useState<Set<string>>(() => new Set());
-  const [chatOpen, setChatOpen] = useState(() => !isMobileDevice());
+  const [chatOpen, setChatOpen] = useState(() => !usesCompactLayout());
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const chatMessagesRef = useRef<ChatMessage[]>([]);
   const seenMessageIdsRef = useRef(new Set<string>());
-  const ownMessageIdsRef = useRef(new Set<string>());
+  const pendingChatMessagesRef = useRef(new Map<string, PendingChatMessage>());
   const chatOpenRef = useRef(chatOpen);
+  const chatStickToBottomRef = useRef(true);
   const [unreadMessages, setUnreadMessages] = useState(0);
+  const [newMessagesBelow, setNewMessagesBelow] = useState(0);
   const [chatValue, setChatValue] = useState('');
   const [emojiOpen, setEmojiOpen] = useState(false);
+  const [chatSettingsOpen, setChatSettingsOpen] = useState(false);
+  const [chatAppearance, setChatAppearance] = useState<ChatAppearance>(loadChatAppearance);
   const [profileOpen, setProfileOpen] = useState(false);
-  const [inviteOpen, setInviteOpen] = useState(false);
   const [qrOpen, setQrOpen] = useState(false);
   const [qrCode, setQrCode] = useState('');
   const [controlsOpen, setControlsOpen] = useState(false);
   const [copied, setCopied] = useState<'code' | 'link' | ''>('');
+  const [shareOrigin, setShareOrigin] = useState(window.location.origin);
+  const [turnAvailable, setTurnAvailable] = useState(false);
   const [mediaLatency, setMediaLatency] = useState<number | null>(null);
   const [peerVersion, setPeerVersion] = useState(0);
-  const [mobile, setMobile] = useState(isMobileDevice);
+  const [mobile, setMobile] = useState(usesCompactLayout);
   const [audioMenuOpen, setAudioMenuOpen] = useState(false);
   const [screenMenuOpen, setScreenMenuOpen] = useState(false);
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [leaveMenuOpen, setLeaveMenuOpen] = useState(false);
+  const [keepAwake, setKeepAwake] = useState(() => readStorage('localStorage', 'screenlink-keep-awake-v1') === 'true');
+  const [wakeLockActive, setWakeLockActive] = useState(false);
   const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
   const [voiceSettingSupport, setVoiceSettingSupport] = useState(detectVoiceSettingSupport);
   const [voiceSettingPending, setVoiceSettingPending] = useState<VoiceSettingKey | null>(null);
   const [voiceSettingFeedback, setVoiceSettingFeedback] = useState('');
-  const [interfaceSoundsEnabled, setInterfaceSoundsEnabled] = useState(() => localStorage.getItem(INTERFACE_SOUNDS_KEY) !== 'false');
+  const [interfaceSoundsEnabled, setInterfaceSoundsEnabled] = useState(() => readStorage('localStorage', INTERFACE_SOUNDS_KEY) !== 'false');
+  const [animationsEnabled, setAnimationsEnabled] = useState(loadMotionPreference);
+  const [microphonePending, setMicrophonePending] = useState(false);
+  const [screenSharePending, setScreenSharePending] = useState(false);
   const [audioSettings, setAudioSettings] = useState<AudioSettings>(() => ({
     inputDeviceId: '',
     outputDeviceId: '',
@@ -449,6 +637,7 @@ export default function RoomApp() {
     noiseSuppression: voiceSettingSupport.noiseSuppression,
     autoGainControl: voiceSettingSupport.autoGainControl
   }));
+  const [participantVolumes, setParticipantVolumes] = useState<Record<string, number>>({});
   const [screenVolumes, setScreenVolumes] = useState<Record<string, number>>({});
 
   const socketRef = useRef<WebSocket | null>(null);
@@ -467,6 +656,7 @@ export default function RoomApp() {
   const automaticQualityRef = useRef(automaticQuality);
   const adaptiveBitrateRef = useRef(adaptiveBitrate);
   const bitrateMbpsRef = useRef(bitrateMbps);
+  const participantVolumesRef = useRef(participantVolumes);
   const screenVolumesRef = useRef(screenVolumes);
   const interfaceSoundsEnabledRef = useRef(interfaceSoundsEnabled);
   const callSoundConnectedRef = useRef(false);
@@ -474,16 +664,25 @@ export default function RoomApp() {
   const dockRef = useRef<HTMLDivElement>(null);
   const profileBarRef = useRef<HTMLButtonElement>(null);
   const profilePopoverRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<HTMLElement>(null);
   const chatLogRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const emojiPickerRef = useRef<HTMLDivElement>(null);
+  const chatSettingsRef = useRef<HTMLDivElement>(null);
   const reconnectTimerRef = useRef<number | null>(null);
+  const reconnectNowRef = useRef<(() => void) | null>(null);
+  const wakeLockRef = useRef<ScreenWakeLock | null>(null);
+  const screenSharePendingRef = useRef(false);
+  const microphonePendingRef = useRef(false);
+  const mediaRequestEpochRef = useRef(0);
+  const microphoneRequestIdRef = useRef(0);
+  const screenShareRequestIdRef = useRef(0);
   const disposedRef = useRef(false);
 
   useEffect(() => {
     profileRef.current = profile;
     const localAvatar = AVATARS.some(item => item.id === profile.avatar) ? profile.avatar : 'orbit';
-    localStorage.setItem(PROFILE_KEY, JSON.stringify({ ...profile, avatar: localAvatar }));
+    writeStorage('localStorage', PROFILE_KEY, JSON.stringify({ ...profile, avatar: localAvatar }));
   }, [profile]);
   useEffect(() => { sessionRef.current = session; }, [session]);
   useEffect(() => { participantsRef.current = participants; }, [participants]);
@@ -491,26 +690,51 @@ export default function RoomApp() {
   useEffect(() => { sharingRef.current = sharing; }, [sharing]);
   useEffect(() => { playbackEnabledRef.current = playbackEnabled; }, [playbackEnabled]);
   useEffect(() => { chatMessagesRef.current = chatMessages; }, [chatMessages]);
+  useEffect(() => {
+    writeStorage('localStorage', CHAT_APPEARANCE_KEY, JSON.stringify(chatAppearance));
+  }, [chatAppearance]);
   useEffect(() => { audioSettingsRef.current = audioSettings; }, [audioSettings]);
   useEffect(() => { resolutionRef.current = resolution; }, [resolution]);
   useEffect(() => { fpsRef.current = fps; }, [fps]);
   useEffect(() => { automaticQualityRef.current = automaticQuality; }, [automaticQuality]);
   useEffect(() => { adaptiveBitrateRef.current = adaptiveBitrate; }, [adaptiveBitrate]);
   useEffect(() => { bitrateMbpsRef.current = bitrateMbps; }, [bitrateMbps]);
+  useEffect(() => { participantVolumesRef.current = participantVolumes; }, [participantVolumes]);
   useEffect(() => { screenVolumesRef.current = screenVolumes; }, [screenVolumes]);
   useEffect(() => {
     interfaceSoundsEnabledRef.current = interfaceSoundsEnabled;
-    localStorage.setItem(INTERFACE_SOUNDS_KEY, String(interfaceSoundsEnabled));
+    writeStorage('localStorage', INTERFACE_SOUNDS_KEY, String(interfaceSoundsEnabled));
   }, [interfaceSoundsEnabled]);
+  useEffect(() => {
+    writeStorage('localStorage', INTERFACE_MOTION_KEY, String(animationsEnabled));
+  }, [animationsEnabled]);
   useEffect(() => { profileNameDraftRef.current = profileNameDraft; }, [profileNameDraft]);
   useEffect(() => { profileStatusDraftRef.current = profileStatusDraft; }, [profileStatusDraft]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     chatOpenRef.current = chatOpen;
-    if (chatOpen) setUnreadMessages(0);
+    if (!chatOpen) return;
+    chatStickToBottomRef.current = true;
+    setUnreadMessages(0);
+    setNewMessagesBelow(0);
+    const log = chatLogRef.current;
+    if (log) log.scrollTop = log.scrollHeight;
   }, [chatOpen]);
 
   useEffect(() => {
-    const query = window.matchMedia(MOBILE_MEDIA_QUERY);
+    let cancelled = false;
+    void fetch('/runtime-config', { cache: 'no-store' })
+      .then(response => response.ok ? response.json() as Promise<RuntimeConfig> : Promise.reject(new Error('runtime config unavailable')))
+      .then(config => {
+        if (cancelled) return;
+        setShareOrigin(normalizedShareOrigin(config.viewerOrigin));
+        setTurnAvailable(Boolean(config.turnEnabled));
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    const query = window.matchMedia(COMPACT_LAYOUT_QUERY);
     const syncViewport = () => setMobile(query.matches);
     syncViewport();
     query.addEventListener('change', syncViewport);
@@ -561,17 +785,18 @@ export default function RoomApp() {
   }, [audioMenuOpen, microphoneEnabled]);
 
   useEffect(() => {
-    if (!audioMenuOpen && !screenMenuOpen && !leaveMenuOpen) return;
+    if (!audioMenuOpen && !screenMenuOpen && !moreMenuOpen && !leaveMenuOpen) return;
     const dismiss = (event: PointerEvent) => {
       if (!dockRef.current?.contains(event.target as Node)) {
         setAudioMenuOpen(false);
         setScreenMenuOpen(false);
+        setMoreMenuOpen(false);
         setLeaveMenuOpen(false);
       }
     };
     document.addEventListener('pointerdown', dismiss);
     return () => document.removeEventListener('pointerdown', dismiss);
-  }, [audioMenuOpen, leaveMenuOpen, screenMenuOpen]);
+  }, [audioMenuOpen, leaveMenuOpen, moreMenuOpen, screenMenuOpen]);
 
   useEffect(() => {
     if (!emojiOpen) return;
@@ -583,20 +808,29 @@ export default function RoomApp() {
   }, [emojiOpen]);
 
   useEffect(() => {
+    if (!chatSettingsOpen) return;
+    const dismiss = (event: PointerEvent) => {
+      if (!chatSettingsRef.current?.contains(event.target as Node)) setChatSettingsOpen(false);
+    };
+    document.addEventListener('pointerdown', dismiss);
+    return () => document.removeEventListener('pointerdown', dismiss);
+  }, [chatSettingsOpen]);
+
+  useEffect(() => {
     if (!session?.invite.token) {
       setQrCode('');
       setQrOpen(false);
       return;
     }
     let cancelled = false;
-    void QRCode.toDataURL(groupInviteUrl(session.invite), {
+    void QRCode.toDataURL(groupInviteUrl(session.invite, shareOrigin), {
       width: 720,
       margin: 2,
       color: { dark: '#071013', light: '#f7fbfc' },
       errorCorrectionLevel: 'M'
     }).then(value => { if (!cancelled) setQrCode(value); }).catch(() => { if (!cancelled) setQrCode(''); });
     return () => { cancelled = true; };
-  }, [session?.invite.roomId, session?.invite.token]);
+  }, [session?.invite.roomId, session?.invite.token, shareOrigin]);
 
   useEffect(() => {
     if (!profileOpen) return;
@@ -612,44 +846,195 @@ export default function RoomApp() {
     return () => document.removeEventListener('pointerdown', dismiss);
   }, [profileOpen]);
 
-  useLayoutEffect(() => {
-    const log = chatLogRef.current;
-    if (!log || !chatOpen) return;
-    log.scrollTop = log.scrollHeight;
-  }, [chatMessages, chatOpen, chatValue]);
+  useEffect(() => {
+    const dismissOverlays = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      if (qrOpen) {
+        setQrOpen(false);
+        return;
+      }
+      if (profileOpen) {
+        setProfileOpen(false);
+        profileNameDraftRef.current = profileRef.current.name;
+        profileStatusDraftRef.current = profileRef.current.status;
+        setProfileNameDraft(profileRef.current.name);
+        setProfileStatusDraft(profileRef.current.status);
+        return;
+      }
+      if (emojiOpen) {
+        setEmojiOpen(false);
+        return;
+      }
+      if (chatSettingsOpen) {
+        setChatSettingsOpen(false);
+        return;
+      }
+      if (audioMenuOpen || screenMenuOpen || moreMenuOpen || leaveMenuOpen) {
+        setAudioMenuOpen(false);
+        setScreenMenuOpen(false);
+        setMoreMenuOpen(false);
+        setLeaveMenuOpen(false);
+        return;
+      }
+      if (controlsOpen) {
+        setControlsOpen(false);
+        return;
+      }
+      if (chatOpen) setChatOpen(false);
+    };
+    document.addEventListener('keydown', dismissOverlays);
+    return () => document.removeEventListener('keydown', dismissOverlays);
+  }, [audioMenuOpen, chatOpen, chatSettingsOpen, controlsOpen, emojiOpen, leaveMenuOpen, moreMenuOpen, profileOpen, qrOpen, screenMenuOpen]);
 
-  const appendMessage = useCallback((message: ChatMessage, own = false) => {
-    if (own) ownMessageIdsRef.current.add(message.id);
+  const scrollChatToLatest = useCallback((smooth = false) => {
+    const log = chatLogRef.current;
+    if (!log) return;
+    chatStickToBottomRef.current = true;
+    log.scrollTo({ top: log.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
+    setNewMessagesBelow(0);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!chatOpen || !chatStickToBottomRef.current) return;
+    scrollChatToLatest(false);
+  }, [chatMessages.length, chatOpen, scrollChatToLatest]);
+
+  const appendMessage = useCallback((message: ChatMessage) => {
     if (seenMessageIdsRef.current.has(message.id)) return;
     seenMessageIdsRef.current.add(message.id);
-    if (!own && !message.system && !chatOpenRef.current) setUnreadMessages(current => Math.min(99, current + 1));
+    const own = message.senderId === selfIdRef.current;
+    if (!own && !message.system) {
+      if (!chatOpenRef.current) setUnreadMessages(current => Math.min(99, current + 1));
+      else if (!chatStickToBottomRef.current) setNewMessagesBelow(current => Math.min(99, current + 1));
+    }
     setChatMessages(current => {
       const next = [...current, message].slice(-CHAT_LIMIT);
+      chatMessagesRef.current = next;
       if (seenMessageIdsRef.current.size > CHAT_LIMIT * 2) {
         const retained = new Set(next.map(item => item.id));
         for (const id of seenMessageIdsRef.current) if (!retained.has(id)) seenMessageIdsRef.current.delete(id);
-        for (const id of ownMessageIdsRef.current) if (!retained.has(id)) ownMessageIdsRef.current.delete(id);
       }
       return next;
     });
   }, []);
+
+  const mergeChatHistory = useCallback((history: ChatMessage[]) => {
+    const incoming = history.filter(message => !seenMessageIdsRef.current.has(message.id));
+    if (!incoming.length) return;
+    for (const message of incoming) seenMessageIdsRef.current.add(message.id);
+    setChatMessages(current => {
+      const merged = [...current, ...incoming.map(message => message.senderId === selfIdRef.current ? { ...message, delivery: 'delivered' as const } : message)]
+        .sort((left, right) => left.sentAt - right.sentAt || left.id.localeCompare(right.id))
+        .slice(-CHAT_LIMIT);
+      chatMessagesRef.current = merged;
+      const retained = new Set(merged.map(message => message.id));
+      for (const id of seenMessageIdsRef.current) if (!retained.has(id)) seenMessageIdsRef.current.delete(id);
+      return merged;
+    });
+  }, []);
+
+  const updateChatDelivery = useCallback((messageId: string, delivery: ChatDelivery) => {
+    setChatMessages(current => {
+      let changed = false;
+      const next = current.map(message => {
+        if (message.id !== messageId || message.delivery === delivery) return message;
+        changed = true;
+        return { ...message, delivery };
+      });
+      if (changed) chatMessagesRef.current = next;
+      return changed ? next : current;
+    });
+  }, []);
+
+  const acknowledgeChatDelivery = useCallback((messageId: string, peerId: string) => {
+    const pending = pendingChatMessagesRef.current.get(messageId);
+    if (!pending || !pending.awaiting.delete(peerId)) return;
+    if (pending.awaiting.size) return;
+    pendingChatMessagesRef.current.delete(messageId);
+    updateChatDelivery(messageId, 'delivered');
+  }, [updateChatDelivery]);
+
+  const settleDepartedChatRecipient = useCallback((peerId: string) => {
+    for (const [messageId, pending] of pendingChatMessagesRef.current) {
+      if (!pending.awaiting.delete(peerId) || pending.awaiting.size) continue;
+      pendingChatMessagesRef.current.delete(messageId);
+      updateChatDelivery(messageId, 'sent');
+    }
+  }, [updateChatDelivery]);
+
+  const failPendingChat = useCallback(() => {
+    const messageIds = [...pendingChatMessagesRef.current.keys()];
+    pendingChatMessagesRef.current.clear();
+    for (const messageId of messageIds) updateChatDelivery(messageId, 'failed');
+  }, [updateChatDelivery]);
+
+  const transmitPendingChat = useCallback((messageId: string, force = false) => {
+    const pending = pendingChatMessagesRef.current.get(messageId);
+    if (!pending) return;
+    const now = Date.now();
+    if (!force && now - pending.lastAttemptAt < CHAT_RETRY_INTERVAL_MS) return;
+
+    const connectedIds = new Set(Object.values(participantsRef.current)
+      .filter(participant => participant.connected && participant.id !== selfIdRef.current)
+      .map(participant => participant.id));
+    for (const peerId of pending.awaiting) if (!connectedIds.has(peerId)) pending.awaiting.delete(peerId);
+    if (!pending.awaiting.size) {
+      pendingChatMessagesRef.current.delete(messageId);
+      updateChatDelivery(messageId, 'sent');
+      return;
+    }
+
+    pending.attempts += 1;
+    pending.lastAttemptAt = now;
+    let transportAccepted = false;
+    let missingDirectChannel = false;
+    // O formato cru mantém compatibilidade durante deploys em que uma aba ainda roda a versão anterior.
+    const payload = chatWireMessage(pending.message);
+    for (const peerId of pending.awaiting) {
+      const channel = peersRef.current.get(peerId)?.chatChannel ?? null;
+      if (sendChatChannelPayload(channel, payload)) transportAccepted = true;
+      else missingDirectChannel = true;
+    }
+    if (missingDirectChannel && !pending.fallbackAccepted) {
+      pending.fallbackAccepted = send(socketRef.current, { type: 'chat-fallback', message: chatWireMessage(pending.message) });
+      transportAccepted ||= pending.fallbackAccepted;
+    }
+    if (transportAccepted || pending.fallbackAccepted) updateChatDelivery(messageId, 'sent');
+    if (now - pending.firstAttemptAt >= CHAT_FAILURE_TIMEOUT_MS) {
+      pendingChatMessagesRef.current.delete(messageId);
+      updateChatDelivery(messageId, 'failed');
+    }
+  }, [updateChatDelivery]);
+
+  const flushPendingChat = useCallback(() => {
+    for (const messageId of pendingChatMessagesRef.current.keys()) transmitPendingChat(messageId, true);
+  }, [transmitPendingChat]);
+
+  useEffect(() => {
+    if (!session) return;
+    const timer = window.setInterval(() => flushPendingChat(), CHAT_RETRY_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [flushPendingChat, session]);
 
   const systemMessage = useCallback((text: string) => {
     appendMessage({ id: `system-${Date.now()}-${randomSecret(4)}`, senderId: 'system', senderName: '', text, sentAt: Date.now(), system: true });
   }, [appendMessage]);
 
   const updateParticipant = useCallback((participant: RoomParticipant) => {
-    setParticipants(current => ({ ...current, [participant.id]: participant }));
+    const next = { ...participantsRef.current, [participant.id]: participant };
+    participantsRef.current = next;
+    setParticipants(next);
   }, []);
 
   const updateSelfMediaState = useCallback((next: { sharing?: boolean; microphoneEnabled?: boolean } = {}) => {
     const id = selfIdRef.current;
     if (id) {
-      setParticipants(current => {
-        const self = current[id];
-        if (!self) return current;
-        return { ...current, [id]: { ...self, sharing: next.sharing ?? sharingRef.current, microphoneEnabled: next.microphoneEnabled ?? microphoneEnabledRef.current } };
-      });
+      const self = participantsRef.current[id];
+      if (self) {
+        const updated = { ...participantsRef.current, [id]: { ...self, sharing: next.sharing ?? sharingRef.current, microphoneEnabled: next.microphoneEnabled ?? microphoneEnabledRef.current } };
+        participantsRef.current = updated;
+        setParticipants(updated);
+      }
     }
     send(socketRef.current, {
       type: 'participant-state',
@@ -659,13 +1044,20 @@ export default function RoomApp() {
     });
   }, []);
 
+  useEffect(() => {
+    const id = selfIdRef.current;
+    if (!profileStorageReady || !id || !participantsRef.current[id]) return;
+    updateParticipant({ ...participantsRef.current[id], ...profileRef.current });
+    updateSelfMediaState();
+  }, [profile, profileStorageReady, updateParticipant, updateSelfMediaState]);
+
   const playSound = useCallback((name: InterfaceSoundName) => {
     if (!interfaceSoundsEnabledRef.current) return;
     playCallSound(name, audioSettingsRef.current.outputVolume / 100);
   }, []);
 
   useEffect(() => {
-    const device: RoomProfile['device'] = mobile ? 'mobile' : 'desktop';
+    const device: RoomProfile['device'] = isMobileDevice() ? 'mobile' : 'desktop';
     if (profileRef.current.device === device) return;
     const updated = { ...profileRef.current, device };
     profileRef.current = updated;
@@ -677,33 +1069,60 @@ export default function RoomApp() {
 
   const attachChatChannel = useCallback((record: PeerRecord, channel: RTCDataChannel) => {
     record.chatChannel = channel;
+    let receivedWindowStartedAt = Date.now();
+    let receivedInWindow = 0;
+    const opened = () => {
+      sendChatHistory(channel, chatMessagesRef.current);
+      flushPendingChat();
+    };
+    channel.onopen = opened;
     channel.onmessage = event => {
-      if (typeof event.data !== 'string') return;
+      if (typeof event.data !== 'string' || chatPayloadSize(event.data) > CHAT_CHANNEL_PAYLOAD_LIMIT) return;
+      const now = Date.now();
+      if (now - receivedWindowStartedAt >= 10_000) {
+        receivedWindowStartedAt = now;
+        receivedInWindow = 0;
+      }
+      receivedInWindow += 1;
+      if (receivedInWindow > 60) return;
       try {
-        const incoming = JSON.parse(event.data) as Partial<ChatMessage>;
-        const id = typeof incoming.id === 'string' ? incoming.id.slice(0, 200) : '';
-        const text = typeof incoming.text === 'string' ? incoming.text.trim().slice(0, 1_000) : '';
-        if (!id || !text) return;
-        const sentAt = Number(incoming.sentAt);
+        const incoming = JSON.parse(event.data) as Partial<ChatChannelPayload> & Partial<ChatWireMessage>;
+        if (incoming.type === 'chat-ack') {
+          const messageId = normalizeChatId(incoming.messageId);
+          if (messageId) acknowledgeChatDelivery(messageId, record.id);
+          return;
+        }
+        if (incoming.type === 'chat-history') {
+          if (!Array.isArray(incoming.messages)) return;
+          const history = incoming.messages.slice(-CHAT_LIMIT)
+            .map(message => normalizeChatWireMessage(message))
+            .filter((message): message is ChatMessage => Boolean(message));
+          mergeChatHistory(history);
+          return;
+        }
         const participant = participantsRef.current[record.id];
-        appendMessage({
-          id,
-          senderId: record.id,
-          senderName: participant?.name || 'Participante',
-          text,
-          sentAt: Number.isFinite(sentAt) && sentAt > 0 ? sentAt : Date.now()
+        const message = normalizeChatWireMessage(incoming.type === 'chat-message' ? incoming.message : incoming, {
+          id: record.id,
+          name: participant?.name || 'Participante'
         });
+        if (!message) return;
+        appendMessage(message);
+        if (!sendChatChannelPayload(channel, { type: 'chat-ack', messageId: message.id })) {
+          send(socketRef.current, { type: 'chat-ack', targetId: record.id, messageId: message.id });
+        }
       } catch {
         // Mensagens inválidas não afetam a chamada.
       }
     };
     channel.onclose = () => { if (record.chatChannel === channel) record.chatChannel = null; };
-  }, [appendMessage]);
+    if (channel.readyState === 'open') queueMicrotask(opened);
+  }, [acknowledgeChatDelivery, appendMessage, flushPendingChat, mergeChatHistory]);
 
   const destroyPeer = useCallback((peerId: string) => {
     const record = peersRef.current.get(peerId);
     if (!record) return;
     peersRef.current.delete(peerId);
+    if (record.recoveryTimer !== null) window.clearTimeout(record.recoveryTimer);
     record.chatChannel?.close();
     record.callAudio?.remove();
     record.screenAudio?.remove();
@@ -711,8 +1130,43 @@ export default function RoomApp() {
     record.pc.onicecandidate = null;
     record.pc.onconnectionstatechange = null;
     record.pc.ondatachannel = null;
+    if (record.screenVideoReceiver) {
+      record.screenVideoReceiver.track.onmute = null;
+      record.screenVideoReceiver.track.onunmute = null;
+    }
     record.pc.close();
     setPeerVersion(version => version + 1);
+  }, []);
+
+  const markPlaybackBlocked = useCallback(() => {
+    if (!playbackEnabledRef.current) return;
+    playbackEnabledRef.current = false;
+    setPlaybackEnabled(false);
+    for (const peer of peersRef.current.values()) {
+      if (peer.callAudio) peer.callAudio.muted = true;
+      if (peer.screenAudio) peer.screenAudio.muted = true;
+    }
+    setError('O navegador bloqueou o áudio automático. Clique em Áudio para ouvir a chamada.');
+  }, []);
+
+  const restartPeerIce = useCallback(async (record: PeerRecord) => {
+    if (record.makingOffer || record.pc.connectionState === 'closed' || record.pc.signalingState !== 'stable') return;
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    record.makingOffer = true;
+    record.recoveryAttempts += 1;
+    try {
+      record.pc.restartIce();
+      const offer = await record.pc.createOffer({ iceRestart: true });
+      await record.pc.setLocalDescription(offer);
+      send(socket, { type: 'peer-signal', targetId: record.id, kind: 'offer', sdp: record.pc.localDescription ?? offer });
+    } catch {
+      if (record.recoveryAttempts >= 2 && socketRef.current?.readyState === WebSocket.OPEN) {
+        socketRef.current.close(4101, 'Recreate peer connection');
+      }
+    } finally {
+      record.makingOffer = false;
+    }
   }, []);
 
   const syncPeerMedia = useCallback(async (record: PeerRecord) => {
@@ -748,14 +1202,14 @@ export default function RoomApp() {
       const audioElement = document.createElement('audio');
       audioElement.autoplay = true;
       audioElement.muted = !playbackEnabledRef.current;
-      audioElement.volume = audioSettingsRef.current.outputVolume / 100;
+      audioElement.volume = (audioSettingsRef.current.outputVolume / 100) * ((participantVolumesRef.current[record.id] ?? 100) / 100);
       const sinkable = audioElement as HTMLAudioElement & { setSinkId?: (deviceId: string) => Promise<void> };
       if (audioSettingsRef.current.outputDeviceId && sinkable.setSinkId) void sinkable.setSinkId(audioSettingsRef.current.outputDeviceId).catch(() => undefined);
       audioElement.srcObject = mediaStreamWith(callTrack);
       audioElement.dataset.roomPeer = record.id;
       document.body.append(audioElement);
       record.callAudio = audioElement;
-      if (playbackEnabledRef.current) void audioElement.play().catch(() => undefined);
+      if (playbackEnabledRef.current) void audioElement.play().catch(markPlaybackBlocked);
     }
     const screenAudioTrack = screenAudio.receiver.track;
     if (!record.screenAudio || !(record.screenAudio.srcObject instanceof MediaStream) || record.screenAudio.srcObject.getAudioTracks()[0]?.id !== screenAudioTrack.id) {
@@ -770,15 +1224,15 @@ export default function RoomApp() {
       audioElement.dataset.roomScreenAudioPeer = record.id;
       document.body.append(audioElement);
       record.screenAudio = audioElement;
-      if (playbackEnabledRef.current) void audioElement.play().catch(() => undefined);
+      if (playbackEnabledRef.current) void audioElement.play().catch(markPlaybackBlocked);
     }
     const screenVideoTrack = screenVideo.receiver.track;
     for (const track of record.screenStream.getTracks()) record.screenStream.removeTrack(track);
     record.screenStream.addTrack(screenVideoTrack);
-    screenVideoTrack.addEventListener('unmute', () => setPeerVersion(version => version + 1));
-    screenVideoTrack.addEventListener('mute', () => setPeerVersion(version => version + 1));
+    screenVideoTrack.onunmute = () => setPeerVersion(version => version + 1);
+    screenVideoTrack.onmute = () => setPeerVersion(version => version + 1);
     setPeerVersion(version => version + 1);
-  }, []);
+  }, [markPlaybackBlocked]);
 
   const createPeer = useCallback(async (peerId: string, initiator: boolean) => {
     const existing = peersRef.current.get(peerId);
@@ -798,7 +1252,12 @@ export default function RoomApp() {
       chatChannel: null,
       callAudio: null,
       screenAudio: null,
-      screenStream: new MediaStream()
+      screenStream: new MediaStream(),
+      recoveryTimer: null,
+      recoveryAttempts: 0,
+      makingOffer: false,
+      ignoreOffer: false,
+      polite: selfIdRef.current.localeCompare(peerId) > 0
     };
     peersRef.current.set(peerId, record);
     pc.onicecandidate = event => {
@@ -807,7 +1266,23 @@ export default function RoomApp() {
     pc.ontrack = () => { window.setTimeout(() => void syncPeerMedia(record), 0); };
     pc.ondatachannel = event => { if (event.channel.label === 'room-chat') attachChatChannel(record, event.channel); };
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') destroyPeer(peerId);
+      if (pc.connectionState === 'connected') {
+        if (record.recoveryTimer !== null) window.clearTimeout(record.recoveryTimer);
+        record.recoveryTimer = null;
+        record.recoveryAttempts = 0;
+      } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+        if (record.recoveryTimer !== null) window.clearTimeout(record.recoveryTimer);
+        const preferredInitiator = selfIdRef.current.localeCompare(peerId) < 0;
+        const delay = pc.connectionState === 'failed'
+          ? (preferredInitiator ? 0 : 1_400)
+          : (preferredInitiator ? 2_200 : 4_200);
+        record.recoveryTimer = window.setTimeout(() => {
+          record.recoveryTimer = null;
+          void restartPeerIce(record);
+        }, delay);
+      } else if (pc.connectionState === 'closed') {
+        destroyPeer(peerId);
+      }
       setPeerVersion(version => version + 1);
     };
     if (initiator) {
@@ -824,17 +1299,26 @@ export default function RoomApp() {
       record.screenAudioSender = screenAudioTransceiver.sender;
       record.screenAudioReceiver = screenAudioTransceiver.receiver;
       attachChatChannel(record, pc.createDataChannel('room-chat', { ordered: true }));
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      send(socketRef.current, { type: 'peer-signal', targetId: peerId, kind: 'offer', sdp: offer });
+      record.makingOffer = true;
+      try {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        send(socketRef.current, { type: 'peer-signal', targetId: peerId, kind: 'offer', sdp: pc.localDescription ?? offer });
+      } finally {
+        record.makingOffer = false;
+      }
     }
     setPeerVersion(version => version + 1);
     return record;
-  }, [attachChatChannel, destroyPeer, syncPeerMedia]);
+  }, [attachChatChannel, destroyPeer, restartPeerIce, syncPeerMedia]);
 
   const handleRoomMessage = useCallback(async (message: RoomMessage) => {
     if (message.type === 'room-ready') {
       iceServersRef.current = message.iceServers;
+      setTurnAvailable(hasTurnServer(message.iceServers));
+      if (message.resumed) {
+        for (const peerId of [...peersRef.current.keys()]) destroyPeer(peerId);
+      }
       selfIdRef.current = message.selfId;
       setSelfId(message.selfId);
       setLeaderId(message.leaderId);
@@ -842,6 +1326,7 @@ export default function RoomApp() {
       const next = Object.fromEntries(message.participants.map(participant => [participant.id, participant]));
       const localParticipant = next[message.selfId];
       if (localParticipant) next[message.selfId] = { ...localParticipant, ...profileRef.current };
+      participantsRef.current = next;
       setParticipants(next);
       setMode('connected');
       setError('');
@@ -854,16 +1339,17 @@ export default function RoomApp() {
         const nextSession = { ...activeSession, invite: message.invite, joinCode: message.joinCode, joinByCode: false, participantId: message.selfId };
         sessionRef.current = nextSession;
         setSession(nextSession);
-        if (nextSession.ownerKey) localStorage.setItem(OWNER_ROOM_KEY, JSON.stringify(nextSession));
+        if (nextSession.ownerKey) writeStorage('localStorage', OWNER_ROOM_KEY, JSON.stringify(nextSession));
         else {
-          sessionStorage.setItem(`${PEER_KEY_PREFIX}${message.roomId}`, message.selfId);
+          writeStorage('sessionStorage', `${PEER_KEY_PREFIX}${message.roomId}`, message.selfId);
           history.replaceState(null, '', `${location.pathname}#${new URLSearchParams({ room: message.invite.roomId, key: message.invite.token })}`);
         }
       }
-      for (const participant of message.participants) {
-        if (participant.id !== message.selfId && participant.connected) await createPeer(participant.id, true);
-      }
+      await Promise.all(message.participants
+        .filter(participant => participant.id !== message.selfId && participant.connected)
+        .map(participant => createPeer(participant.id, true)));
       updateSelfMediaState();
+      flushPendingChat();
       return;
     }
     if (message.type === 'participant-joined') {
@@ -874,13 +1360,24 @@ export default function RoomApp() {
     }
     if (message.type === 'participant-left') {
       const name = participantsRef.current[message.peerId]?.name || 'Um participante';
+      settleDepartedChatRecipient(message.peerId);
       destroyPeer(message.peerId);
-      setParticipants(current => { const next = { ...current }; delete next[message.peerId]; return next; });
+      const nextParticipants = { ...participantsRef.current };
+      delete nextParticipants[message.peerId];
+      participantsRef.current = nextParticipants;
+      setParticipants(nextParticipants);
       setScreenVolumes(current => {
         if (!(message.peerId in current)) return current;
         const next = { ...current };
         delete next[message.peerId];
         screenVolumesRef.current = next;
+        return next;
+      });
+      setParticipantVolumes(current => {
+        if (!(message.peerId in current)) return current;
+        const next = { ...current };
+        delete next[message.peerId];
+        participantVolumesRef.current = next;
         return next;
       });
       systemMessage(`${name} saiu da chamada.`);
@@ -905,7 +1402,12 @@ export default function RoomApp() {
       let record = peersRef.current.get(message.fromId);
       if (message.kind === 'offer') {
         if (!record || record.pc.connectionState === 'closed' || record.pc.connectionState === 'failed') record = await createPeer(message.fromId, false);
+        const offerCollision = record.makingOffer || record.pc.signalingState !== 'stable';
+        record.ignoreOffer = !record.polite && offerCollision;
+        if (record.ignoreOffer) return;
+        if (offerCollision) await record.pc.setLocalDescription({ type: 'rollback' });
         await record.pc.setRemoteDescription(message.sdp);
+        record.ignoreOffer = false;
         await syncPeerMedia(record);
         for (const candidate of record.queuedCandidates.splice(0)) await record.pc.addIceCandidate(candidate).catch(() => undefined);
         const answer = await record.pc.createAnswer();
@@ -915,23 +1417,38 @@ export default function RoomApp() {
       }
       if (message.kind === 'answer') {
         if (!record) return;
+        if (record.pc.signalingState !== 'have-local-offer') return;
+        record.ignoreOffer = false;
         await record.pc.setRemoteDescription(message.sdp);
         await syncPeerMedia(record);
         for (const candidate of record.queuedCandidates.splice(0)) await record.pc.addIceCandidate(candidate).catch(() => undefined);
         return;
       }
       if (!record) record = await createPeer(message.fromId, false);
+      if (record.ignoreOffer) return;
       if (record.pc.remoteDescription) await record.pc.addIceCandidate(message.candidate).catch(() => undefined);
-      else record.queuedCandidates.push(message.candidate);
+      else if (record.queuedCandidates.length < 128) record.queuedCandidates.push(message.candidate);
       return;
     }
     if (message.type === 'chat-fallback') {
-      appendMessage(message.message);
+      const normalized = normalizeChatWireMessage(message.message);
+      if (!normalized) return;
+      appendMessage(normalized);
+      const channel = peersRef.current.get(normalized.senderId)?.chatChannel ?? null;
+      if (!sendChatChannelPayload(channel, { type: 'chat-ack', messageId: normalized.id })) {
+        send(socketRef.current, { type: 'chat-ack', targetId: normalized.senderId, messageId: normalized.id });
+      }
+      return;
+    }
+    if (message.type === 'chat-ack') {
+      const messageId = normalizeChatId(message.messageId);
+      if (messageId) acknowledgeChatDelivery(messageId, message.fromId);
       return;
     }
     if (message.type === 'pong') return;
     if (message.type === 'room-closed') {
-      if (sessionRef.current?.ownerKey) localStorage.removeItem(OWNER_ROOM_KEY);
+      if (sessionRef.current?.ownerKey) removeStorage('localStorage', OWNER_ROOM_KEY);
+      failPendingChat();
       if (callSoundConnectedRef.current) playSound('callDisconnected');
       callSoundConnectedRef.current = false;
       setError('O criador encerrou a sala.');
@@ -940,24 +1457,27 @@ export default function RoomApp() {
     }
     if (message.type === 'error') {
       setError(message.message);
-      if (message.code === 'ROOM_NOT_FOUND') {
+      const fatalBeforeJoining = !selfIdRef.current;
+      if (fatalBeforeJoining || message.code === 'ROOM_NOT_FOUND' || message.code === 'HOST_OFFLINE') {
         setMode('error');
-        if (sessionRef.current?.ownerKey) localStorage.removeItem(OWNER_ROOM_KEY);
+        if (sessionRef.current?.ownerKey) removeStorage('localStorage', OWNER_ROOM_KEY);
       }
     }
-  }, [appendMessage, createPeer, destroyPeer, playSound, syncPeerMedia, systemMessage, updateParticipant, updateSelfMediaState]);
+  }, [acknowledgeChatDelivery, appendMessage, createPeer, destroyPeer, failPendingChat, flushPendingChat, playSound, settleDepartedChatRecipient, syncPeerMedia, systemMessage, updateParticipant, updateSelfMediaState]);
 
   useEffect(() => {
     if (!session) return;
     disposedRef.current = false;
-    let socket: WebSocket | null = null;
+    let currentSocket: WebSocket | null = null;
     let attempts = 0;
     let pingTimer: number | null = null;
 
     const connect = () => {
       if (disposedRef.current) return;
+      if (currentSocket && (currentSocket.readyState === WebSocket.OPEN || currentSocket.readyState === WebSocket.CONNECTING)) return;
       setMode(current => current === 'connected' ? current : 'connecting');
-      socket = new WebSocket(signalUrl());
+      const socket = new WebSocket(signalUrl());
+      currentSocket = socket;
       socketRef.current = socket;
       socket.onopen = () => {
         attempts = 0;
@@ -966,38 +1486,72 @@ export default function RoomApp() {
         if (current.ownerKey) {
           send(socket, { type: 'create-group-room', ...current.invite, ownerKey: current.ownerKey, participantId: current.participantId, profile: profileRef.current, maxParticipants: current.maxParticipants ?? maxParticipants });
         } else if (current.joinByCode && current.joinCode) {
-          const participantId = current.participantId || sessionStorage.getItem(`${PEER_KEY_PREFIX}${current.joinCode}`) || undefined;
+          const participantId = current.participantId || readStorage('sessionStorage', `${PEER_KEY_PREFIX}${current.joinCode}`) || undefined;
           send(socket, { type: 'join-group-room-code', code: current.joinCode, participantId, profile: profileRef.current });
         } else {
-          const participantId = current.participantId || sessionStorage.getItem(`${PEER_KEY_PREFIX}${current.invite.roomId}`) || undefined;
+          const participantId = current.participantId || readStorage('sessionStorage', `${PEER_KEY_PREFIX}${current.invite.roomId}`) || undefined;
           send(socket, { type: 'join-group-room', ...current.invite, participantId, profile: profileRef.current });
         }
         if (pingTimer !== null) window.clearInterval(pingTimer);
         pingTimer = window.setInterval(() => send(socket, { type: 'ping', at: Date.now() }), 3_000);
       };
       socket.onmessage = event => {
-        try { void handleRoomMessage(JSON.parse(String(event.data)) as RoomMessage); }
-        catch { setError('A sala enviou uma resposta inválida.'); }
+        let message: RoomMessage;
+        try {
+          message = JSON.parse(String(event.data)) as RoomMessage;
+        } catch {
+          setError('A sala enviou uma resposta inválida.');
+          return;
+        }
+        void handleRoomMessage(message).catch(() => {
+          setError('Não foi possível sincronizar a chamada. A conexão será refeita automaticamente.');
+          if (socket.readyState === WebSocket.OPEN) socket.close(4102, 'Room synchronization failed');
+        });
       };
       socket.onerror = () => setError('O servidor está demorando para responder…');
       socket.onclose = event => {
         if (pingTimer !== null) window.clearInterval(pingTimer);
+        if (socketRef.current === socket) socketRef.current = null;
+        if (currentSocket === socket) currentSocket = null;
         if (disposedRef.current || event.code === 1000) return;
         setMode('connecting');
         reconnectTimerRef.current = window.setTimeout(connect, Math.min(7_000, 600 * 2 ** Math.min(attempts++, 4)));
       };
     };
+    reconnectNowRef.current = () => {
+      if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+      connect();
+    };
     connect();
     return () => {
       disposedRef.current = true;
+      reconnectNowRef.current = null;
       if (pingTimer !== null) window.clearInterval(pingTimer);
       if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
-      socket?.close(1000, 'Session changed');
-      if (socketRef.current === socket) socketRef.current = null;
+      currentSocket?.close(1000, 'Session changed');
+      if (socketRef.current === currentSocket) socketRef.current = null;
     };
   // Os dados da sessão podem ser enriquecidos após entrar por código curto. A conexão
   // deve sobreviver a essa atualização; ela só nasce ou termina com a própria sessão.
   }, [handleRoomMessage, Boolean(session)]);
+
+  useEffect(() => {
+    if (!session) return;
+    const recover = () => {
+      reconnectNowRef.current?.();
+      for (const peer of peersRef.current.values()) {
+        if (peer.pc.connectionState === 'disconnected' || peer.pc.connectionState === 'failed') void restartPeerIce(peer);
+      }
+    };
+    const recoverWhenVisible = () => { if (document.visibilityState === 'visible') recover(); };
+    window.addEventListener('online', recover);
+    document.addEventListener('visibilitychange', recoverWhenVisible);
+    return () => {
+      window.removeEventListener('online', recover);
+      document.removeEventListener('visibilitychange', recoverWhenVisible);
+    };
+  }, [restartPeerIce, session]);
 
   useEffect(() => {
     if (!session || mode !== 'connected') {
@@ -1046,14 +1600,26 @@ export default function RoomApp() {
       updateSelfMediaState({ microphoneEnabled: true });
       return true;
     }
+    if (microphonePendingRef.current) return false;
+    microphonePendingRef.current = true;
+    setMicrophonePending(true);
+    const requestEpoch = mediaRequestEpochRef.current;
+    const requestId = ++microphoneRequestIdRef.current;
     try {
       const settings = audioSettingsRef.current;
       const sourceStream = await navigator.mediaDevices.getUserMedia({
         video: false,
         audio: microphoneConstraints(settings, voiceSettingSupport, exactSetting)
       });
+      if (requestEpoch !== mediaRequestEpochRef.current || requestId !== microphoneRequestIdRef.current || !sessionRef.current) {
+        sourceStream.getTracks().forEach(track => track.stop());
+        return false;
+      }
       const sourceTrack = sourceStream.getAudioTracks()[0];
-      if (!sourceTrack) return false;
+      if (!sourceTrack) {
+        sourceStream.getTracks().forEach(track => track.stop());
+        return false;
+      }
       setVoiceSettingSupport(detectVoiceTrackSupport(sourceTrack, voiceSettingSupport));
       const verifiedSettings = readVoiceTrackSettings(sourceTrack);
       const effectiveSettings = { ...settings };
@@ -1109,10 +1675,16 @@ export default function RoomApp() {
       }, { once: true });
       return true;
     } catch {
+      if (requestEpoch !== mediaRequestEpochRef.current || requestId !== microphoneRequestIdRef.current || !sessionRef.current) return false;
       if (exactSetting) return false;
       setVoiceSettingFeedback('Não foi possível acessar o microfone. Verifique a permissão e o dispositivo de entrada.');
       setError('Não foi possível abrir o microfone. Confira a permissão e o dispositivo de entrada.');
       return false;
+    } finally {
+      if (requestId === microphoneRequestIdRef.current) {
+        microphonePendingRef.current = false;
+        setMicrophonePending(false);
+      }
     }
   }, [disposeMicrophonePipeline, playSound, updateSelfMediaState, voiceSettingSupport]);
 
@@ -1149,7 +1721,31 @@ export default function RoomApp() {
     if (wasSharing && !endingCallRef.current) playSound('screenStopped');
   }, [playSound, updateSelfMediaState]);
 
+  useEffect(() => {
+    if (mode !== 'error') return;
+    mediaRequestEpochRef.current += 1;
+    microphoneRequestIdRef.current += 1;
+    screenShareRequestIdRef.current += 1;
+    microphonePendingRef.current = false;
+    setMicrophonePending(false);
+    screenSharePendingRef.current = false;
+    setScreenSharePending(false);
+    endingCallRef.current = true;
+    socketRef.current?.close(1000, 'Room unavailable');
+    for (const peerId of [...peersRef.current.keys()]) destroyPeer(peerId);
+    stopScreenShare();
+    disposeMicrophonePipeline();
+    microphoneEnabledRef.current = false;
+    setMicrophoneEnabled(false);
+    sharingRef.current = false;
+    setSharing(false);
+    setSpeakingIds(new Set());
+    const releaseEndingState = window.setTimeout(() => { endingCallRef.current = false; }, 400);
+    return () => window.clearTimeout(releaseEndingState);
+  }, [destroyPeer, disposeMicrophonePipeline, mode, stopScreenShare]);
+
   const toggleScreenShare = useCallback(async () => {
+    if (screenSharePendingRef.current) return;
     if (sharingRef.current) {
       stopScreenShare();
       return;
@@ -1158,13 +1754,25 @@ export default function RoomApp() {
       setError('Este navegador não oferece compartilhamento de tela. No celular, use um navegador que disponibilize essa permissão.');
       return;
     }
+    screenSharePendingRef.current = true;
+    setScreenSharePending(true);
+    const requestEpoch = mediaRequestEpochRef.current;
+    const requestId = ++screenShareRequestIdRef.current;
     try {
       const activeResolution = automaticQuality ? 720 : resolution;
       const activeFps = automaticQuality ? 30 : fps;
       const preset = VIDEO_PRESETS[activeResolution];
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: { width: { ideal: preset.width, max: preset.width }, height: { ideal: preset.height, max: preset.height }, frameRate: { ideal: activeFps, max: activeFps } }, audio: true });
+      if (requestEpoch !== mediaRequestEpochRef.current || requestId !== screenShareRequestIdRef.current || !sessionRef.current || mode === 'error') {
+        stream.getTracks().forEach(track => track.stop());
+        return;
+      }
       const video = stream.getVideoTracks()[0];
-      if (!video) return;
+      if (!video) {
+        stream.getTracks().forEach(track => track.stop());
+        setError('O navegador não forneceu uma trilha de vídeo para compartilhar.');
+        return;
+      }
       localScreenStreamRef.current = stream;
       video.contentHint = activeFps >= 45 ? 'motion' : 'detail';
       const screenAudio = stream.getAudioTracks()[0] ?? null;
@@ -1181,8 +1789,13 @@ export default function RoomApp() {
     } catch (screenError) {
       if (screenError instanceof DOMException && screenError.name === 'NotAllowedError') return;
       setError('Não foi possível iniciar o compartilhamento. Tente escolher novamente a tela, janela ou aba.');
+    } finally {
+      if (requestId === screenShareRequestIdRef.current) {
+        screenSharePendingRef.current = false;
+        setScreenSharePending(false);
+      }
     }
-  }, [applyScreenEncoding, automaticQuality, fps, playSound, resolution, stopScreenShare, updateSelfMediaState]);
+  }, [applyScreenEncoding, automaticQuality, fps, mode, playSound, resolution, stopScreenShare, updateSelfMediaState]);
 
   const applyVideoProfile = useCallback(async (nextResolution: Resolution, nextFps: FrameRate) => {
     resolutionRef.current = nextResolution;
@@ -1228,13 +1841,14 @@ export default function RoomApp() {
 
   useEffect(() => () => {
     for (const peerId of [...peersRef.current.keys()]) destroyPeer(peerId);
+    pendingChatMessagesRef.current.clear();
     localScreenStreamRef.current?.getTracks().forEach(track => track.stop());
     disposeMicrophonePipeline();
   }, [destroyPeer, disposeMicrophonePipeline]);
 
   function updateProfile(next: Partial<RoomProfile>) {
     profileEditRevisionRef.current += 1;
-    const updated = { ...profileRef.current, ...next, name: normalizeName(next.name ?? profileRef.current.name), avatar: normalizeAvatar(next.avatar ?? profileRef.current.avatar), status: normalizeStatus(next.status ?? profileRef.current.status), device: mobile ? 'mobile' : 'desktop' } as RoomProfile;
+    const updated = { ...profileRef.current, ...next, name: normalizeName(next.name ?? profileRef.current.name), avatar: normalizeAvatar(next.avatar ?? profileRef.current.avatar), status: normalizeStatus(next.status ?? profileRef.current.status), device: isMobileDevice() ? 'mobile' : 'desktop' } as RoomProfile;
     profileRef.current = updated;
     setProfile(updated);
     const id = selfIdRef.current;
@@ -1283,7 +1897,9 @@ export default function RoomApp() {
     void unlockInterfaceSounds();
     const invite = createPrivateRoom();
     const next: Session = { invite, ownerKey: randomSecret(), maxParticipants };
-    localStorage.setItem(OWNER_ROOM_KEY, JSON.stringify(next));
+    mediaRequestEpochRef.current += 1;
+    sessionRef.current = next;
+    writeStorage('localStorage', OWNER_ROOM_KEY, JSON.stringify(next));
     setError('');
     history.replaceState(null, '', location.pathname);
     setSession(next);
@@ -1300,36 +1916,59 @@ export default function RoomApp() {
       return;
     }
     setError('');
+    let nextSession: Session;
     if (entry.kind === 'invite') {
       history.replaceState(null, '', `${location.pathname}#${new URLSearchParams({ room: entry.invite.roomId, key: entry.invite.token })}`);
-      setSession({ invite: entry.invite });
+      nextSession = { invite: entry.invite };
     } else {
       history.replaceState(null, '', location.pathname);
-      setSession({ invite: { roomId: entry.code, token: '' }, joinCode: entry.code, joinByCode: true });
+      nextSession = { invite: { roomId: entry.code, token: '' }, joinCode: entry.code, joinByCode: true };
     }
+    mediaRequestEpochRef.current += 1;
+    sessionRef.current = nextSession;
+    setSession(nextSession);
     setMode('connecting');
     void acquireMicrophone();
   }
 
   function exitRoom(closeRequested: boolean) {
+    mediaRequestEpochRef.current += 1;
+    microphoneRequestIdRef.current += 1;
+    screenShareRequestIdRef.current += 1;
+    microphonePendingRef.current = false;
+    setMicrophonePending(false);
+    screenSharePendingRef.current = false;
+    setScreenSharePending(false);
     endingCallRef.current = true;
     if (callSoundConnectedRef.current) playSound('callDisconnected');
     callSoundConnectedRef.current = false;
     const connectedCount = Object.values(participantsRef.current).filter(participant => participant.connected).length;
     const closeForEveryone = closeRequested || (Boolean(sessionRef.current?.ownerKey) && connectedCount <= 1);
     send(socketRef.current, { type: closeForEveryone ? 'close-group-room' : 'leave-group-room' });
-    if (closeForEveryone) localStorage.removeItem(OWNER_ROOM_KEY);
+    if (closeForEveryone) removeStorage('localStorage', OWNER_ROOM_KEY);
     socketRef.current?.close(1000, closeForEveryone ? 'Room closed' : 'Participant left');
     for (const peerId of [...peersRef.current.keys()]) destroyPeer(peerId);
     stopScreenShare();
     disposeMicrophonePipeline();
     setMicrophoneEnabled(false);
+    participantsRef.current = {};
     setParticipants({});
     screenVolumesRef.current = {};
     setScreenVolumes({});
+    participantVolumesRef.current = {};
+    setParticipantVolumes({});
     setSelfId('');
     selfIdRef.current = '';
     setLeaderId('');
+    pendingChatMessagesRef.current.clear();
+    seenMessageIdsRef.current.clear();
+    chatMessagesRef.current = [];
+    setChatMessages([]);
+    setChatValue('');
+    setUnreadMessages(0);
+    setNewMessagesBelow(0);
+    chatStickToBottomRef.current = true;
+    sessionRef.current = null;
     setSession(null);
     setMode('landing');
     setLeaveMenuOpen(false);
@@ -1379,9 +2018,17 @@ export default function RoomApp() {
     audioSettingsRef.current = next;
     setAudioSettings(next);
     for (const peer of peersRef.current.values()) {
-      if (peer.callAudio) peer.callAudio.volume = value / 100;
+      if (peer.callAudio) peer.callAudio.volume = (value / 100) * ((participantVolumesRef.current[peer.id] ?? 100) / 100);
       if (peer.screenAudio) peer.screenAudio.volume = (value / 100) * ((screenVolumesRef.current[peer.id] ?? 100) / 100);
     }
+  }
+
+  function changeParticipantVolume(peerId: string, value: number) {
+    const next = { ...participantVolumesRef.current, [peerId]: value };
+    participantVolumesRef.current = next;
+    setParticipantVolumes(next);
+    const callAudio = peersRef.current.get(peerId)?.callAudio;
+    if (callAudio) callAudio.volume = (audioSettingsRef.current.outputVolume / 100) * (value / 100);
   }
 
   function changeScreenVolume(peerId: string, value: number) {
@@ -1480,7 +2127,7 @@ export default function RoomApp() {
       for (const audioElement of [peer.callAudio, peer.screenAudio]) {
         if (!audioElement) continue;
         audioElement.muted = !next;
-        if (next) void audioElement.play().catch(() => undefined);
+        if (next) void audioElement.play().catch(markPlaybackBlocked);
       }
     }
     playSound(next ? 'outputEnabled' : 'outputMuted');
@@ -1497,23 +2144,134 @@ export default function RoomApp() {
     }
   }
 
+  const releaseWakeLock = useCallback(async () => {
+    const lock = wakeLockRef.current;
+    wakeLockRef.current = null;
+    setWakeLockActive(false);
+    if (lock && !lock.released) await lock.release().catch(() => undefined);
+  }, []);
+
+  const requestWakeLock = useCallback(async () => {
+    const wakeLock = (navigator as Navigator & { wakeLock?: { request: (type: 'screen') => Promise<ScreenWakeLock> } }).wakeLock;
+    if (!wakeLock || document.visibilityState !== 'visible') return false;
+    if (wakeLockRef.current && !wakeLockRef.current.released) {
+      setWakeLockActive(true);
+      return true;
+    }
+    try {
+      const lock = await wakeLock.request('screen');
+      wakeLockRef.current = lock;
+      setWakeLockActive(true);
+      lock.addEventListener('release', () => {
+        if (wakeLockRef.current === lock) wakeLockRef.current = null;
+        setWakeLockActive(false);
+      }, { once: true });
+      return true;
+    } catch {
+      setWakeLockActive(false);
+      return false;
+    }
+  }, []);
+
+  useEffect(() => {
+    writeStorage('localStorage', 'screenlink-keep-awake-v1', String(keepAwake));
+    if (!keepAwake || mode !== 'connected') {
+      void releaseWakeLock();
+      return;
+    }
+    void requestWakeLock();
+    const resume = () => { if (document.visibilityState === 'visible') void requestWakeLock(); };
+    document.addEventListener('visibilitychange', resume);
+    return () => document.removeEventListener('visibilitychange', resume);
+  }, [keepAwake, mode, releaseWakeLock, requestWakeLock]);
+
+  useEffect(() => () => { void releaseWakeLock(); }, [releaseWakeLock]);
+
+  async function toggleFullscreen() {
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await stageRef.current?.requestFullscreen();
+    } catch {
+      setError('A tela cheia não está disponível neste navegador.');
+    }
+    setMoreMenuOpen(false);
+  }
+
+  async function togglePictureInPicture() {
+    const pictureDocument = document as Document & { pictureInPictureEnabled?: boolean; pictureInPictureElement?: Element | null; exitPictureInPicture?: () => Promise<void> };
+    const video = stageRef.current?.querySelector('video') as (HTMLVideoElement & { requestPictureInPicture?: () => Promise<unknown> }) | null;
+    try {
+      if (pictureDocument.pictureInPictureElement && pictureDocument.exitPictureInPicture) await pictureDocument.exitPictureInPicture();
+      else if (pictureDocument.pictureInPictureEnabled && video?.requestPictureInPicture) await video.requestPictureInPicture();
+      else setError('O miniplayer só fica disponível quando uma tela está sendo exibida em um navegador compatível.');
+    } catch {
+      setError('Não foi possível abrir o miniplayer agora.');
+    }
+    setMoreMenuOpen(false);
+  }
+
+  function toggleKeepAwake() {
+    const next = !keepAwake;
+    setKeepAwake(next);
+    if (next) void requestWakeLock();
+    else void releaseWakeLock();
+  }
+
   function sendChat(event: FormEvent) {
     event.preventDefault();
-    const text = chatValue.trim().slice(0, 1_000);
-    if (!text || !selfIdRef.current) return;
-    const message: ChatMessage = { id: `${selfIdRef.current}-${Date.now()}-${randomSecret(4)}`, senderId: selfIdRef.current, senderName: profileRef.current.name, text, sentAt: Date.now() };
-    appendMessage(message, true);
-    const payload = JSON.stringify(message);
-    let directDeliveries = 0;
-    for (const peer of peersRef.current.values()) {
-      if (peer.chatChannel?.readyState !== 'open') continue;
-      peer.chatChannel.send(payload);
-      directDeliveries += 1;
+    const text = normalizeChatText(chatValue);
+    if (!text || !selfIdRef.current || mode === 'error') return;
+    const recipients = Object.values(participantsRef.current)
+      .filter(participant => participant.connected && participant.id !== selfIdRef.current)
+      .map(participant => participant.id);
+    const message: ChatMessage = {
+      id: `${selfIdRef.current}-${Date.now()}-${randomSecret(4)}`,
+      senderId: selfIdRef.current,
+      senderName: profileRef.current.name,
+      text,
+      sentAt: Date.now(),
+      delivery: recipients.length ? 'pending' : 'sent'
+    };
+    chatStickToBottomRef.current = true;
+    appendMessage(message);
+    if (recipients.length) {
+      const now = Date.now();
+      pendingChatMessagesRef.current.set(message.id, {
+        message,
+        awaiting: new Set(recipients),
+        attempts: 0,
+        firstAttemptAt: now,
+        lastAttemptAt: 0,
+        fallbackAccepted: false
+      });
+      transmitPendingChat(message.id, true);
     }
-    const expectedDeliveries = Object.values(participantsRef.current).filter(participant => participant.connected && participant.id !== selfIdRef.current).length;
-    if (directDeliveries < expectedDeliveries) send(socketRef.current, { type: 'chat-fallback', message: { id: message.id, text: message.text, sentAt: message.sentAt } });
     setChatValue('');
     setEmojiOpen(false);
+    window.requestAnimationFrame(() => resizeChatInput(chatInputRef.current));
+  }
+
+  function retryChatMessage(messageId: string) {
+    const message = chatMessagesRef.current.find(item => item.id === messageId && item.senderId === selfIdRef.current);
+    if (!message || mode === 'error') return;
+    const recipients = Object.values(participantsRef.current)
+      .filter(participant => participant.connected && participant.id !== selfIdRef.current)
+      .map(participant => participant.id);
+    if (!recipients.length) {
+      updateChatDelivery(messageId, 'sent');
+      return;
+    }
+    const now = Date.now();
+    pendingChatMessagesRef.current.set(messageId, {
+      message: { ...message, delivery: 'pending' },
+      awaiting: new Set(recipients),
+      attempts: 0,
+      firstAttemptAt: now,
+      lastAttemptAt: 0,
+      fallbackAccepted: false
+    });
+    updateChatDelivery(messageId, 'pending');
+    transmitPendingChat(messageId, true);
   }
 
   function insertEmoji(emoji: string) {
@@ -1527,6 +2285,7 @@ export default function RoomApp() {
       input?.focus();
       const cursor = Math.min(start + emoji.length, next.length);
       input?.setSelectionRange(cursor, cursor);
+      resizeChatInput(input ?? null);
     });
   }
 
@@ -1534,15 +2293,22 @@ export default function RoomApp() {
     if (chatOpen) setProfileOpen(false);
     setAudioMenuOpen(false);
     setScreenMenuOpen(false);
+    setMoreMenuOpen(false);
     setLeaveMenuOpen(false);
     setControlsOpen(false);
     setEmojiOpen(false);
+    setChatSettingsOpen(false);
+    if (!chatOpen) chatStickToBottomRef.current = true;
     setChatOpen(!chatOpen);
   }
 
   async function copyValue(kind: 'code' | 'link') {
     if (!session) return;
-    const value = kind === 'code' ? (session.joinCode || session.invite.roomId.slice(0, 4).toUpperCase()) : groupInviteUrl(session.invite);
+    if (kind === 'code' && !session.joinCode) {
+      setError('O código curto ainda está sendo gerado. Aguarde a sala conectar.');
+      return;
+    }
+    const value = kind === 'code' ? session.joinCode! : groupInviteUrl(session.invite, shareOrigin);
     let copiedSuccessfully = false;
     try {
       await navigator.clipboard.writeText(value);
@@ -1568,13 +2334,13 @@ export default function RoomApp() {
 
   const participantList = Object.values(participants).sort((left, right) => left.joinedAt - right.joinedAt);
   const connectedParticipants = participantList.filter(participant => participant.connected);
+  const remoteParticipants = connectedParticipants.filter(participant => participant.id !== selfId);
   const sharingParticipants = connectedParticipants.filter(participant => participant.sharing);
   const remoteSharingParticipants = sharingParticipants.filter(participant => participant.id !== selfId);
   const localScreen = localScreenStreamRef.current;
   const isOwner = Boolean(session?.ownerKey);
-  const isLeader = selfId === leaderId;
-  const roomLabel = session ? (session.joinCode || session.invite.roomId.slice(0, 4)).toUpperCase() : '';
-  const remoteParticipantCount = connectedParticipants.filter(participant => participant.id !== selfId).length;
+  const roomLabel = session ? (session.joinCode?.toUpperCase() || '••••••') : '';
+  const remoteParticipantCount = remoteParticipants.length;
   const connectedPeerCount = [...peersRef.current.values()].filter(peer => peer.pc.connectionState === 'connected').length;
   const connectionQuality = mode !== 'connected' || !connectedPeerCount || mediaLatency === null
     ? 'waiting'
@@ -1590,29 +2356,50 @@ export default function RoomApp() {
   const activeFps = automaticQuality ? 30 : fps;
   const effectiveBitrateMbps = adaptiveBitrate ? recommendedBitrateMbps(activeResolution, activeFps) : bitrateMbps;
   const screenShareSupported = typeof navigator.mediaDevices?.getDisplayMedia === 'function';
+  const chatCanSend = Boolean(session && selfId && mode !== 'error');
+  const chatPlaceholder = !session
+    ? 'Entre em uma chamada para conversar'
+    : mode === 'error'
+      ? 'Chat indisponível nesta sala'
+      : !selfId
+        ? 'Conectando ao chat…'
+        : mode === 'connecting'
+          ? 'Reconectando — as mensagens ficam na fila…'
+          : 'Escrever mensagem…';
   void peerVersion;
 
   const chatPanel = (
-    <div className="chat-panel unified-chat-panel">
-      <div className="chat-log" ref={chatLogRef}>
+    <div className="chat-panel unified-chat-panel" style={{ '--chat-own-bubble': chatAppearance.ownBubble, '--chat-other-bubble': chatAppearance.otherBubble, '--chat-name-color': chatAppearance.nameColor } as React.CSSProperties}>
+      <div className="chat-log" ref={chatLogRef} role="log" aria-live="polite" aria-relevant="additions text" aria-label="Mensagens da chamada" tabIndex={0} onScroll={event => {
+        const log = event.currentTarget;
+        const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight <= 48;
+        chatStickToBottomRef.current = atBottom;
+        if (atBottom) setNewMessagesBelow(0);
+      }}>
         {chatMessages.length ? chatMessages.map(message => {
           if (message.system) return <p className="chat-system" key={message.id}>{message.text}</p>;
-          const own = ownMessageIdsRef.current.has(message.id);
+          const own = message.senderId === selfId;
           return (
             <article className={`chat-message ${own ? 'is-own' : ''}`} key={message.id}>
-              <header><strong>{own ? 'Você' : message.senderName}</strong><time>{new Date(message.sentAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</time></header>
-              <p>{message.text}</p>
+              <header><strong>{own ? 'Você' : message.senderName}</strong><time dateTime={new Date(message.sentAt).toISOString()}>{new Date(message.sentAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</time></header>
+              <p>{renderChatText(message.text)}</p>
+              {own && message.delivery && <div className={`chat-delivery is-${message.delivery}`} aria-live="polite">
+                {message.delivery === 'failed'
+                  ? <button type="button" onClick={() => retryChatMessage(message.id)}>Falhou · reenviar</button>
+                  : <span>{message.delivery === 'pending' ? 'Enviando…' : message.delivery === 'delivered' ? 'Entregue' : 'Enviada'}</span>}
+              </div>}
             </article>
           );
-        }) : <div className="chat-empty"><Icon name="chat"/><strong>A conversa começa aqui</strong><span>Envie a primeira mensagem da chamada.</span></div>}
+        }) : <div className="chat-empty"><Icon name="chat"/><strong>A conversa começa aqui</strong><span>As mensagens são temporárias e ficam somente nesta chamada.</span></div>}
       </div>
+      {newMessagesBelow > 0 && <button className="chat-jump-latest" type="button" onClick={() => scrollChatToLatest(true)}>{newMessagesBelow === 1 ? 'Nova mensagem' : `${newMessagesBelow} novas mensagens`} <span aria-hidden="true">↓</span></button>}
       <form className="chat-composer" onSubmit={sendChat}>
         <div className="emoji-picker-anchor" ref={emojiPickerRef}>
-          <button className={emojiOpen ? 'is-open' : ''} type="button" onClick={() => setEmojiOpen(open => !open)} disabled={!session} aria-expanded={emojiOpen} aria-label="Escolher emoji"><Icon name="smile"/></button>
+          <button className={emojiOpen ? 'is-open' : ''} type="button" onClick={() => setEmojiOpen(open => !open)} disabled={!chatCanSend} aria-expanded={emojiOpen} aria-label="Escolher emoji"><Icon name="smile"/></button>
           {emojiOpen && <div className="emoji-picker" role="listbox" aria-label="Emojis">{CHAT_EMOJIS.map(emoji => <button key={emoji} type="button" role="option" aria-label={`Emoji ${emoji}`} onClick={() => insertEmoji(emoji)}>{emoji}</button>)}</div>}
         </div>
-        <textarea ref={chatInputRef} value={chatValue} onChange={event => setChatValue(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={session ? 'Escrever mensagem…' : 'Entre em uma chamada para conversar'} maxLength={1000} disabled={!session}/>
-        <button type="submit" disabled={!chatValue.trim() || !session} aria-label="Enviar mensagem"><Icon name="send"/></button>
+        <textarea ref={chatInputRef} aria-label="Escrever mensagem" title="Enter envia · Shift+Enter quebra a linha" rows={1} value={chatValue} onChange={event => { setChatValue(event.target.value); resizeChatInput(event.currentTarget); }} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={chatPlaceholder} maxLength={1000} disabled={!chatCanSend}/>
+        <button type="submit" disabled={!normalizeChatText(chatValue) || !chatCanSend} aria-label="Enviar mensagem"><Icon name="send"/></button>
       </form>
     </div>
   );
@@ -1630,6 +2417,17 @@ export default function RoomApp() {
           <div className="volume-control"><label htmlFor="room-input-volume"><strong>Volume de entrada</strong><small>Ganho do seu microfone</small></label><input id="room-input-volume" type="range" min="0" max="150" value={audioSettings.inputVolume} onChange={event => changeInputVolume(Number(event.target.value))}/><output>{audioSettings.inputVolume}%</output></div>
           <div className="volume-control"><label htmlFor="room-output-volume"><strong>Volume de saída</strong><small>Áudio recebido da chamada</small></label><input id="room-output-volume" type="range" min="0" max="100" value={audioSettings.outputVolume} onChange={event => changeOutputVolume(Number(event.target.value))}/><output>{audioSettings.outputVolume}%</output></div>
           <button className="voice-setting interface-sound-setting" type="button" role="switch" aria-checked={interfaceSoundsEnabled} onClick={toggleInterfaceSounds}><span><strong>Sons da interface</strong><small>Chamada, microfone e participantes</small></span><i><b/></i></button>
+        </section>
+        <section className="audio-menu-section participant-volume-section">
+          <header><strong>Voz dos participantes</strong><small>{remoteParticipants.length ? `${remoteParticipants.length} PESSOA${remoteParticipants.length === 1 ? '' : 'S'}` : 'SÓ VOCÊ'}</small></header>
+          {remoteParticipants.length ? <div className="screen-volume-list participant-volume-list">{remoteParticipants.map(participant => (
+            <div className="screen-volume-row participant-volume-row" key={participant.id}>
+              <Avatar avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} size="small"/>
+              <label htmlFor={`participant-volume-${participant.id}`}><strong>{participant.name}</strong><small>{participant.microphoneEnabled ? 'Microfone ativo' : 'Microfone silenciado'}</small></label>
+              <input id={`participant-volume-${participant.id}`} aria-label={`Volume de voz de ${participant.name}`} type="range" min="0" max="100" value={participantVolumes[participant.id] ?? 100} onChange={event => changeParticipantVolume(participant.id, Number(event.target.value))}/>
+              <output>{participantVolumes[participant.id] ?? 100}%</output>
+            </div>
+          ))}</div> : <p className="screen-audio-empty"><Icon name="volumeOff"/>Os controles aparecem quando outra pessoa entrar.</p>}
         </section>
         <section className="audio-menu-section">
           <header><strong>Tratamento de voz</strong><small>MICROFONE</small></header>
@@ -1650,7 +2448,7 @@ export default function RoomApp() {
   const screenPopover = screenMenuOpen ? (
     <section className="dock-popover more-popover screen-popover unified-screen-popover" aria-label="Configurações do compartilhamento">
       <header><strong>Compartilhamento</strong><small>{sharing ? 'ATIVO' : 'PRONTO'}</small></header>
-      <button type="button" onClick={() => { void toggleScreenShare(); setScreenMenuOpen(false); }}><Icon name="screen"/><span><strong>{sharing ? 'Parar compartilhamento' : 'Compartilhar tela'}</strong><small>{sharing ? 'A chamada continuará ativa' : screenShareSupported ? 'Escolha uma tela, janela ou aba' : 'Não disponível neste navegador'}</small></span></button>
+      <button type="button" onClick={() => { void toggleScreenShare(); setScreenMenuOpen(false); }} disabled={screenSharePending || (!sharing && !screenShareSupported)}><Icon name="screen"/><span><strong>{screenSharePending ? 'Abrindo seletor…' : sharing ? 'Parar compartilhamento' : 'Compartilhar tela'}</strong><small>{sharing ? 'A chamada continuará ativa' : screenShareSupported ? 'Escolha uma tela, janela ou aba' : 'Não disponível neste navegador'}</small></span></button>
       <div className="screen-popover-scroll">
         <section className="screen-menu-section">
           <header><strong>Áudio recebido</strong><small>{remoteSharingParticipants.length ? `${remoteSharingParticipants.length} TELA${remoteSharingParticipants.length === 1 ? '' : 'S'}` : 'SEM TELAS'}</small></header>
@@ -1663,12 +2461,22 @@ export default function RoomApp() {
             </div>
           ))}</div> : <p className="screen-audio-empty"><Icon name="volumeOff"/>Os controles aparecem quando alguém compartilhar uma tela.</p>}
         </section>
-        <section className="screen-menu-section bitrate-menu-section">
+        {screenShareSupported && <section className="screen-menu-section bitrate-menu-section">
           <header><strong>Bitrate de envio</strong><small>ATÉ {formatBitrate(effectiveBitrateMbps)}</small></header>
           <button className={`compact-toggle ${adaptiveBitrate ? 'is-active' : ''}`} type="button" role="switch" aria-checked={adaptiveBitrate} onClick={() => changeAdaptiveBitrate(!adaptiveBitrate)}><span><strong>Bitrate adaptativo</strong><small>Ajusta o limite ao perfil de vídeo</small></span><i><b/></i></button>
           <div className={`bitrate-control ${adaptiveBitrate ? 'is-disabled' : ''}`}><label htmlFor="popover-bitrate"><strong>Limite manual</strong><small>0,5 a 20 Mb/s</small></label><input id="popover-bitrate" aria-label="Bitrate manual do compartilhamento" type="range" min={MIN_BITRATE_MBPS} max={MAX_BITRATE_MBPS} step="0.5" value={bitrateMbps} disabled={adaptiveBitrate} onChange={event => changeBitrate(Number(event.target.value))}/><output>{formatBitrate(bitrateMbps)}</output></div>
-        </section>
+        </section>}
       </div>
+    </section>
+  ) : null;
+
+  const morePopover = moreMenuOpen ? (
+    <section className="dock-popover more-popover viewing-popover" aria-label="Mais opções da chamada">
+      <header><strong>Visualização</strong><small>ESTE DISPOSITIVO</small></header>
+      {mobile && <button type="button" onClick={() => { setMoreMenuOpen(false); setScreenMenuOpen(true); }}><Icon name="screen"/><span><strong>Compartilhamentos</strong><small>{remoteSharingParticipants.length ? `Ajustar áudio de ${remoteSharingParticipants.length} tela${remoteSharingParticipants.length === 1 ? '' : 's'}` : screenShareSupported ? 'Tela, áudio e bitrate' : 'Áudio das telas recebidas'}</small></span><Icon name="chevron"/></button>}
+      <button type="button" onClick={() => void toggleFullscreen()}><Icon name="expand"/><span><strong>{document.fullscreenElement ? 'Sair da tela cheia' : 'Tela cheia'}</strong><small>Amplia a área compartilhada</small></span></button>
+      <button type="button" onClick={() => void togglePictureInPicture()} disabled={!sharingParticipants.length}><Icon name="pip"/><span><strong>Miniplayer</strong><small>{sharingParticipants.length ? 'Mantém uma tela sobre as outras janelas' : 'Disponível quando alguém compartilhar'}</small></span></button>
+      <button className={keepAwake ? 'is-selected' : ''} type="button" onClick={toggleKeepAwake} disabled={!('wakeLock' in navigator)}><Icon name="wake"/><span><strong>Manter tela ativa</strong><small>{'wakeLock' in navigator ? 'Evita que este dispositivo adormeça na chamada' : 'Não disponível neste navegador'}</small></span><i>{keepAwake ? wakeLockActive ? 'ATIVO' : 'AGUARDANDO' : 'DESLIGADO'}</i></button>
     </section>
   ) : null;
 
@@ -1693,10 +2501,14 @@ export default function RoomApp() {
       ) : (
         <section className="panel-section unified-invite-section">
           <div className="section-heading"><h3>Convite da chamada</h3><small>SALA {roomLabel}</small></div>
-          <div className="invite-code-display"><span>Código curto</span><strong>{roomLabel || '••••'}</strong></div>
+          <button className="invite-code-display" type="button" onClick={() => void copyValue('code')} disabled={!session.joinCode} aria-label={session.joinCode ? 'Copiar código curto da sala' : 'Código curto sendo gerado'}><span>{copied === 'code' ? 'Código copiado' : session.joinCode ? 'Código curto' : 'Gerando código'}</span><strong>{roomLabel}</strong><Icon name="copy"/></button>
           <div className="invite-actions"><button type="button" onClick={() => void copyValue('link')}><Icon name="link"/>{copied === 'link' ? 'Link copiado' : 'Copiar link'}</button><button type="button" onClick={() => setQrOpen(true)} disabled={!qrCode}><Icon name="qr"/>QR Code</button></div>
         </section>
       )}
+        {session && <section className="panel-section unified-participants-section">
+          <div className="section-heading"><h3>Na chamada</h3><small>{connectedParticipants.length} CONECTADO{connectedParticipants.length === 1 ? '' : 'S'}</small></div>
+          <div className="unified-participant-list">{connectedParticipants.map(participant => <div key={participant.id}><Avatar avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} size="small"/><span><strong>{participant.name}{participant.id === selfId ? ' · você' : ''}</strong><small>{participant.sharing ? 'Compartilhando tela' : participant.microphoneEnabled ? 'Microfone ativo' : participant.status}</small></span>{participant.id === leaderId && <Icon name="crown"/>}</div>)}</div>
+        </section>}
         {session && mobile && !screenShareSupported && <section className="panel-section mobile-screen-capability" role="status"><Icon name="screen"/><span><strong>Compartilhamento pelo celular</strong><small>Este navegador pode assistir à chamada, mas não consegue enviar a tela.</small></span></section>}
         <section className="panel-section quality-section">
           <div className="section-heading"><h3>Qualidade do vídeo</h3><small>{automaticQuality ? 'AUTOMÁTICA' : 'MANUAL'}</small></div>
@@ -1712,27 +2524,33 @@ export default function RoomApp() {
             <div className={`bitrate-control sidebar-bitrate-control ${adaptiveBitrate ? 'is-disabled' : ''}`}><label htmlFor="sidebar-bitrate"><strong>Limite manual</strong><small>Disponível com o modo adaptativo desligado</small></label><input id="sidebar-bitrate" aria-label="Limite manual de bitrate" type="range" min={MIN_BITRATE_MBPS} max={MAX_BITRATE_MBPS} step="0.5" value={bitrateMbps} disabled={adaptiveBitrate} onChange={event => changeBitrate(Number(event.target.value))}/><output>{formatBitrate(bitrateMbps)}</output></div>
           </div>
         </section>
+        <section className="panel-section interface-motion-section">
+          <div className="section-heading"><h3>Interface</h3><small>ESTE DISPOSITIVO</small></div>
+          <button className={`toggle-row ${animationsEnabled ? 'is-active' : ''}`} type="button" role="switch" aria-checked={animationsEnabled} onClick={() => setAnimationsEnabled(enabled => !enabled)}><Icon name="motion"/><span className="toggle-row-copy"><strong>Animações e movimento</strong><small>{animationsEnabled ? 'Fundo, mascote e transições suaves' : 'Efeitos visuais pausados'}</small></span><span className="toggle-row-switch"><i/></span></button>
+        </section>
     </div>
   );
 
   const callDock = session && mode !== 'error' ? (
     <div className="host-call-dock unified-call-dock" ref={dockRef} aria-label="Controles da chamada">
-      <button className={`dock-connection-indicator ${connectionQuality}`} type="button" aria-label={mediaLatency === null ? 'RTT P2P aguardando medição' : `RTT P2P ${mediaLatency} milissegundos`} data-label="Conexão P2P"><Icon name="link"/><span className="connection-tooltip"><strong>{latencyLabel} ms</strong><small>RTT WebRTC · {connectedPeerCount} par{connectedPeerCount === 1 ? '' : 'es'}</small></span></button>
+      <button className={`dock-connection-indicator ${connectionQuality}`} type="button" aria-label={mediaLatency === null ? 'RTT P2P aguardando medição' : `RTT P2P ${mediaLatency} milissegundos`} data-label="Conexão P2P"><Icon name="link"/><span className="connection-tooltip"><strong>{latencyLabel} ms</strong><small>RTT WebRTC · {connectedPeerCount} par{connectedPeerCount === 1 ? '' : 'es'} · {turnAvailable ? 'TURN pronto' : 'STUN'}</small></span></button>
       <button className={playbackEnabled ? 'is-on' : ''} type="button" onClick={togglePlayback} aria-label={playbackEnabled ? 'Silenciar chamada' : 'Ouvir chamada'} data-label="Áudio"><Icon name={playbackEnabled ? 'volume' : 'volumeOff'}/></button>
       <div className="dock-split-control">
-        <button className={microphoneEnabled ? 'is-on' : ''} type="button" onClick={() => void toggleMicrophone()} aria-label={microphoneEnabled ? 'Silenciar microfone' : 'Ativar microfone'} data-label="Microfone"><Icon name={microphoneEnabled ? 'microphone' : 'microphoneOff'}/></button>
-        <button className={`dock-chevron ${audioMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { setAudioMenuOpen(open => !open); setScreenMenuOpen(false); setLeaveMenuOpen(false); }} aria-expanded={audioMenuOpen} aria-label="Configurações de áudio" data-label="Ajustes"><Icon name="chevronDown"/></button>
+        <button className={microphoneEnabled ? 'is-on' : ''} type="button" onClick={() => void toggleMicrophone()} disabled={microphonePending} aria-busy={microphonePending} aria-label={microphonePending ? 'Abrindo microfone' : microphoneEnabled ? 'Silenciar microfone' : 'Ativar microfone'} data-label={microphonePending ? 'Abrindo…' : 'Microfone'}><Icon name={microphoneEnabled ? 'microphone' : 'microphoneOff'}/></button>
+        <button className={`dock-chevron ${audioMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { setAudioMenuOpen(open => !open); setScreenMenuOpen(false); setMoreMenuOpen(false); setLeaveMenuOpen(false); }} aria-expanded={audioMenuOpen} aria-label="Configurações de áudio" data-label="Ajustes"><Icon name="chevronDown"/></button>
       </div>
-      <div className="dock-split-control screen-split-control">
-        <button className={`${sharing ? 'is-on' : ''} ${!sharing && !screenShareSupported ? 'is-unsupported' : ''}`} type="button" onClick={() => void toggleScreenShare()} aria-label={sharing ? 'Parar compartilhamento' : screenShareSupported ? 'Compartilhar tela' : 'Compartilhamento de tela indisponível neste navegador'} aria-pressed={sharing} data-label={sharing ? 'Parar tela' : screenShareSupported ? 'Compartilhar' : 'Indisponível'} title={!sharing && !screenShareSupported ? 'Este navegador não permite compartilhar a tela' : undefined}><Icon name="screen"/></button>
-        <button className={`dock-chevron ${screenMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { setScreenMenuOpen(open => !open); setAudioMenuOpen(false); setLeaveMenuOpen(false); }} aria-expanded={screenMenuOpen} aria-label="Configurações da tela" data-label="Ajustes"><Icon name="chevronDown"/></button>
-      </div>
+      {(!mobile || screenShareSupported) && <div className="dock-split-control screen-split-control">
+        <button className={`${sharing ? 'is-on' : ''} ${!sharing && !screenShareSupported ? 'is-unsupported' : ''}`} type="button" onClick={() => void toggleScreenShare()} disabled={screenSharePending || (!sharing && !screenShareSupported)} aria-label={screenSharePending ? 'Abrindo seletor de tela' : sharing ? 'Parar compartilhamento' : screenShareSupported ? 'Compartilhar tela' : 'Compartilhamento de tela indisponível neste navegador'} aria-pressed={sharing} aria-busy={screenSharePending} data-label={screenSharePending ? 'Abrindo…' : sharing ? 'Parar tela' : screenShareSupported ? 'Compartilhar' : 'Indisponível'} title={!sharing && !screenShareSupported ? 'Este navegador não permite compartilhar a tela' : undefined}><Icon name="screen"/></button>
+        <button className={`dock-chevron ${screenMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { setScreenMenuOpen(open => !open); setAudioMenuOpen(false); setMoreMenuOpen(false); setLeaveMenuOpen(false); }} aria-expanded={screenMenuOpen} aria-label="Configurações da tela" data-label="Ajustes"><Icon name="chevronDown"/></button>
+      </div>}
       <button className={`dock-chat-button ${activeChat ? 'is-on' : ''}`} type="button" onClick={toggleChatSidebar} aria-label={activeChat ? 'Fechar chat' : unreadMessages ? `Abrir chat, ${unreadMessages} mensagem${unreadMessages === 1 ? '' : 's'} não lida${unreadMessages === 1 ? '' : 's'}` : 'Abrir chat'} data-label="Chat"><Icon name="chat"/>{unreadMessages > 0 && <span className="chat-unread-badge" aria-hidden="true">{unreadMessages === 99 ? '99+' : unreadMessages}</span>}</button>
-      {mobile && <button className={controlsOpen ? 'is-on mobile-controls-trigger' : 'mobile-controls-trigger'} type="button" onClick={() => { setControlsOpen(open => !open); setChatOpen(false); setProfileOpen(false); setAudioMenuOpen(false); setScreenMenuOpen(false); setLeaveMenuOpen(false); }} aria-expanded={controlsOpen} aria-label="Abrir controles" data-label="Controles"><Icon name="settings"/></button>}
+      <button className={moreMenuOpen ? 'is-on' : ''} type="button" onClick={() => { setMoreMenuOpen(open => !open); setAudioMenuOpen(false); setScreenMenuOpen(false); setLeaveMenuOpen(false); }} aria-expanded={moreMenuOpen} aria-label="Mais opções" data-label="Mais"><Icon name="more"/></button>
+      {mobile && <button className={controlsOpen ? 'is-on mobile-controls-trigger' : 'mobile-controls-trigger'} type="button" onClick={() => { setControlsOpen(open => !open); setChatOpen(false); setProfileOpen(false); setAudioMenuOpen(false); setScreenMenuOpen(false); setMoreMenuOpen(false); setLeaveMenuOpen(false); }} aria-expanded={controlsOpen} aria-label="Abrir controles" data-label="Controles"><Icon name="settings"/></button>}
       <span className="dock-divider"/>
-      <button className="hangup" type="button" onClick={() => { setLeaveMenuOpen(open => !open); setAudioMenuOpen(false); setScreenMenuOpen(false); }} aria-expanded={leaveMenuOpen} aria-label="Opções para sair da chamada" data-label="Sair"><Icon name="hangup"/></button>
+      <button className="hangup" type="button" onClick={() => { setLeaveMenuOpen(open => !open); setAudioMenuOpen(false); setScreenMenuOpen(false); setMoreMenuOpen(false); }} aria-expanded={leaveMenuOpen} aria-label="Opções para sair da chamada" data-label="Sair"><Icon name="hangup"/></button>
       {audioPopover}
       {screenPopover}
+      {morePopover}
       {exitPopover}
     </div>
   ) : null;
@@ -1741,10 +2559,10 @@ export default function RoomApp() {
     <div className={`unified-screens-grid count-${sharingParticipants.length}`}>
       {sharingParticipants.map(participant => {
         if (participant.id === selfId && localScreen) {
-          return <ScreenTile key={participant.id} stream={localScreen} name={participant.name} local playbackEnabled={false} volume={0}/>;
+          return <ScreenTile key={participant.id} stream={localScreen} name={participant.name} local/>;
         }
         const stream = peersRef.current.get(participant.id)?.screenStream;
-        return stream ? <ScreenTile key={participant.id} stream={stream} name={participant.name} playbackEnabled={playbackEnabled} volume={audioSettings.outputVolume / 100} outputDeviceId={audioSettings.outputDeviceId}/> : null;
+        return stream ? <ScreenTile key={participant.id} stream={stream} name={participant.name}/> : null;
       })}
     </div>
   ) : (
@@ -1760,16 +2578,28 @@ export default function RoomApp() {
   );
 
   return (
-    <div className={`app room-app unified-room-app ${mobile ? 'viewer-mode is-mobile-room' : ''} ${activeChat ? 'is-chat-open' : ''} ${controlsOpen ? 'is-controls-open' : ''}`}>
+    <div className={`app room-app unified-room-app ${mobile ? 'viewer-mode is-mobile-room' : ''} ${activeChat ? 'is-chat-open' : ''} ${controlsOpen ? 'is-controls-open' : ''} ${animationsEnabled ? '' : 'animations-disabled'}`}>
       <header className="topbar">
-        <div className="brand"><span className="unified-brand-mark"><Icon name="screen"/></span><strong>ScreenLink</strong></div>
+        <div className="brand"><BrandMark/><strong>ScreenLink</strong></div>
         <div className={`status-pill room-status-${connectionQuality}`}><i/>{session ? connectionStatusLabel : 'Pronto'}</div>
       </header>
       <main className="host-main unified-room-main">
           <aside className={`unified-chat-sidebar ${activeChat ? 'is-open' : 'is-closed'}`} aria-label="Chat da chamada" aria-hidden={!activeChat}>
             <header className="unified-sidebar-header">
-              <div><Icon name="chat"/><span><strong>Chat</strong><small>{session ? `Sala ${roomLabel}` : 'LOCAL'}</small></span></div>
-              {mobile && <button type="button" onClick={() => { setChatOpen(false); setProfileOpen(false); }} aria-label="Fechar chat"><Icon name="close"/></button>}
+              <div className="unified-sidebar-title"><Icon name="chat"/><span><strong>Chat</strong><small>{session ? `Sala ${roomLabel}` : 'LOCAL'}</small></span></div>
+              <div className="unified-sidebar-actions">
+                <div className="unified-chat-settings-anchor" ref={chatSettingsRef}>
+                  <button className={`chat-settings-trigger ${chatSettingsOpen ? 'is-open' : ''}`} type="button" aria-label="Personalizar aparência do chat" aria-expanded={chatSettingsOpen} onClick={() => setChatSettingsOpen(open => !open)}><Icon name="settings"/></button>
+                  {chatSettingsOpen && <section className="chat-settings-popover" aria-label="Aparência do chat">
+                    <header><strong>Aparência do chat</strong><small>SÓ NESTE DISPOSITIVO</small></header>
+                    <label><span><strong>Seu balão</strong><small>Destaque das suas mensagens</small></span><input type="color" value={chatAppearance.ownBubble} aria-label="Cor do seu balão" onChange={event => setChatAppearance(current => ({ ...current, ownBubble: event.currentTarget.value }))}/></label>
+                    <label><span><strong>Outros balões</strong><small>Mensagens dos participantes</small></span><input type="color" value={chatAppearance.otherBubble} aria-label="Cor dos outros balões" onChange={event => setChatAppearance(current => ({ ...current, otherBubble: event.currentTarget.value }))}/></label>
+                    <label><span><strong>Nomes</strong><small>Branco por padrão</small></span><input type="color" value={chatAppearance.nameColor} aria-label="Cor dos nomes" onChange={event => setChatAppearance(current => ({ ...current, nameColor: event.currentTarget.value }))}/></label>
+                    <button className="chat-settings-reset" type="button" onClick={() => setChatAppearance(DEFAULT_CHAT_APPEARANCE)}>Restaurar padrão</button>
+                  </section>}
+                </div>
+                {mobile && <button className="unified-sidebar-close" type="button" onClick={() => { setChatOpen(false); setProfileOpen(false); setChatSettingsOpen(false); }} aria-label="Fechar chat"><Icon name="close"/></button>}
+              </div>
             </header>
             {chatPanel}
             <button ref={profileBarRef} className="unified-profile-bar" type="button" onClick={() => setProfileOpen(open => !open)} aria-expanded={profileOpen} aria-label={profileOpen ? 'Fechar perfil' : 'Abrir perfil'}>
@@ -1778,9 +2608,33 @@ export default function RoomApp() {
               <Icon name="settings"/>
             </button>
           </aside>
-        <section className={`share-stage unified-room-stage ${sharingParticipants.length ? 'has-screens' : ''}`}>
+        <section ref={stageRef} className={`share-stage unified-room-stage ${sharingParticipants.length ? 'has-screens' : ''}`}>
+          <GradientWaves
+            className="room-gradient-waves"
+            horizonColor="#00c4ff"
+            waveColor="#ffffff"
+            crestColor="#ffffff"
+            speed={0.1}
+            amplitude={2.5}
+            waveScale={0.5}
+            waveRatio={0.9}
+            swell={35}
+            turbulence={20}
+            tilt={1.11}
+            zoom={1}
+            height={5.5}
+            fogDepth={15}
+            detail={mobile ? 'low' : 'medium'}
+            brightness={1}
+            opacity={1}
+            mouseInteraction={animationsEnabled}
+            parallaxStrength={0.5}
+            grain={animationsEnabled}
+            grainIntensity={0.05}
+            animated={animationsEnabled}
+          />
           {stageContent}
-          {session && !sharingParticipants.length && mode === 'connected' && (
+          {session && sharingParticipants.length > 0 && mode === 'connected' && (
             <div className="participant-rail">{connectedParticipants.map(participant => <div key={participant.id} className={speakingIds.has(participant.id) ? 'is-speaking' : ''}><Avatar avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} leader={participant.id === leaderId} size="small"/><span><strong>{participant.name}</strong><small>{participant.status}</small></span></div>)}</div>
           )}
           {callDock}
@@ -1794,8 +2648,8 @@ export default function RoomApp() {
       {profileOpen && (
         <div ref={profilePopoverRef} className="room-popover profile-popover unified-profile-popover">
           <header><div><span className="eyebrow">SEU PERFIL</span><h3>Como você aparece</h3></div><button type="button" onClick={() => { commitProfileName(); commitProfileStatus(); setProfileOpen(false); }} aria-label="Fechar perfil"><Icon name="close"/></button></header>
-          <label htmlFor="profile-name">Nome</label><input id="profile-name" value={profileNameDraft} onChange={event => { profileNameDraftRef.current = event.target.value; setProfileNameDraft(event.target.value); }} onBlur={commitProfileName} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { profileNameDraftRef.current = profileRef.current.name; setProfileNameDraft(profileRef.current.name); event.currentTarget.blur(); } }} maxLength={28}/>
-          <label htmlFor="profile-status">Mensagem de status</label><input id="profile-status" value={profileStatusDraft} onChange={event => { profileStatusDraftRef.current = event.target.value; setProfileStatusDraft(event.target.value); }} onBlur={commitProfileStatus} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { profileStatusDraftRef.current = profileRef.current.status; setProfileStatusDraft(profileRef.current.status); event.currentTarget.blur(); } }} maxLength={64} placeholder="Disponível"/>
+          <label htmlFor="profile-name">Nome</label><input id="profile-name" value={profileNameDraft} onChange={event => { profileEditRevisionRef.current += 1; profileNameDraftRef.current = event.target.value; setProfileNameDraft(event.target.value); }} onBlur={commitProfileName} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { profileNameDraftRef.current = profileRef.current.name; setProfileNameDraft(profileRef.current.name); event.currentTarget.blur(); } }} maxLength={28}/>
+          <label htmlFor="profile-status">Mensagem de status</label><input id="profile-status" value={profileStatusDraft} onChange={event => { profileEditRevisionRef.current += 1; profileStatusDraftRef.current = event.target.value; setProfileStatusDraft(event.target.value); }} onBlur={commitProfileStatus} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { profileStatusDraftRef.current = profileRef.current.status; setProfileStatusDraft(profileRef.current.status); event.currentTarget.blur(); } }} maxLength={64} placeholder="Disponível"/>
           <div className="profile-photo-heading"><label>Foto</label><small>{profileSaveState === 'saving' ? 'SALVANDO…' : profileSaveState === 'saved' ? profileStorageKind() === 'sqlite' ? 'SALVO NO SQLITE LOCAL' : 'SALVO NESTE NAVEGADOR' : profileSaveState === 'error' ? 'ERRO AO SALVAR' : 'ARMAZENAMENTO LOCAL'}</small></div>
           <div className="profile-photo-actions"><Avatar avatar={profile.avatar} name={profile.name} size="normal"/><label className="profile-photo-upload">{avatarUploading ? 'Preparando…' : 'Escolher foto'}<input type="file" accept="image/*" onChange={event => void uploadAvatar(event)} disabled={avatarUploading}/></label>{profile.avatar.startsWith('data:image/') && <button type="button" onClick={removeCustomAvatar}>Remover</button>}</div>
           <label>Avatares do app</label><div className="avatar-picker">{AVATARS.map(avatar => <button className={profile.avatar === avatar.id ? 'selected' : ''} type="button" key={avatar.id} onClick={() => updateProfile({ avatar: avatar.id })}><Avatar avatar={avatar.id} name={avatar.label}/><span>{avatar.label}</span></button>)}</div>
@@ -1806,79 +2660,3 @@ export default function RoomApp() {
     </div>
   );
 }
-
-/* Standalone room layout retired after the group engine was merged into the main ScreenLink shell.
-  if (!session || mode === 'landing') {
-    const saved = loadOwnerSession();
-    return (
-      <div className="room-app room-landing">
-        <header className="room-topbar"><span className="room-brand"><Icon name="screen"/><strong>ScreenLink</strong></span><span>Salas P2P</span></header>
-        <main>
-          <section className="landing-copy"><MascotMark/><span className="eyebrow">UMA SALA, TODAS AS TELAS</span><h1>Entre na call.<br/>Compartilhe quando quiser.</h1><p>Voz, chat e múltiplas telas em uma sala privada que continua ativa mesmo quando o líder sai.</p></section>
-          <section className="landing-card">
-            <button className="primary-room-action" type="button" onClick={() => void createRoom()}><Icon name="users"/><span><strong>Criar uma chamada</strong><small>Você começa como líder da sala</small></span><Icon name="chevron"/></button>
-            <div className="landing-divider"><span>ou entre em uma sala</span></div>
-            <form onSubmit={joinRoom} className="join-code-form"><label htmlFor="room-code">Código ou link da chamada</label><div><Icon name="link"/><input id="room-code" value={joinValue} onChange={event => setJoinValue(event.target.value)} placeholder="Cole o código aqui" autoComplete="off"/><button type="submit">Entrar</button></div></form>
-            {saved && <button className="resume-room" type="button" onClick={() => { setSession(saved); setMode('connecting'); }}><span><strong>Retomar sua sala</strong><small>{saved.invite.roomId.slice(0, 4).toUpperCase()} · você reassume a liderança</small></span><Icon name="chevron"/></button>}
-            {error && <p className="room-error">{error}</p>}
-          </section>
-        </main>
-      </div>
-    );
-  }
-
-  if (mode === 'error') {
-    return <div className="room-app room-state"><MascotMark/><h1>Sala indisponível</h1><p>{error}</p><button type="button" onClick={leaveRoom}>Voltar</button></div>;
-  }
-
-  return (
-    <div className={`room-app call-room ${mobile ? 'is-mobile-room' : 'is-desktop-room'} ${chatOpen ? 'has-chat' : ''}`}>
-      <header className="room-topbar">
-        <span className="room-brand"><Icon name="screen"/><strong>ScreenLink</strong></span>
-        <button className="room-title" type="button" onClick={() => setInviteOpen(open => !open)}><span>Sala {roomLabel}</span><small>{connectedParticipants.length} participante{connectedParticipants.length === 1 ? '' : 's'}</small><Icon name="chevron"/></button>
-        <span className={`connection-pill ${mode}`}>{mode === 'connected' ? `${latency || '—'} ms` : 'Conectando'}</span>
-      </header>
-
-      {!mobile && <aside className="room-sidebar">
-        <div className="sidebar-room-heading"><div><span className="eyebrow">SALA ATUAL</span><h2>Call {roomLabel}</h2></div><button type="button" onClick={() => setInviteOpen(open => !open)} aria-label="Abrir convite"><Icon name="link"/></button></div>
-        <div className="sidebar-section-title"><span>Na chamada</span><small>{connectedParticipants.length}/8</small></div>
-        <div className="participant-list">
-          {connectedParticipants.map(participant => <div className="participant-row" key={participant.id}><Avatar avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} size="small"/><span><strong>{participant.id === selfId ? `${participant.name} (você)` : participant.name}</strong><small>{participant.id === leaderId ? 'Líder da sala' : participant.sharing ? 'Compartilhando tela' : participant.microphoneEnabled ? 'Microfone ativo' : 'Silenciado'}</small></span>{participant.id === leaderId && <Icon name="crown"/>}</div>)}
-        </div>
-        <button className="invite-people" type="button" onClick={() => setInviteOpen(true)}><Icon name="users"/> Convidar pessoas</button>
-        <div className="sidebar-profile"><button type="button" onClick={() => setProfileOpen(open => !open)}><Avatar avatar={profile.avatar} name={profile.name} speaking={speakingIds.has(selfId)} size="small"/><span><strong>{profile.name}</strong><small>{isLeader ? 'Líder' : 'Na chamada'}</small></span><Icon name="settings"/></button></div>
-      </aside>}
-
-      <main className="room-stage">
-        {mode === 'connecting' ? <div className="stage-empty"><MascotMark/><h1>Entrando na chamada</h1><p>Reconectando à sala sem interromper quem já está aqui…</p></div> : sharingParticipants.length ? (
-          <div className={`screens-grid count-${sharingParticipants.length}`}>
-            {sharingParticipants.map(participant => {
-              if (participant.id === selfId && localScreen) return <ScreenTile key={participant.id} stream={localScreen} name={participant.name} local playbackEnabled={false}/>;
-              const stream = peersRef.current.get(participant.id)?.screenStream;
-              return stream ? <ScreenTile key={participant.id} stream={stream} name={participant.name} playbackEnabled={playbackEnabled}/> : null;
-            })}
-          </div>
-        ) : <div className="stage-empty participant-stage"><div className="stage-avatars">{connectedParticipants.map(participant => <Avatar key={participant.id} avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} size="large"/>)}</div><h1>Chamada em andamento</h1><p>Qualquer pessoa no computador pode compartilhar a tela quando precisar.</p></div>}
-
-        <div className="participant-rail">{connectedParticipants.map(participant => <div key={participant.id} className={speakingIds.has(participant.id) ? 'is-speaking' : ''}><Avatar avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} size="small"/><span>{participant.id === selfId ? 'Você' : participant.name}</span></div>)}</div>
-
-        <div className="room-dock" aria-label="Controles da chamada">
-          <button className={playbackEnabled ? 'is-active' : ''} type="button" onClick={togglePlayback} aria-label={playbackEnabled ? 'Silenciar chamada' : 'Ouvir chamada'}><Icon name={playbackEnabled ? 'volume' : 'volumeOff'}/><span>Áudio</span></button>
-          <button className={microphoneEnabled ? 'is-active' : ''} type="button" onClick={() => void toggleMicrophone()} aria-label={microphoneEnabled ? 'Silenciar microfone' : 'Ativar microfone'}><Icon name={microphoneEnabled ? 'microphone' : 'microphoneOff'}/><span>Microfone</span></button>
-          {!mobile && <button className={sharing ? 'is-sharing' : ''} type="button" onClick={() => void toggleScreenShare()} aria-label={sharing ? 'Parar compartilhamento' : 'Compartilhar tela'}><Icon name="screen"/><span>{sharing ? 'Parar tela' : 'Compartilhar'}</span></button>}
-          <button className={chatOpen ? 'is-active' : ''} type="button" onClick={() => setChatOpen(open => !open)} aria-label="Abrir chat"><Icon name="chat"/><span>Chat</span></button>
-          <button className="leave-call" type="button" onClick={leaveRoom} aria-label="Sair da chamada"><Icon name="hangup"/><span>Sair</span></button>
-        </div>
-      </main>
-
-      {chatOpen && <aside className="room-chat-panel"><header><div><span className="eyebrow">DURANTE A CALL</span><h2>Chat da sala</h2></div><button type="button" onClick={() => setChatOpen(false)} aria-label="Fechar chat"><Icon name="close"/></button></header><div className="room-chat-messages">{chatMessages.length ? chatMessages.map(message => message.system ? <p className="system-chat-message" key={message.id}>{message.text}</p> : <article className={message.senderId === selfId ? 'own' : ''} key={message.id}><div><strong>{message.senderId === selfId ? 'Você' : message.senderName}</strong><time>{new Date(message.sentAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</time></div><p>{message.text}</p></article>) : <div className="empty-chat"><Icon name="chat"/><p>As mensagens desta sala aparecem aqui e somem quando a call termina.</p></div>}</div><form onSubmit={sendChat}><input value={chatValue} onChange={event => setChatValue(event.target.value)} placeholder="Mensagem para a sala" maxLength={1000}/><button type="submit" disabled={!chatValue.trim()} aria-label="Enviar mensagem"><Icon name="chevron"/></button></form></aside>}
-
-      {inviteOpen && <div className="room-popover invite-popover"><header><div><span className="eyebrow">CONVIDAR</span><h3>Código da sala</h3></div><button type="button" onClick={() => setInviteOpen(false)}><Icon name="close"/></button></header><p>Quem entrar pelo computador poderá falar e compartilhar a própria tela.</p><label>Código curto</label><button className="copy-row" type="button" onClick={() => void copyValue('code')}><code>{roomCode(session.invite)}</code><span>{copied === 'code' ? 'Copiado' : <Icon name="copy"/>}</span></button><button className="copy-link" type="button" onClick={() => void copyValue('link')}><Icon name="link"/>{copied === 'link' ? 'Link copiado' : 'Copiar link completo'}</button>{isOwner && <button className="close-room-action" type="button" onClick={closeRoom}>Encerrar sala para todos</button>}</div>}
-
-      {profileOpen && <div className="room-popover profile-popover"><header><div><span className="eyebrow">SEU PERFIL</span><h3>Como você aparece</h3></div><button type="button" onClick={() => setProfileOpen(false)}><Icon name="close"/></button></header><label htmlFor="profile-name">Nome</label><input id="profile-name" value={profile.name} onChange={event => updateProfile({ name: event.target.value })} maxLength={28}/><label>Avatar</label><div className="avatar-picker">{AVATARS.map(avatar => <button className={profile.avatar === avatar.id ? 'selected' : ''} type="button" key={avatar.id} onClick={() => updateProfile({ avatar: avatar.id })}><Avatar avatar={avatar.id} name={avatar.label}/><span>{avatar.label}</span></button>)}</div></div>}
-
-      {error && <button className="call-error" type="button" onClick={() => setError('')}>{error}<Icon name="close"/></button>}
-    </div>
-  );
-}
-*/
