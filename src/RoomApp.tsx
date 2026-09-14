@@ -92,6 +92,7 @@ const COMPACT_LAYOUT_QUERY = '(max-width: 1240px)';
 const PHONE_LAYOUT_QUERY = '(max-width: 760px), (pointer: coarse) and (max-width: 980px)';
 const MOBILE_DEVICE_QUERY = '(pointer: coarse) and (max-width: 980px)';
 const WINDOWS_INSTALLER_URL = 'https://github.com/mqteuss/screenlink/releases/latest/download/ScreenLink-Setup-x64.exe';
+const INVALID_ROOM_ENTRY_ERROR = 'Cole um código ou link de sala válido.';
 const CHAT_LIMIT = 160;
 const CHAT_CHANNEL_PAYLOAD_LIMIT = 64_000;
 const CHAT_HISTORY_PAYLOAD_LIMIT = 48_000;
@@ -335,6 +336,66 @@ function Icon({ name }: { name: IconName }) {
     guide: <><path d="M4 5.5A3.5 3.5 0 0 1 7.5 2H12v18H7.5A3.5 3.5 0 0 0 4 23V5.5Z"/><path d="M20 5.5A3.5 3.5 0 0 0 16.5 2H12v18h4.5A3.5 3.5 0 0 1 20 23V5.5Z"/></>
   };
   return <svg className={`room-icon icon icon-${name}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
+}
+
+function MotionIcon({ active, activeIcon, inactiveIcon }: { active: boolean; activeIcon: IconName; inactiveIcon: IconName }) {
+  return (
+    <span className="t-icon-swap" data-state={active ? 'a' : 'b'} aria-hidden="true">
+      <span className="t-icon" data-icon="a"><Icon name={activeIcon}/></span>
+      <span className="t-icon" data-icon="b"><Icon name={inactiveIcon}/></span>
+    </span>
+  );
+}
+
+function MotionText({ value, enabled }: { value: string; enabled: boolean }) {
+  const [displayed, setDisplayed] = useState(value);
+  const displayedRef = useRef(value);
+  const [phase, setPhase] = useState('');
+  const elementRef = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    if (value === displayedRef.current) return undefined;
+    if (!enabled || reducedInterfaceMotion()) {
+      displayedRef.current = value;
+      setDisplayed(value);
+      setPhase('');
+      return undefined;
+    }
+
+    let frame: number | null = null;
+    setPhase('is-exit');
+    const timer = window.setTimeout(() => {
+      displayedRef.current = value;
+      setDisplayed(value);
+      setPhase('is-enter-start');
+      frame = window.requestAnimationFrame(() => {
+        if (elementRef.current) void elementRef.current.offsetHeight;
+        setPhase('');
+      });
+    }, motionMilliseconds('--text-swap-dur', 150));
+
+    return () => {
+      window.clearTimeout(timer);
+      if (frame !== null) window.cancelAnimationFrame(frame);
+    };
+  }, [enabled, value]);
+
+  return <span ref={elementRef} className={`t-text-swap ${phase}`}>{displayed}</span>;
+}
+
+function MotionSwitch({ on, compact = false }: { on: boolean; compact?: boolean }) {
+  const previousRef = useRef(on);
+  const [initialized, setInitialized] = useState(false);
+
+  useLayoutEffect(() => {
+    if (previousRef.current === on) return;
+    previousRef.current = on;
+    setInitialized(true);
+  }, [on]);
+
+  const className = `t-toggle ${initialized ? 'is-init' : ''}`;
+  if (compact) return <i className={className} data-on={on ? 'true' : 'false'}><b className="t-toggle-thumb"/></i>;
+  return <span className={`toggle-row-switch ${className}`} data-on={on ? 'true' : 'false'}><i className="t-toggle-thumb"/></span>;
 }
 
 function ChatDeliveryIndicator({ delivery, onRetry }: { delivery: ChatDelivery; onRetry: () => void }) {
@@ -620,6 +681,65 @@ function bottomSheetBackdrop(element: HTMLElement) {
   return element.closest<HTMLElement>('.unified-room-app')?.querySelector<HTMLElement>('.mobile-overlay-backdrop') ?? null;
 }
 
+function motionMilliseconds(property: string, fallback: number) {
+  const raw = window.getComputedStyle(document.documentElement).getPropertyValue(property).trim();
+  const value = Number.parseFloat(raw);
+  if (!Number.isFinite(value)) return fallback;
+  return raw.endsWith('s') && !raw.endsWith('ms') ? value * 1000 : value;
+}
+
+function reducedInterfaceMotion() {
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+function useMotionPresence(open: boolean, closeDurationProperty: string, closeFallback: number, animated: boolean) {
+  const [present, setPresent] = useState(open);
+  const [phase, setPhase] = useState<'closed' | 'opening' | 'open' | 'closing'>(open ? 'opening' : 'closed');
+
+  useLayoutEffect(() => {
+    let frame: number | null = null;
+    let timer: number | null = null;
+    const motionAllowed = animated && !reducedInterfaceMotion();
+
+    if (open) {
+      if (!present) {
+        setPresent(true);
+        setPhase('opening');
+        return undefined;
+      }
+      if (!motionAllowed) {
+        setPhase('open');
+        return undefined;
+      }
+      setPhase(current => current === 'open' ? current : 'opening');
+      frame = window.requestAnimationFrame(() => setPhase('open'));
+    } else if (present) {
+      if (!motionAllowed) {
+        setPresent(false);
+        setPhase('closed');
+        return undefined;
+      }
+      setPhase('closing');
+      timer = window.setTimeout(() => {
+        setPresent(false);
+        setPhase('closed');
+      }, motionMilliseconds(closeDurationProperty, closeFallback));
+    } else {
+      setPhase('closed');
+    }
+
+    return () => {
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [animated, closeDurationProperty, closeFallback, open, present]);
+
+  return {
+    present,
+    className: phase === 'open' ? 'is-open' : phase === 'closing' ? 'is-closing' : ''
+  };
+}
+
 function useBottomSheetGesture(enabled: boolean, onDismiss: () => void) {
   const dismissRef = useRef(onDismiss);
   const dragRef = useRef<SheetDragSession | null>(null);
@@ -693,7 +813,7 @@ function useBottomSheetGesture(enabled: boolean, onDismiss: () => void) {
       element.classList.remove('is-sheet-settling');
       element.style.removeProperty('--sheet-drag-y');
       if (motionElementRef.current === element) motionElementRef.current = null;
-    }, 280);
+    }, motionMilliseconds('--duration-fast', 250) + 30);
   }, [removeNativeListeners]);
 
   const dismissSheet = useCallback((knownElement?: HTMLElement) => {
@@ -741,7 +861,7 @@ function useBottomSheetGesture(enabled: boolean, onDismiss: () => void) {
       dismissTimerRef.current = null;
       closingRef.current = false;
       dismissRef.current();
-    }, 270);
+    }, motionMilliseconds('--panel-close-dur', 350) + 30);
   }, [removeNativeListeners, resetMotion, sheetId]);
 
   useEffect(() => {
@@ -862,7 +982,10 @@ function useBottomSheetGesture(enabled: boolean, onDismiss: () => void) {
   }, [enabled, onNativeTouchCancel, onNativeTouchEnd, onNativeTouchMove, removeNativeListeners]);
 
   const onAnimationEnd = useCallback((event: ReactAnimationEvent<HTMLElement>) => {
-    if (event.target !== event.currentTarget || event.animationName !== 'mobile-sheet-enter') return;
+    if (
+      event.target !== event.currentTarget
+      || (event.animationName !== 'mobile-sheet-enter' && event.animationName !== 'mobile-controls-enter')
+    ) return;
     sheetElementRef.current = event.currentTarget;
     event.currentTarget.style.setProperty('animation', 'none');
   }, []);
@@ -1077,7 +1200,7 @@ function ScreenTile({ stream, name, local, focused, thumbnail, focusable, onFocu
   return <article className={`screen-tile ${focused ? 'is-focused' : ''} ${thumbnail ? 'is-thumbnail' : ''}`} onDoubleClick={focusable ? onFocus : undefined}>
     <video ref={ref} autoPlay muted playsInline/>
     <span className="screen-tile-label">{local ? 'Sua tela' : `Tela de ${name}`}</span>
-    {focusable && <button className="screen-tile-focus" type="button" onClick={onFocus} aria-label={focused ? 'Voltar para todas as telas' : `Destacar a tela de ${local ? 'você' : name}`} title={focused ? 'Ver todas as telas' : 'Destacar esta tela'}><Icon name={focused ? 'grid' : 'expand'}/><span>{focused ? 'Ver todas' : 'Destacar'}</span></button>}
+    {focusable && <button className="screen-tile-focus" type="button" onClick={onFocus} aria-label={focused ? 'Voltar para todas as telas' : `Destacar a tela de ${local ? 'você' : name}`} title={focused ? 'Ver todas as telas' : 'Destacar esta tela'}><MotionIcon active={Boolean(focused)} activeIcon="grid" inactiveIcon="expand"/><span>{focused ? 'Ver todas' : 'Destacar'}</span></button>}
   </article>;
 }
 
@@ -1105,6 +1228,7 @@ export default function RoomApp() {
   const [mode, setMode] = useState<RoomMode>(session ? 'connecting' : 'landing');
   const [error, setError] = useState('');
   const [joinValue, setJoinValue] = useState('');
+  const [joinErrorRevision, setJoinErrorRevision] = useState(0);
   const [participants, setParticipants] = useState<Record<string, RoomParticipant>>({});
   const participantsRef = useRef(participants);
   const [selfId, setSelfId] = useState('');
@@ -1214,6 +1338,8 @@ export default function RoomApp() {
   const emojiPanelRef = useRef<HTMLElement>(null);
   const chatSettingsRef = useRef<HTMLDivElement>(null);
   const onboardingDialogRef = useRef<HTMLElement>(null);
+  const joinInputShellRef = useRef<HTMLDivElement>(null);
+  const callErrorTextRef = useRef('');
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectNowRef = useRef<(() => void) | null>(null);
   const wakeLockRef = useRef<ScreenWakeLock | null>(null);
@@ -1226,6 +1352,18 @@ export default function RoomApp() {
   const mobileOverlayHistoryActiveRef = useRef(false);
   const dismissMobileOverlayRef = useRef<() => void>(() => undefined);
   const staleMobileOverlayCleanedRef = useRef(false);
+
+  useEffect(() => {
+    if (!joinErrorRevision) return undefined;
+    const shell = joinInputShellRef.current;
+    if (!shell) return undefined;
+    shell.classList.remove('is-shaking');
+    void shell.offsetWidth;
+    shell.classList.add('is-shaking');
+    const shakeDuration = motionMilliseconds('--shake-dur-a', 80) * 2 + motionMilliseconds('--shake-dur-b', 60) * 2;
+    const timer = window.setTimeout(() => shell.classList.remove('is-shaking'), shakeDuration + 20);
+    return () => window.clearTimeout(timer);
+  }, [joinErrorRevision]);
 
   useEffect(() => {
     if (staleMobileOverlayCleanedRef.current) return;
@@ -2660,7 +2798,8 @@ export default function RoomApp() {
     void unlockInterfaceSounds();
     const entry = parseRoomEntry(joinValue);
     if (!entry) {
-      setError('Cole um código ou link de sala válido.');
+      setError(INVALID_ROOM_ENTRY_ERROR);
+      setJoinErrorRevision(revision => revision + 1);
       return;
     }
     setError('');
@@ -3079,7 +3218,10 @@ export default function RoomApp() {
     if (emojiOpen) {
       if (phone) {
         dismissMobileOverlayRef.current();
-        window.setTimeout(() => chatInputRef.current?.focus(), 280);
+        window.setTimeout(
+          () => chatInputRef.current?.focus(),
+          motionMilliseconds('--panel-close-dur', 350) + 30
+        );
       } else setEmojiOpen(false);
       return;
     }
@@ -3105,7 +3247,6 @@ export default function RoomApp() {
   function finishOnboarding() {
     writeStorage('localStorage', ONBOARDING_KEY, 'complete');
     setOnboardingOpen(false);
-    setOnboardingStep(0);
   }
 
   function reopenOnboarding() {
@@ -3195,6 +3336,9 @@ export default function RoomApp() {
   const desktopApp = Boolean(window.screenLinkDesktop?.isDesktop);
   const showWindowsDownload = !desktopApp && !phone && /Windows/i.test(navigator.userAgent);
   const updateNoticeVisible = Boolean(desktopApp && desktopUpdate?.notice && dismissedUpdateVersion !== (desktopUpdate.version || desktopUpdate.status));
+  const joinEntryError = !session && error === INVALID_ROOM_ENTRY_ERROR;
+  const callErrorVisible = Boolean(error && mode !== 'error' && !joinEntryError);
+  if (callErrorVisible) callErrorTextRef.current = error;
   const onboarding = ONBOARDING_STEPS[onboardingStep];
   const activeChat = chatOpen;
   const activeResolution = automaticQuality ? 720 : resolution;
@@ -3219,6 +3363,16 @@ export default function RoomApp() {
         .map(value => ALL_CHAT_EMOJIS.find(emoji => emoji.value === value))
         .filter((emoji): emoji is ChatEmoji => Boolean(emoji))
       : CHAT_EMOJI_GROUPS.find(group => group.id === emojiCategory)?.emojis || [];
+  const audioMenuPresence = useMotionPresence(!mobile && audioMenuOpen, '--dropdown-close-dur', 150, animationsEnabled);
+  const screenMenuPresence = useMotionPresence(!mobile && screenMenuOpen, '--dropdown-close-dur', 150, animationsEnabled);
+  const moreMenuPresence = useMotionPresence(!mobile && moreMenuOpen, '--dropdown-close-dur', 150, animationsEnabled);
+  const leaveMenuPresence = useMotionPresence(!mobile && leaveMenuOpen, '--dropdown-close-dur', 150, animationsEnabled);
+  const chatSettingsPresence = useMotionPresence(!phone && chatSettingsOpen, '--dropdown-close-dur', 150, animationsEnabled);
+  const profilePresence = useMotionPresence(!phone && profileOpen, '--dropdown-close-dur', 150, animationsEnabled);
+  const qrPresence = useMotionPresence(!phone && qrOpen, '--modal-close-dur', 150, animationsEnabled);
+  const onboardingPresence = useMotionPresence(onboardingOpen, '--modal-close-dur', 150, animationsEnabled);
+  const updatePresence = useMotionPresence(updateNoticeVisible, '--toast-close', 250, animationsEnabled);
+  const callErrorPresence = useMotionPresence(callErrorVisible, '--toast-close', 250, animationsEnabled);
   void peerVersion;
 
   const closeDockSheets = useCallback(() => {
@@ -3337,7 +3491,7 @@ export default function RoomApp() {
       {newMessagesBelow > 0 && <button className="chat-jump-latest" type="button" onClick={() => scrollChatToLatest(true)}>{newMessagesBelow === 1 ? 'Nova mensagem' : `${newMessagesBelow} novas mensagens`} <span aria-hidden="true">↓</span></button>}
       <form className="chat-composer" onSubmit={sendChat}>
         <div className="emoji-picker-anchor" ref={emojiPickerRef}>
-          <button className={emojiOpen ? 'is-open' : ''} type="button" onClick={toggleEmojiPicker} disabled={!chatCanSend} aria-expanded={emojiOpen} aria-controls="chat-emoji-picker" aria-label={emojiOpen ? 'Voltar ao teclado' : 'Escolher emoji'}><Icon name={emojiOpen && phone ? 'keyboard' : 'smile'}/></button>
+          <button className={emojiOpen ? 'is-open' : ''} type="button" onClick={toggleEmojiPicker} disabled={!chatCanSend} aria-expanded={emojiOpen} aria-controls="chat-emoji-picker" aria-label={emojiOpen ? 'Voltar ao teclado' : 'Escolher emoji'}><MotionIcon active={emojiOpen && phone} activeIcon="keyboard" inactiveIcon="smile"/></button>
         </div>
         <textarea ref={chatInputRef} aria-label="Escrever mensagem" title={phone ? 'Enter quebra a linha' : 'Enter envia · Shift+Enter quebra a linha'} enterKeyHint={phone ? 'enter' : 'send'} rows={1} value={chatValue} onFocus={() => setChatInputFocused(true)} onBlur={() => window.setTimeout(() => setChatInputFocused(document.activeElement === chatInputRef.current), 0)} onChange={event => { setChatValue(event.target.value); resizeChatInput(event.currentTarget); }} onKeyDown={event => { if (!phone && event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={chatPlaceholder} maxLength={1000} disabled={!chatCanSend}/>
         <button type="submit" onPointerDown={event => { if (phone) event.preventDefault(); }} disabled={!normalizeChatText(chatValue) || !chatCanSend} aria-label="Enviar mensagem"><Icon name="send"/></button>
@@ -3357,8 +3511,8 @@ export default function RoomApp() {
     </div>
   );
 
-  const audioPopover = audioMenuOpen ? (
-    <section className="dock-popover audio-popover unified-audio-popover" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="audio-sheet-title" {...dockSheetGesture}>
+  const audioPopover = (mobile ? audioMenuOpen : audioMenuPresence.present) ? (
+    <section className={`dock-popover audio-popover unified-audio-popover ${mobile ? '' : `t-dropdown ${audioMenuPresence.className}`}`} data-origin="bottom-center" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="audio-sheet-title" {...dockSheetGesture}>
       <header><strong id="audio-sheet-title">Áudio</strong><small>DISPOSITIVOS E VOZ</small><button className="mobile-sheet-close" type="button" onClick={() => dismissDockSheet()} aria-label="Fechar configurações de áudio"><Icon name="close"/></button></header>
       <div className="room-device-stack">
         <RoomDevicePicker input label="Dispositivo de entrada" value={audioSettings.inputDeviceId} devices={audioDevices} onChange={deviceId => void changeInputDevice(deviceId)}/>
@@ -3370,13 +3524,13 @@ export default function RoomApp() {
           <div className="volume-control"><label htmlFor="room-input-volume"><strong>Volume de entrada</strong><small>Ganho do seu microfone</small></label><input id="room-input-volume" type="range" min="0" max="150" value={audioSettings.inputVolume} onChange={event => changeInputVolume(Number(event.target.value))}/><output>{audioSettings.inputVolume}%</output></div>
           <div className="volume-control"><label htmlFor="room-output-volume"><strong>Volume de saída</strong><small>Áudio recebido da chamada</small></label><input id="room-output-volume" type="range" min="0" max="100" value={audioSettings.outputVolume} onChange={event => changeOutputVolume(Number(event.target.value))}/><output>{audioSettings.outputVolume}%</output></div>
           <div className="interface-sound-controls">
-            <button className="voice-setting interface-sound-setting" type="button" role="switch" aria-checked={interfaceSoundsEnabled} onClick={toggleInterfaceSounds}><span><strong>Sons da interface</strong><small>Chamada, microfone e participantes</small></span><i><b/></i></button>
+            <button className="voice-setting interface-sound-setting" type="button" role="switch" aria-checked={interfaceSoundsEnabled} onClick={toggleInterfaceSounds}><span><strong>Sons da interface</strong><small>Chamada, microfone e participantes</small></span><MotionSwitch on={interfaceSoundsEnabled} compact/></button>
             <button className="interface-sound-test" type="button" onClick={() => void testInterfaceSound()}>Testar</button>
           </div>
           {interfaceSoundFeedback && <p className="interface-sound-feedback" role="status">{interfaceSoundFeedback}</p>}
         </section>
         <section className="audio-menu-section participant-volume-section">
-          <header><strong>Voz dos participantes</strong><small>{remoteParticipants.length ? `${remoteParticipants.length} PESSOA${remoteParticipants.length === 1 ? '' : 'S'}` : 'SÓ VOCÊ'}</small></header>
+          <header><strong>Voz dos participantes</strong><small><MotionText value={remoteParticipants.length ? `${remoteParticipants.length} PESSOA${remoteParticipants.length === 1 ? '' : 'S'}` : 'SÓ VOCÊ'} enabled={animationsEnabled}/></small></header>
           {remoteParticipants.length ? <div className="screen-volume-list participant-volume-list">{remoteParticipants.map(participant => (
             <div className="screen-volume-row participant-volume-row" key={participant.id}>
               <Avatar avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} size="small"/>
@@ -3403,7 +3557,7 @@ export default function RoomApp() {
                     : microphoneEnabled
                       ? `${audioSettings[key] ? 'Ativado' : 'Desativado'} na captura · sem confirmação do driver`
                       : details.description;
-              return <button key={key} className={`voice-setting ${applying ? 'is-applying' : ''}`} type="button" role="switch" aria-checked={audioSettings[key]} aria-busy={applying} disabled={unsupported || voiceSettingPending !== null} onClick={() => void changeVoiceSetting(key)}><span><strong>{details.label}</strong><small>{status}</small></span><i><b/></i></button>;
+              return <button key={key} className={`voice-setting ${applying ? 'is-applying' : ''}`} type="button" role="switch" aria-checked={audioSettings[key]} aria-busy={applying} disabled={unsupported || voiceSettingPending !== null} onClick={() => void changeVoiceSetting(key)}><span><strong>{details.label}</strong><small>{status}</small></span><MotionSwitch on={audioSettings[key]} compact/></button>;
             })}
           </div>
           {voiceSettingFeedback && <p className="voice-processing-feedback" role="status">{voiceSettingFeedback}</p>}
@@ -3412,9 +3566,9 @@ export default function RoomApp() {
     </section>
   ) : null;
 
-  const screenPopover = screenMenuOpen ? (
-    <section className="dock-popover more-popover screen-popover unified-screen-popover" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="screen-sheet-title" {...dockSheetGesture}>
-      <header><strong id="screen-sheet-title">Compartilhamento</strong><small>{sharing ? 'ATIVO' : 'PRONTO'}</small><button className="mobile-sheet-close" type="button" onClick={() => dismissDockSheet()} aria-label="Fechar configurações do compartilhamento"><Icon name="close"/></button></header>
+  const screenPopover = (mobile ? screenMenuOpen : screenMenuPresence.present) ? (
+    <section className={`dock-popover more-popover screen-popover unified-screen-popover ${mobile ? '' : `t-dropdown ${screenMenuPresence.className}`}`} data-origin="bottom-center" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="screen-sheet-title" {...dockSheetGesture}>
+      <header><strong id="screen-sheet-title">Compartilhamento</strong><small><MotionText value={sharing ? 'ATIVO' : 'PRONTO'} enabled={animationsEnabled}/></small><button className="mobile-sheet-close" type="button" onClick={() => dismissDockSheet()} aria-label="Fechar configurações do compartilhamento"><Icon name="close"/></button></header>
       <button type="button" onClick={() => { void toggleScreenShare(); dismissDockSheet(); }} disabled={screenSharePending || (!sharing && !screenShareSupported)}><Icon name="screen"/><span><strong>{screenSharePending ? 'Abrindo seletor…' : sharing ? 'Parar compartilhamento' : 'Compartilhar tela'}</strong><small>{sharing ? 'A chamada continuará ativa' : screenShareSupported ? 'Escolha uma tela, janela ou aba' : 'Não disponível neste navegador'}</small></span></button>
       <div className="screen-popover-scroll">
         <section className="screen-menu-section">
@@ -3430,15 +3584,15 @@ export default function RoomApp() {
         </section>
         {screenShareSupported && <section className="screen-menu-section bitrate-menu-section">
           <header><strong>Bitrate de envio</strong><small>ATÉ {formatBitrate(effectiveBitrateMbps)}</small></header>
-          <button className={`compact-toggle ${adaptiveBitrate ? 'is-active' : ''}`} type="button" role="switch" aria-checked={adaptiveBitrate} onClick={() => changeAdaptiveBitrate(!adaptiveBitrate)}><span><strong>Bitrate adaptativo</strong><small>Ajusta o limite ao perfil de vídeo</small></span><i><b/></i></button>
+          <button className={`compact-toggle ${adaptiveBitrate ? 'is-active' : ''}`} type="button" role="switch" aria-checked={adaptiveBitrate} onClick={() => changeAdaptiveBitrate(!adaptiveBitrate)}><span><strong>Bitrate adaptativo</strong><small>Ajusta o limite ao perfil de vídeo</small></span><MotionSwitch on={adaptiveBitrate} compact/></button>
           <div className={`bitrate-control ${adaptiveBitrate ? 'is-disabled' : ''}`}><label htmlFor="popover-bitrate"><strong>Limite manual</strong><small>0,5 a 20 Mb/s</small></label><input id="popover-bitrate" aria-label="Bitrate manual do compartilhamento" type="range" min={MIN_BITRATE_MBPS} max={MAX_BITRATE_MBPS} step="0.5" value={bitrateMbps} disabled={adaptiveBitrate} onChange={event => changeBitrate(Number(event.target.value))}/><output>{formatBitrate(bitrateMbps)}</output></div>
         </section>}
       </div>
     </section>
   ) : null;
 
-  const morePopover = moreMenuOpen ? (
-    <section className="dock-popover more-popover viewing-popover" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="more-sheet-title" {...dockSheetGesture}>
+  const morePopover = (mobile ? moreMenuOpen : moreMenuPresence.present) ? (
+    <section className={`dock-popover more-popover viewing-popover ${mobile ? '' : `t-dropdown ${moreMenuPresence.className}`}`} data-origin="bottom-center" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="more-sheet-title" {...dockSheetGesture}>
       <header><strong id="more-sheet-title">Mais opções</strong><small>ESTE DISPOSITIVO</small><button className="mobile-sheet-close" type="button" onClick={() => dismissDockSheet()} aria-label="Fechar mais opções"><Icon name="close"/></button></header>
       {mobile && <button type="button" onClick={() => { setMoreMenuOpen(false); setScreenMenuOpen(true); }}><Icon name="screen"/><span><strong>Compartilhamentos</strong><small>{remoteSharingParticipants.length ? `Ajustar áudio de ${remoteSharingParticipants.length} tela${remoteSharingParticipants.length === 1 ? '' : 's'}` : screenShareSupported ? 'Tela, áudio e bitrate' : 'Áudio das telas recebidas'}</small></span><Icon name="chevron"/></button>}
       <button type="button" onClick={() => void toggleFullscreen()}><Icon name="expand"/><span><strong>{document.fullscreenElement ? 'Sair da tela cheia' : 'Tela cheia'}</strong><small>Amplia a área compartilhada</small></span></button>
@@ -3447,8 +3601,8 @@ export default function RoomApp() {
     </section>
   ) : null;
 
-  const exitPopover = leaveMenuOpen ? (
-    <section className="dock-popover audio-popover exit-popover" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="exit-sheet-title" {...dockSheetGesture}>
+  const exitPopover = (mobile ? leaveMenuOpen : leaveMenuPresence.present) ? (
+    <section className={`dock-popover audio-popover exit-popover ${mobile ? '' : `t-dropdown ${leaveMenuPresence.className}`}`} data-origin="bottom-right" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="exit-sheet-title" {...dockSheetGesture}>
       <header><strong id="exit-sheet-title">Sair da chamada</strong><small>AÇÕES DA SALA</small><button className="mobile-sheet-close" type="button" onClick={() => dismissDockSheet()} aria-label="Fechar opções para sair"><Icon name="close"/></button></header>
       <div className="exit-options">
         <button type="button" onClick={leaveRoom}><Icon name="hangup"/><span><strong>Sair da chamada</strong><small>A sala continua para quem permanecer</small></span></button>
@@ -3464,14 +3618,17 @@ export default function RoomApp() {
       {!session ? (
         <section className="panel-section unified-join-section">
           <div className="section-heading"><h3>Entrar em uma chamada</h3><small>CÓDIGO OU LINK</small></div>
-          <form onSubmit={joinRoom} className="unified-join-form"><div><Icon name="link"/><input aria-label="Código ou link da chamada" value={joinValue} onChange={event => { setJoinValue(event.target.value); if (error) setError(''); }} placeholder="Cole o código da sala" autoComplete="off" autoCapitalize="characters" enterKeyHint="go" spellCheck={false} maxLength={512}/><button type="submit" disabled={!joinValue.trim()}>Entrar</button></div></form>
+          <form onSubmit={joinRoom} className={`unified-join-form t-input-wrap ${joinEntryError ? 'is-error' : ''}`}>
+            <div ref={joinInputShellRef} className={`t-input ${joinEntryError ? 'is-error' : ''}`}><Icon name="link"/><input aria-label="Código ou link da chamada" aria-describedby="join-room-error" aria-invalid={joinEntryError} value={joinValue} onChange={event => { setJoinValue(event.target.value); joinInputShellRef.current?.classList.remove('is-shaking'); if (error) setError(''); }} placeholder="Cole o código da sala" autoComplete="off" autoCapitalize="characters" enterKeyHint="go" spellCheck={false} maxLength={512}/><button type="submit" disabled={!joinValue.trim()}>Entrar</button></div>
+            <p id="join-room-error" className="t-error-msg" role="alert">{INVALID_ROOM_ENTRY_ERROR}</p>
+          </form>
           {loadOwnerSession() && <button className="unified-resume" type="button" onClick={() => { setSession(loadOwnerSession()); setMode('connecting'); }}>Retomar sua última sala</button>}
         </section>
       ) : (
         <section className="panel-section unified-invite-section">
           <div className="section-heading"><h3>Convite da chamada</h3><small>SALA {roomLabel}</small></div>
-          <button className="invite-code-display" type="button" onClick={() => void copyValue('code')} disabled={!session.joinCode} aria-label={session.joinCode ? 'Copiar código curto da sala' : 'Código curto sendo gerado'}><span>{copied === 'code' ? 'Código copiado' : session.joinCode ? 'Código curto' : 'Gerando código'}</span><strong>{roomLabel}</strong><Icon name="copy"/></button>
-          <div className="invite-actions"><button type="button" onClick={() => void copyValue('link')}><Icon name="link"/>{copied === 'link' ? 'Link copiado' : 'Copiar link'}</button><button type="button" onClick={() => setQrOpen(true)} disabled={!qrCode}><Icon name="qr"/>QR Code</button></div>
+          <button className="invite-code-display" type="button" onClick={() => void copyValue('code')} disabled={!session.joinCode} aria-label={session.joinCode ? 'Copiar código curto da sala' : 'Código curto sendo gerado'}><MotionText value={copied === 'code' ? 'Código copiado' : session.joinCode ? 'Código curto' : 'Gerando código'} enabled={animationsEnabled}/><strong>{roomLabel}</strong><Icon name="copy"/></button>
+          <div className="invite-actions"><button type="button" onClick={() => void copyValue('link')}><Icon name="link"/><MotionText value={copied === 'link' ? 'Link copiado' : 'Copiar link'} enabled={animationsEnabled}/></button><button type="button" onClick={() => setQrOpen(true)} disabled={!qrCode}><Icon name="qr"/>QR Code</button></div>
         </section>
       )}
         {session && <section className="panel-section unified-participants-section">
@@ -3481,7 +3638,7 @@ export default function RoomApp() {
         {session && mobile && !screenShareSupported && <section className="panel-section mobile-screen-capability" role="status"><Icon name="screen"/><span><strong>Compartilhamento pelo celular</strong><small>Este navegador pode assistir à chamada, mas não consegue enviar a tela.</small></span></section>}
         <section className="panel-section quality-section">
           <div className="section-heading"><h3>Qualidade do vídeo</h3><small>{automaticQuality ? 'AUTOMÁTICA' : 'MANUAL'}</small></div>
-          <button className={`toggle-row ${automaticQuality ? 'is-active' : ''}`} type="button" role="switch" aria-checked={automaticQuality} onClick={() => changeAutomaticQuality(!automaticQuality)}><Icon name="settings"/><span className="toggle-row-copy"><strong>Resolução e fluidez automáticas</strong><small>{activeResolution}p · até {activeFps} FPS</small></span><span className="toggle-row-switch"><i/></span></button>
+          <button className={`toggle-row ${automaticQuality ? 'is-active' : ''}`} type="button" role="switch" aria-checked={automaticQuality} onClick={() => changeAutomaticQuality(!automaticQuality)}><Icon name="settings"/><span className="toggle-row-copy"><strong>Resolução e fluidez automáticas</strong><small>{activeResolution}p · até {activeFps} FPS</small></span><MotionSwitch on={automaticQuality}/></button>
           <div className="quality-controls">
             <SegmentedSelector label="Resolução" suffix="resolução" options={RESOLUTIONS} value={resolution} disabled={automaticQuality} premium={1080} onChange={value => { automaticQualityRef.current = false; setAutomaticQuality(false); void applyVideoProfile(value, fpsRef.current); }}/>
             <SegmentedSelector label="Fluidez" suffix="FPS" options={FRAME_RATES} value={fps} disabled={automaticQuality} premium={60} onChange={value => { automaticQualityRef.current = false; setAutomaticQuality(false); void applyVideoProfile(resolutionRef.current, value); }}/>
@@ -3489,13 +3646,13 @@ export default function RoomApp() {
           </div>
           <div className="sidebar-bitrate-settings">
             <div className="subsection-heading"><strong>Transmissão</strong><small>ATÉ {formatBitrate(effectiveBitrateMbps)}</small></div>
-            <button className={`toggle-row bitrate-toggle ${adaptiveBitrate ? 'is-active' : ''}`} type="button" role="switch" aria-checked={adaptiveBitrate} onClick={() => changeAdaptiveBitrate(!adaptiveBitrate)}><Icon name="link"/><span className="toggle-row-copy"><strong>Bitrate adaptativo</strong><small>O WebRTC reduz o envio quando a rede apertar</small></span><span className="toggle-row-switch"><i/></span></button>
+            <button className={`toggle-row bitrate-toggle ${adaptiveBitrate ? 'is-active' : ''}`} type="button" role="switch" aria-checked={adaptiveBitrate} onClick={() => changeAdaptiveBitrate(!adaptiveBitrate)}><Icon name="link"/><span className="toggle-row-copy"><strong>Bitrate adaptativo</strong><small>O WebRTC reduz o envio quando a rede apertar</small></span><MotionSwitch on={adaptiveBitrate}/></button>
             <div className={`bitrate-control sidebar-bitrate-control ${adaptiveBitrate ? 'is-disabled' : ''}`}><label htmlFor="sidebar-bitrate"><strong>Limite manual</strong><small>Disponível com o modo adaptativo desligado</small></label><input id="sidebar-bitrate" aria-label="Limite manual de bitrate" type="range" min={MIN_BITRATE_MBPS} max={MAX_BITRATE_MBPS} step="0.5" value={bitrateMbps} disabled={adaptiveBitrate} onChange={event => changeBitrate(Number(event.target.value))}/><output>{formatBitrate(bitrateMbps)}</output></div>
           </div>
         </section>
         <section className="panel-section interface-motion-section">
           <div className="section-heading"><h3>Interface</h3><small>ESTE DISPOSITIVO</small></div>
-          <button className={`toggle-row ${animationsEnabled ? 'is-active' : ''}`} type="button" role="switch" aria-checked={animationsEnabled} onClick={() => setAnimationsEnabled(enabled => !enabled)}><Icon name="motion"/><span className="toggle-row-copy"><strong>Animações e movimento</strong><small>{animationsEnabled ? 'Fundo, mascote e transições suaves' : 'Efeitos visuais pausados'}</small></span><span className="toggle-row-switch"><i/></span></button>
+          <button className={`toggle-row ${animationsEnabled ? 'is-active' : ''}`} type="button" role="switch" aria-checked={animationsEnabled} onClick={() => setAnimationsEnabled(enabled => !enabled)}><Icon name="motion"/><span className="toggle-row-copy"><strong>Animações e movimento</strong><small>{animationsEnabled ? 'Fundo, mascote e transições suaves' : 'Efeitos visuais pausados'}</small></span><MotionSwitch on={animationsEnabled}/></button>
           <button className="interface-action-row" type="button" onClick={reopenOnboarding}><Icon name="guide"/><span><strong>Rever tutorial</strong><small>Conheça chamadas, chat e compartilhamentos</small></span><Icon name="chevron"/></button>
           {desktopApp && desktopUpdate && <div className="desktop-update-settings">
             <div><Icon name={desktopUpdate.status === 'downloaded' ? 'check' : 'refresh'}/><span><strong>Atualizações do aplicativo</strong><small>Versão {desktopUpdate.currentVersion}{desktopUpdate.status === 'portable' ? ' · edição portátil' : ''}</small></span></div>
@@ -3516,16 +3673,16 @@ export default function RoomApp() {
 
   const callDock = session && mode !== 'error' ? (
     <div className="host-call-dock unified-call-dock" ref={dockRef} aria-label="Controles da chamada">
-      <button className={playbackEnabled ? 'is-on' : ''} type="button" onClick={togglePlayback} aria-label={playbackEnabled ? 'Silenciar chamada' : 'Ouvir chamada'} data-label="Áudio"><Icon name={playbackEnabled ? 'volume' : 'volumeOff'}/></button>
+      <button className={playbackEnabled ? 'is-on' : ''} type="button" onClick={togglePlayback} aria-label={playbackEnabled ? 'Silenciar chamada' : 'Ouvir chamada'} data-label="Áudio"><MotionIcon active={playbackEnabled} activeIcon="volume" inactiveIcon="volumeOff"/></button>
       <div className="dock-split-control">
-        <button className={microphoneEnabled ? 'is-on' : ''} type="button" onClick={() => void toggleMicrophone()} disabled={microphonePending} aria-busy={microphonePending} aria-label={microphonePending ? 'Abrindo microfone' : microphoneEnabled ? 'Silenciar microfone' : 'Ativar microfone'} data-label={microphonePending ? 'Abrindo…' : 'Microfone'}><Icon name={microphoneEnabled ? 'microphone' : 'microphoneOff'}/></button>
+        <button className={microphoneEnabled ? 'is-on' : ''} type="button" onClick={() => void toggleMicrophone()} disabled={microphonePending} aria-busy={microphonePending} aria-label={microphonePending ? 'Abrindo microfone' : microphoneEnabled ? 'Silenciar microfone' : 'Ativar microfone'} data-label={microphonePending ? 'Abrindo…' : 'Microfone'}><MotionIcon active={microphoneEnabled} activeIcon="microphone" inactiveIcon="microphoneOff"/></button>
         <button className={`dock-chevron ${audioMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { if (audioMenuOpen) dismissDockSheet(); else { setAudioMenuOpen(true); setScreenMenuOpen(false); setMoreMenuOpen(false); setLeaveMenuOpen(false); } }} aria-expanded={audioMenuOpen} aria-label="Configurações de áudio" data-label="Ajustes"><Icon name="chevronDown"/></button>
       </div>
       {(!mobile || screenShareSupported) && <div className="dock-split-control screen-split-control">
         <button className={`${sharing ? 'is-on' : ''} ${!sharing && !screenShareSupported ? 'is-unsupported' : ''}`} type="button" onClick={() => void toggleScreenShare()} disabled={screenSharePending || (!sharing && !screenShareSupported)} aria-label={screenSharePending ? 'Abrindo seletor de tela' : sharing ? 'Parar compartilhamento' : screenShareSupported ? 'Compartilhar tela' : 'Compartilhamento de tela indisponível neste navegador'} aria-pressed={sharing} aria-busy={screenSharePending} data-label={screenSharePending ? 'Abrindo…' : sharing ? 'Parar tela' : screenShareSupported ? 'Compartilhar' : 'Indisponível'} title={!sharing && !screenShareSupported ? 'Este navegador não permite compartilhar a tela' : undefined}><Icon name="screen"/></button>
         <button className={`dock-chevron ${screenMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { if (screenMenuOpen) dismissDockSheet(); else { setScreenMenuOpen(true); setAudioMenuOpen(false); setMoreMenuOpen(false); setLeaveMenuOpen(false); } }} aria-expanded={screenMenuOpen} aria-label="Configurações da tela" data-label="Ajustes"><Icon name="chevronDown"/></button>
       </div>}
-      <button className={`dock-chat-button ${activeChat ? 'is-on' : ''}`} type="button" onClick={toggleChatSidebar} aria-label={activeChat ? 'Fechar chat' : unreadMessages ? `Abrir chat, ${unreadMessages} mensagem${unreadMessages === 1 ? '' : 's'} não lida${unreadMessages === 1 ? '' : 's'}` : 'Abrir chat'} data-label="Chat"><Icon name="chat"/>{unreadMessages > 0 && <span className="chat-unread-badge" aria-hidden="true">{unreadMessages === 99 ? '99+' : unreadMessages}</span>}</button>
+      <button className={`dock-chat-button ${activeChat ? 'is-on' : ''}`} type="button" onClick={toggleChatSidebar} aria-label={activeChat ? 'Fechar chat' : unreadMessages ? `Abrir chat, ${unreadMessages} mensagem${unreadMessages === 1 ? '' : 's'} não lida${unreadMessages === 1 ? '' : 's'}` : 'Abrir chat'} data-label="Chat"><Icon name="chat"/><span className="chat-unread-badge t-badge" data-open={unreadMessages > 0 ? 'true' : 'false'} aria-hidden="true"><span className="t-badge-dot">{unreadMessages === 99 ? '99+' : unreadMessages}</span></span></button>
       <button className={moreMenuOpen ? 'is-on' : ''} type="button" onClick={() => { if (moreMenuOpen) dismissDockSheet(); else { setMoreMenuOpen(true); setAudioMenuOpen(false); setScreenMenuOpen(false); setLeaveMenuOpen(false); } }} aria-expanded={moreMenuOpen} aria-label="Mais opções" data-label="Mais"><Icon name="more"/></button>
       {mobile && <button className={controlsOpen ? 'is-on mobile-controls-trigger' : 'mobile-controls-trigger'} type="button" onClick={() => { if (controlsOpen) dismissControlsSheet(); else { setControlsOpen(true); setChatOpen(false); setProfileOpen(false); setAudioMenuOpen(false); setScreenMenuOpen(false); setMoreMenuOpen(false); setLeaveMenuOpen(false); } }} aria-expanded={controlsOpen} aria-label="Abrir controles" data-label="Controles"><Icon name="settings"/></button>}
       <span className="dock-divider"/>
@@ -3558,8 +3715,8 @@ export default function RoomApp() {
       {session && mode === 'connected' && connectedParticipants.length ? (
         <div className="stage-identities">{connectedParticipants.map(participant => <div className="stage-identity" key={participant.id}><Avatar avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} leader={participant.id === leaderId} size="large"/><strong>{participant.name}</strong><small>{participant.status}</small></div>)}</div>
       ) : <div className="stage-echo"><Avatar avatar="echo" name="Echo" size="large"/></div>}
-      <h1>{!session ? 'Inicie uma chamada' : mode === 'connecting' ? 'Entrando na chamada' : mode === 'error' ? 'Sala indisponível' : 'Chamada em andamento'}</h1>
-      {mode !== 'connected' && <p>{!session ? 'Crie uma sala ou entre com um código. Quem estiver no computador também pode compartilhar a própria tela.' : mode === 'connecting' ? 'Reconectando à sala sem interromper quem já está aqui…' : error}</p>}
+      <h1><MotionText value={!session ? 'Inicie uma chamada' : mode === 'connecting' ? 'Entrando na chamada' : mode === 'error' ? 'Sala indisponível' : 'Chamada em andamento'} enabled={animationsEnabled}/></h1>
+      {mode !== 'connected' && <p><MotionText value={!session ? 'Crie uma sala ou entre com um código. Quem estiver no computador também pode compartilhar a própria tela.' : mode === 'connecting' ? 'Reconectando à sala sem interromper quem já está aqui…' : error} enabled={animationsEnabled}/></p>}
       {!session && <div className="stage-entry-actions"><button className="primary-action" type="button" onClick={() => void createRoom()}><Icon name="users"/> Iniciar chamada</button>{mobile && <button className="secondary-action" type="button" onClick={() => { setControlsOpen(true); setChatOpen(false); }}><Icon name="link"/> Entrar com código</button>}</div>}
       {!session && showWindowsDownload && <aside className="windows-download-promo" aria-label="Aplicativo ScreenLink para Windows">
         <div className="windows-download-heading">
@@ -3585,13 +3742,13 @@ export default function RoomApp() {
       <main className="host-main unified-room-main">
           <aside className={`unified-chat-sidebar ${activeChat ? 'is-open' : 'is-closed'}`} aria-label="Navegação e chat da chamada">
             <div className="unified-sidebar-brand"><div className="brand"><BrandMark/><strong>ScreenLink</strong></div></div>
-            <button className="unified-rail-chat" type="button" onClick={toggleChatSidebar} aria-label={unreadMessages ? `Abrir chat, ${unreadMessages} mensagem${unreadMessages === 1 ? '' : 's'} não lida${unreadMessages === 1 ? '' : 's'}` : 'Abrir chat'}><Icon name="chat"/>{unreadMessages > 0 && <span aria-hidden="true">{unreadMessages === 99 ? '99+' : unreadMessages}</span>}</button>
+            <button className="unified-rail-chat" type="button" onClick={toggleChatSidebar} aria-label={unreadMessages ? `Abrir chat, ${unreadMessages} mensagem${unreadMessages === 1 ? '' : 's'} não lida${unreadMessages === 1 ? '' : 's'}` : 'Abrir chat'}><Icon name="chat"/><span className="chat-unread-badge t-badge" data-open={unreadMessages > 0 ? 'true' : 'false'} aria-hidden="true"><span className="t-badge-dot">{unreadMessages === 99 ? '99+' : unreadMessages}</span></span></button>
             <header className="unified-sidebar-header">
               <div className="unified-sidebar-title"><Icon name="chat"/><span><strong>Chat</strong><small>{session ? `Sala ${roomLabel}` : 'LOCAL'}</small></span></div>
               <div className="unified-sidebar-actions">
                 <div className="unified-chat-settings-anchor" ref={chatSettingsRef}>
                   <button className={`chat-settings-trigger ${chatSettingsOpen ? 'is-open' : ''}`} type="button" aria-label="Personalizar aparência do chat" aria-expanded={chatSettingsOpen} onClick={() => { if (chatSettingsOpen) dismissChatSettingsSheet(); else setChatSettingsOpen(true); }}><Icon name="settings"/></button>
-                  {chatSettingsOpen && <section className="chat-settings-popover" aria-label="Aparência do chat" {...chatSettingsSheetGesture}>
+                  {(phone ? chatSettingsOpen : chatSettingsPresence.present) && <section className={`chat-settings-popover ${phone ? '' : `t-dropdown ${chatSettingsPresence.className}`}`} data-origin="top-right" aria-label="Aparência do chat" {...chatSettingsSheetGesture}>
                     <header><strong>Aparência do chat</strong><small>SÓ NESTE DISPOSITIVO</small></header>
                     <label><span><strong>Seu balão</strong><small>Destaque das suas mensagens</small></span><input type="color" value={chatAppearance.ownBubble} aria-label="Cor do seu balão" onChange={event => setChatAppearance(current => ({ ...current, ownBubble: event.currentTarget.value }))}/></label>
                     <label><span><strong>Outros balões</strong><small>Mensagens dos participantes</small></span><input type="color" value={chatAppearance.otherBubble} aria-label="Cor dos outros balões" onChange={event => setChatAppearance(current => ({ ...current, otherBubble: event.currentTarget.value }))}/></label>
@@ -3642,7 +3799,7 @@ export default function RoomApp() {
           {callDock}
         </section>
         <aside className={`control-panel unified-control-panel ${controlsOpen ? 'is-open' : ''}`} role={phone && controlsOpen ? 'dialog' : undefined} aria-modal={phone && controlsOpen || undefined} aria-hidden={mobile && !controlsOpen} {...controlsSheetGesture}>
-          <div className="panel-header"><div><h2>Controles</h2></div><button className={`sidebar-connection-indicator room-status-${connectionQuality}`} type="button" aria-label={!session ? 'Pronto para iniciar uma chamada' : mediaLatency === null ? 'Conexão P2P aguardando medição' : `Conexão P2P com ${mediaLatency} milissegundos de latência`}><i/><span>{session ? connectionStatusLabel : 'Pronto'}</span><span className="connection-tooltip"><strong>{session ? mediaLatency === null ? 'Medindo conexão' : `${latencyLabel} ms` : 'Sem chamada ativa'}</strong><small>{session ? `RTT WebRTC · ${connectedPeerCount} par${connectedPeerCount === 1 ? '' : 'es'} · ${turnAvailable ? 'TURN pronto' : 'STUN'}` : 'O status da rede aparecerá durante a chamada'}</small></span></button>{mobile && <button className="mobile-panel-close" type="button" onClick={() => dismissControlsSheet()} aria-label="Fechar controles"><Icon name="close"/></button>}</div>
+          <div className="panel-header"><div><h2>Controles</h2></div><button className={`sidebar-connection-indicator room-status-${connectionQuality}`} type="button" aria-label={!session ? 'Pronto para iniciar uma chamada' : mediaLatency === null ? 'Conexão P2P aguardando medição' : `Conexão P2P com ${mediaLatency} milissegundos de latência`}><i/><MotionText value={session ? connectionStatusLabel : 'Pronto'} enabled={animationsEnabled}/><span className="connection-tooltip"><strong>{session ? mediaLatency === null ? 'Medindo conexão' : `${latencyLabel} ms` : 'Sem chamada ativa'}</strong><small>{session ? `RTT WebRTC · ${connectedPeerCount} par${connectedPeerCount === 1 ? '' : 'es'} · ${turnAvailable ? 'TURN pronto' : 'STUN'}` : 'O status da rede aparecerá durante a chamada'}</small></span></button>{mobile && <button className="mobile-panel-close" type="button" onClick={() => dismissControlsSheet()} aria-label="Fechar controles"><Icon name="close"/></button>}</div>
           {mobile && <button className="mobile-control-profile" type="button" onClick={() => { setProfileOpen(true); setControlsOpen(false); }}><Avatar avatar={profile.avatar} name={profile.name} leader={Boolean(selfId && selfId === leaderId)} size="small"/><span><strong>{profile.name}</strong><small>{profile.status}</small></span><Icon name="settings"/></button>}
           <div className="panel-view">{callPanel}</div>
         </aside>
@@ -3654,8 +3811,8 @@ export default function RoomApp() {
         <button className="mobile-sheet-backdrop" type="button" tabIndex={-1} aria-label="Fechar painel" onClick={() => dismissDockSheet()}/>
         <div className="mobile-sheet-host">{dockPopovers}</div>
       </div>}
-      {profileOpen && (
-        <div ref={profilePopoverRef} className="room-popover profile-popover unified-profile-popover" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="profile-sheet-title" {...profileSheetGesture}>
+      {(phone ? profileOpen : profilePresence.present) && (
+        <div ref={profilePopoverRef} className={`room-popover profile-popover unified-profile-popover ${phone ? '' : `t-dropdown ${profilePresence.className}`}`} data-origin="bottom-left" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="profile-sheet-title" {...profileSheetGesture}>
           <header><div><span className="eyebrow">SEU PERFIL</span><h3 id="profile-sheet-title">Como você aparece</h3></div><button type="button" onClick={() => dismissProfileSheet()} aria-label="Fechar perfil"><Icon name="close"/></button></header>
           <label htmlFor="profile-name">Nome</label><input id="profile-name" value={profileNameDraft} onChange={event => { profileEditRevisionRef.current += 1; profileNameDraftRef.current = event.target.value; setProfileNameDraft(event.target.value); }} onBlur={commitProfileName} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { profileNameDraftRef.current = profileRef.current.name; setProfileNameDraft(profileRef.current.name); event.currentTarget.blur(); } }} maxLength={28}/>
           <label htmlFor="profile-status">Mensagem de status</label><input id="profile-status" value={profileStatusDraft} onChange={event => { profileEditRevisionRef.current += 1; profileStatusDraftRef.current = event.target.value; setProfileStatusDraft(event.target.value); }} onBlur={commitProfileStatus} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { profileStatusDraftRef.current = profileRef.current.status; setProfileStatusDraft(profileRef.current.status); event.currentTarget.blur(); } }} maxLength={64} placeholder="Disponível"/>
@@ -3664,8 +3821,8 @@ export default function RoomApp() {
           <label>Avatares do app</label><div className="avatar-picker">{AVATARS.map(avatar => <button className={profile.avatar === avatar.id ? 'selected' : ''} type="button" key={avatar.id} onClick={() => updateProfile({ avatar: avatar.id })}><Avatar avatar={avatar.id} name={avatar.label}/><span>{avatar.label}</span></button>)}</div>
         </div>
       )}
-      {qrOpen && <div className="modal-backdrop" role="presentation" onPointerDown={event => { if (event.target === event.currentTarget) dismissQrSheet(); }}><section className="qr-modal" role="dialog" aria-modal="true" aria-labelledby="room-qr-title" {...qrSheetGesture}><span className="eyebrow">SALA {roomLabel}</span><h2 id="room-qr-title">Entrar pelo QR Code</h2><p>Aponte a câmera do celular para abrir o convite completo.</p>{qrCode ? <img src={qrCode} alt={`QR Code da sala ${roomLabel}`}/> : <div className="qr-loading">Gerando QR Code…</div>}<button type="button" onClick={() => dismissQrSheet()}>Fechar</button></section></div>}
-      {updateNoticeVisible && desktopUpdate && <aside className={`desktop-update-card is-${desktopUpdate.status}`} role="status" aria-live="polite">
+      {(phone ? qrOpen : qrPresence.present) && <div className={`modal-backdrop ${phone ? '' : `motion-overlay ${qrPresence.className}`}`} role="presentation" onPointerDown={event => { if (event.target === event.currentTarget) dismissQrSheet(); }}><section className={`qr-modal ${phone ? '' : `t-modal ${qrPresence.className}`}`} role="dialog" aria-modal="true" aria-labelledby="room-qr-title" {...qrSheetGesture}><span className="eyebrow">SALA {roomLabel}</span><h2 id="room-qr-title">Entrar pelo QR Code</h2><p>Aponte a câmera do celular para abrir o convite completo.</p>{qrCode ? <img src={qrCode} alt={`QR Code da sala ${roomLabel}`}/> : <div className="qr-loading">Gerando QR Code…</div>}<button type="button" onClick={() => dismissQrSheet()}>Fechar</button></section></div>}
+      {updatePresence.present && desktopUpdate && <aside className={`desktop-update-card t-toast ${updatePresence.className} is-${desktopUpdate.status}`} role="status" aria-live="polite">
         <div className="desktop-update-icon"><Icon name={desktopUpdate.status === 'downloaded' ? 'check' : desktopUpdate.status === 'downloading' ? 'download' : 'refresh'}/></div>
         <div className="desktop-update-copy">
           <span>ATUALIZAÇÃO DO SCREENLINK</span>
@@ -3696,24 +3853,24 @@ export default function RoomApp() {
           </div>
         </div>
       </aside>}
-      {onboardingOpen && <div className="onboarding-backdrop" role="presentation">
-        <section ref={onboardingDialogRef} className="onboarding-dialog" role="dialog" aria-modal="true" aria-labelledby="onboarding-title" aria-describedby="onboarding-description" tabIndex={-1}>
+      {onboardingPresence.present && <div className={`onboarding-backdrop motion-overlay ${onboardingPresence.className}`} role="presentation">
+        <section ref={onboardingDialogRef} className={`onboarding-dialog t-modal ${onboardingPresence.className}`} role="dialog" aria-modal="true" aria-labelledby="onboarding-title" aria-describedby="onboarding-description" tabIndex={-1}>
           <header><div className="onboarding-brand"><BrandMark/><span>Guia rápido</span></div><span className="onboarding-counter">{String(onboardingStep + 1).padStart(2, '0')} / {String(ONBOARDING_STEPS.length).padStart(2, '0')}</span><button type="button" onClick={finishOnboarding} aria-label="Fechar tutorial"><Icon name="close"/></button></header>
           <OnboardingPreview step={onboardingStep}/>
-          <div className="onboarding-content" key={`copy-${onboardingStep}`}>
-            <div className="onboarding-step-label"><Icon name={onboarding.icon}/><span>{onboarding.eyebrow}</span></div>
-            <h2 id="onboarding-title">{onboarding.title}</h2>
-            <p id="onboarding-description">{onboarding.description}</p>
-            <div className="onboarding-notes">{onboarding.points.map(point => <span key={point}><Icon name="check"/>{point}</span>)}</div>
+          <div className="onboarding-content t-stagger is-shown" key={`copy-${onboardingStep}`}>
+            <div className="onboarding-step-label t-stagger-line t-stagger-line--1"><Icon name={onboarding.icon}/><span>{onboarding.eyebrow}</span></div>
+            <h2 className="t-stagger-line t-stagger-line--2" id="onboarding-title">{onboarding.title}</h2>
+            <p className="t-stagger-line t-stagger-line--3" id="onboarding-description">{onboarding.description}</p>
+            <div className="onboarding-notes t-stagger-line t-stagger-line--4">{onboarding.points.map(point => <span key={point}><Icon name="check"/>{point}</span>)}</div>
           </div>
           <nav className="onboarding-progress" aria-label="Progresso do tutorial">{ONBOARDING_STEPS.map((step, index) => <button key={step.title} className={index === onboardingStep ? 'is-current' : index < onboardingStep ? 'is-complete' : ''} type="button" onClick={() => setOnboardingStep(index)} aria-label={`Ir para etapa ${index + 1}`} aria-current={index === onboardingStep ? 'step' : undefined}><span>{index + 1}</span></button>)}</nav>
           <footer>
             <button className="onboarding-skip" type="button" onClick={finishOnboarding}>Pular</button>
-            <div><button type="button" onClick={() => setOnboardingStep(step => Math.max(0, step - 1))} disabled={onboardingStep === 0}>Anterior</button><button className="is-primary" type="button" onClick={() => onboardingStep === ONBOARDING_STEPS.length - 1 ? finishOnboarding() : setOnboardingStep(step => step + 1)}>{onboardingStep === ONBOARDING_STEPS.length - 1 ? 'Abrir o ScreenLink' : 'Próximo'}<Icon name={onboardingStep === ONBOARDING_STEPS.length - 1 ? 'check' : 'chevron'}/></button></div>
+            <div><button type="button" onClick={() => setOnboardingStep(step => Math.max(0, step - 1))} disabled={onboardingStep === 0}>Anterior</button><button className="is-primary" type="button" onClick={() => onboardingStep === ONBOARDING_STEPS.length - 1 ? finishOnboarding() : setOnboardingStep(step => step + 1)}>{onboardingStep === ONBOARDING_STEPS.length - 1 ? 'Abrir o ScreenLink' : 'Próximo'}<MotionIcon active={onboardingStep === ONBOARDING_STEPS.length - 1} activeIcon="check" inactiveIcon="chevron"/></button></div>
           </footer>
         </section>
       </div>}
-      {error && mode !== 'error' && <button className="call-error" type="button" onClick={() => setError('')}>{error}<Icon name="close"/></button>}
+      {callErrorPresence.present && <button className={`call-error motion-call-error ${callErrorPresence.className}`} type="button" onClick={() => setError('')}>{callErrorTextRef.current}<Icon name="close"/></button>}
     </div>
   );
 }

@@ -287,9 +287,9 @@
 .unified-screen-strip .screen-tile:hover { box-shadow: inset 0 0 0 1px rgba(111,207,223,.55); transform: translateY(-1px); }
 .unified-screen-strip .screen-tile > .screen-tile-label { right: .35rem; bottom: .35rem; left: .35rem; overflow: hidden; padding: .26rem .36rem; font-size: .53rem; text-overflow: ellipsis; white-space: nowrap; }
 .unified-screen-strip .screen-tile-focus { inset: 0; width: 100%; height: 100%; border: 0; border-radius: inherit; justify-content: center; background: transparent; box-shadow: none; backdrop-filter: none; }
-.unified-screen-strip .screen-tile-focus .icon, .unified-screen-strip .screen-tile-focus span { opacity: 0; transition: opacity 180ms ease; }
+.unified-screen-strip .screen-tile-focus > .t-icon-swap, .unified-screen-strip .screen-tile-focus > span:last-child { opacity: 0; transition: opacity var(--duration-quick) ease; }
 .unified-screen-strip .screen-tile-focus:hover { background: rgba(2,5,6,.3); }
-.unified-screen-strip .screen-tile-focus:hover .icon, .unified-screen-strip .screen-tile-focus:hover span, .unified-screen-strip .screen-tile-focus:focus-visible .icon, .unified-screen-strip .screen-tile-focus:focus-visible span { opacity: 1; }
+.unified-screen-strip .screen-tile-focus:hover > .t-icon-swap, .unified-screen-strip .screen-tile-focus:hover > span:last-child, .unified-screen-strip .screen-tile-focus:focus-visible > .t-icon-swap, .unified-screen-strip .screen-tile-focus:focus-visible > span:last-child { opacity: 1; }
 .unified-call-dock { z-index: 16; }
 .unified-call-dock .connection-tooltip { width: max-content; min-width: 7.8rem; padding: .5rem .6rem; border: 1px solid #313438; border-radius: .55rem; display: grid; gap: .12rem; color: #eee; background: rgba(15,16,17,.98); box-shadow: 0 .65rem 1.8rem rgba(0,0,0,.42); opacity: 0; pointer-events: none; transition: opacity 160ms ease, transform 180ms ease; }
 .unified-call-dock .connection-tooltip strong { font-size: .7rem; font-weight: 620; }
@@ -297,9 +297,13 @@
 .unified-control-panel .panel-view { overflow: hidden; }
 .unified-call-page { overflow-y: auto; overflow-x: hidden; scrollbar-width: thin; scrollbar-color: #35383a transparent; }
 .unified-join-section { padding-top: 1rem; }
-.unified-join-form > div { min-height: 2.65rem; padding: .25rem .3rem .25rem .72rem; border-radius: .7rem; display: grid; grid-template-columns: 1rem minmax(0, 1fr) auto; align-items: center; gap: .5rem; background: #191919; box-shadow: inset 0 0 0 1px transparent; transition: background 220ms ease, box-shadow 220ms ease, transform 220ms var(--ease-out); }
+.unified-join-form { display: grid; }
+.unified-join-form > div { min-height: 2.65rem; padding: .25rem .3rem .25rem .72rem; border: 1px solid transparent; border-radius: .7rem; display: grid; grid-template-columns: 1rem minmax(0, 1fr) auto; align-items: center; gap: .5rem; background: #191919; box-shadow: inset 0 0 0 1px transparent; transition: background var(--duration-fast) ease, border-color var(--duration-quick) ease-out, box-shadow var(--duration-fast) ease, transform var(--duration-fast) var(--ease-smooth-out); }
 .unified-join-form > div:hover { background: #1d2021; box-shadow: inset 0 0 0 1px rgba(255,255,255,.07); }
 .unified-join-form > div:focus-within { background: #202426; box-shadow: inset 0 0 0 1px rgba(91,191,219,.42), 0 0 0 .2rem rgba(65,161,193,.08); transform: translateY(-.04rem); }
+.unified-join-form > .t-input.is-error { border-color: rgba(235, 102, 108, .72); box-shadow: 0 0 0 .2rem rgba(223, 77, 83, .09); }
+.unified-join-form .t-error-msg { max-height: 0; margin: 0 .3rem; overflow: hidden; color: #ef9ca0; font-size: .58rem; line-height: 1.35; transition: max-height var(--revert-dur) var(--ease-smooth-out), margin var(--revert-dur) var(--ease-smooth-out), opacity var(--revert-dur) ease-out, visibility 0s linear var(--revert-dur); }
+.unified-join-form.is-error .t-error-msg { max-height: 2rem; margin-top: .35rem; transition-delay: 0s; }
 .unified-join-form .icon { width: .9rem; color: #85898c; }
 .unified-join-form input { min-width: 0; height: 2rem; border: 0; outline: 0; color: #e4e4e4; background: transparent; font-size: .68rem; }
 .unified-join-form input::placeholder { color: #7f878a; transition: color 180ms ease; }
@@ -336,7 +340,8 @@
 .unified-call-dock .dock-split-control .dock-chevron { transition: color 190ms ease, background 220ms var(--ease-out), box-shadow 220ms ease; }
 .unified-call-dock .dock-split-control .dock-chevron:hover { background: rgba(255,255,255,.105); }
 .unified-call-dock .dock-chat-button { position: relative; }
-.unified-call-dock .chat-unread-badge { position: absolute; top: -.28rem; right: -.28rem; min-width: 1.05rem; height: 1.05rem; padding: 0 .25rem; border: .12rem solid #171a1b; border-radius: 999px; display: grid; place-items: center; color: #061114; background: #72cce3; font-size: .5rem; font-weight: 760; line-height: 1; box-shadow: 0 .2rem .7rem rgba(74,177,205,.32); animation: unread-badge-enter 220ms var(--ease-out) both; }
+.unified-call-dock .chat-unread-badge { position: absolute; top: -.28rem; right: -.28rem; min-width: 1.05rem; height: 1.05rem; padding: 0; border: 0; background: transparent; box-shadow: none; animation: none; }
+.unified-call-dock .chat-unread-badge .t-badge-dot { min-width: 1.05rem; height: 1.05rem; padding: 0 .25rem; border: .12rem solid #171a1b; border-radius: 999px; display: grid; place-items: center; color: #061114; background: #72cce3; font-size: .5rem; font-weight: 760; line-height: 1; box-shadow: 0 .2rem .7rem rgba(74,177,205,.32); }
 .unified-call-dock .screen-split-control > button.is-unsupported { color: #6f777a; }
 .mobile-screen-capability { padding: .72rem !important; border-radius: .72rem; display: grid; grid-template-columns: 1.15rem minmax(0, 1fr); align-items: start; gap: .65rem; background: rgba(255,255,255,.045); }
 .mobile-screen-capability > .icon { width: 1rem; margin-top: .08rem; color: #8d979a; }
@@ -402,13 +407,13 @@
 }
 
 /* Desktop room shell: both sidebars and the stage now use the full window height. */
-.unified-room-app .unified-room-main { grid-template-columns: var(--room-rail-width) minmax(0, 1fr) var(--room-sidebar-width); transition: grid-template-columns 320ms var(--ease-out); }
+.unified-room-app .unified-room-main { grid-template-columns: var(--room-rail-width) minmax(0, 1fr) var(--room-sidebar-width); transition: grid-template-columns var(--duration-medium) var(--ease-smooth-out); }
 .unified-room-app.is-chat-open .unified-room-main { grid-template-columns: var(--room-sidebar-width) minmax(0, 1fr) var(--room-sidebar-width); }
 .unified-room-stage { grid-column: 2; min-width: 0; }
 .unified-control-panel { grid-column: 3; border-left: 0; }
 .unified-room-app .unified-room-stage::after { border: 1px solid #2b2e30; border-bottom: 0; border-left: 0; border-radius: 0 1rem 0 0; }
 
-.unified-chat-sidebar { grid-column: 1; min-width: 0; min-height: 0; display: grid; grid-template-rows: 3.5rem 3.65rem minmax(0, 1fr) 2.9rem; overflow: hidden; border-right: 1px solid #2b2e30; background: #090b0c; transform: translateX(0); opacity: 1; visibility: visible; transition: opacity 220ms ease, transform 320ms var(--ease-out), visibility 0s linear; }
+.unified-chat-sidebar { grid-column: 1; min-width: 0; min-height: 0; display: grid; grid-template-rows: 3.5rem 3.65rem minmax(0, 1fr) 2.9rem; overflow: hidden; border-right: 1px solid #2b2e30; background: #090b0c; transform: translateX(0); opacity: 1; visibility: visible; transition: opacity var(--duration-fast) ease, transform var(--duration-slow) var(--ease-smooth-out), visibility 0s linear; }
 .unified-chat-sidebar.is-closed { pointer-events: auto; opacity: 1; visibility: visible; transform: translateX(0); }
 .unified-sidebar-brand { min-width: 0; padding: 0 .88rem; border-bottom: 1px solid #222527; display: flex; align-items: center; overflow: hidden; }
 .unified-sidebar-brand .brand { min-width: max-content; }
@@ -421,7 +426,8 @@
 .unified-chat-sidebar.is-closed .unified-rail-chat { position: relative; width: 2.55rem; height: 2.55rem; margin: .65rem auto 0; border: 0; border-radius: .72rem; display: grid; place-items: center; align-self: start; color: #929b9e; background: transparent; transition: color 180ms ease, background 220ms ease, transform 180ms var(--ease-out); }
 .unified-chat-sidebar.is-closed .unified-rail-chat:hover { color: #f2f5f6; background: #1c2021; transform: translateY(-1px); }
 .unified-chat-sidebar.is-closed .unified-rail-chat .icon { width: 1.05rem; }
-.unified-chat-sidebar.is-closed .unified-rail-chat > span { position: absolute; top: -.1rem; right: -.12rem; min-width: 1rem; height: 1rem; padding: 0 .2rem; border: 2px solid #090b0c; border-radius: 999px; display: grid; place-items: center; color: #071114; background: #71cce0; font-size: .48rem; font-weight: 750; }
+.unified-chat-sidebar.is-closed .unified-rail-chat > .chat-unread-badge { position: absolute; top: -.1rem; right: -.12rem; min-width: 1rem; height: 1rem; padding: 0; border: 0; background: transparent; }
+.unified-chat-sidebar.is-closed .unified-rail-chat > .chat-unread-badge .t-badge-dot { min-width: 1rem; height: 1rem; padding: 0 .2rem; border: 2px solid #090b0c; border-radius: 999px; display: grid; place-items: center; color: #071114; background: #71cce0; font-size: .48rem; font-weight: 750; line-height: 1; }
 .unified-chat-sidebar.is-closed .unified-profile-bar { grid-row: 4; grid-template-columns: 1fr; justify-items: center; padding: .35rem 0; }
 .unified-chat-sidebar.is-closed .unified-profile-bar > span:not(.preset-avatar),
 .unified-chat-sidebar.is-closed .unified-profile-bar > .icon { display: none; }
@@ -781,8 +787,8 @@
   .unified-room-app.is-mobile-room:not(.is-controls-open) .unified-control-panel, .unified-room-app.is-chat-open .unified-control-panel { display: none; }
   .unified-room-app .unified-room-stage, .unified-room-app.is-chat-open .unified-room-stage { grid-column: auto; width: 100%; height: 100%; min-height: 0; border-radius: 0; border-bottom: 0; }
   .unified-room-app .unified-room-stage::after { border-right: 0; border-radius: 0; }
-  .unified-chat-sidebar { position: fixed; z-index: 30; top: .55rem; right: .55rem; bottom: 5.25rem; left: .55rem; grid-template-rows: 3.5rem 3.45rem minmax(0, 1fr) 2.9rem; border: 1px solid #303436; border-radius: .9rem; background: rgba(9,11,12,.98); box-shadow: 0 1.2rem 3.8rem rgba(0,0,0,.55); backdrop-filter: blur(18px); transform: translateX(0); transition: opacity 220ms ease, transform 320ms var(--ease-out), visibility 0s linear; }
-  .unified-chat-sidebar.is-closed { pointer-events: none; opacity: 0; visibility: hidden; transform: translateX(calc(-100% - 1.1rem)); transition: opacity 190ms ease, transform 320ms var(--ease-out), visibility 0s linear 320ms; }
+  .unified-chat-sidebar { position: fixed; z-index: 30; top: .55rem; right: .55rem; bottom: 5.25rem; left: .55rem; grid-template-rows: 3.5rem 3.45rem minmax(0, 1fr) 2.9rem; border: 1px solid #303436; border-radius: .9rem; background: rgba(9,11,12,.98); box-shadow: 0 1.2rem 3.8rem rgba(0,0,0,.55); backdrop-filter: blur(18px); transform: translateX(0); transition: opacity var(--duration-fast) ease, transform var(--duration-slow) var(--ease-smooth-out), visibility 0s linear; }
+  .unified-chat-sidebar.is-closed { pointer-events: none; opacity: 0; visibility: hidden; transform: translateX(calc(-100% - 1.1rem)); transition: opacity var(--duration-fast) ease, transform var(--duration-medium) var(--ease-smooth-out), visibility 0s linear var(--duration-medium); }
   .unified-chat-sidebar.is-closed .unified-sidebar-header { display: flex; }
   .unified-chat-sidebar.is-closed .unified-chat-panel { display: grid; }
   .unified-chat-sidebar.is-closed .unified-sidebar-brand { justify-content: flex-start; padding: 0 .88rem; }
@@ -794,7 +800,7 @@
   .unified-chat-panel { padding-right: .68rem; padding-left: .68rem; }
   .unified-room-app .unified-profile-popover { right: 1rem; bottom: 9.1rem; left: 1rem; width: auto; max-height: calc(100dvh - 13.5rem); transform: none; }
   .stage-entry-actions { flex-direction: column; }
-  .unified-room-app.is-controls-open .unified-control-panel { position: fixed; z-index: 31; top: .55rem; right: .55rem; bottom: 4.9rem; left: .55rem; width: auto; min-height: 0; padding: .7rem .85rem .6rem; border: 1px solid #303436; border-radius: .9rem; display: flex; overflow: hidden; background: rgba(9,11,12,.985); box-shadow: 0 1.2rem 3.8rem rgba(0,0,0,.52); backdrop-filter: blur(18px); animation: mobile-controls-enter 280ms var(--ease-out) both; }
+  .unified-room-app.is-controls-open .unified-control-panel { position: fixed; z-index: 31; top: .55rem; right: .55rem; bottom: 4.9rem; left: .55rem; width: auto; min-height: 0; padding: .7rem .85rem .6rem; border: 1px solid #303436; border-radius: .9rem; display: flex; overflow: hidden; background: rgba(9,11,12,.985); box-shadow: 0 1.2rem 3.8rem rgba(0,0,0,.52); backdrop-filter: blur(18px); animation: mobile-controls-enter var(--panel-open-dur) var(--panel-ease) both; }
   .unified-room-app.is-controls-open .unified-control-panel .panel-header { display: grid; grid-template-columns: minmax(0, 1fr) auto 2rem; }
   .unified-room-app.is-controls-open .unified-control-panel .panel-view { min-height: 0; width: 100%; height: 100%; overflow: hidden; }
   .unified-room-app.is-controls-open .unified-call-page { min-height: 0; height: 100%; padding-right: .12rem; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; }
@@ -979,7 +985,7 @@
   .unified-room-app.is-phone-room .unified-screen-strip .screen-tile { width: 8rem; min-width: 8rem; }
   .unified-room-app.is-phone-room .screen-tile-focus { opacity: 1; }
   .unified-room-app.is-phone-room .screen-tile-focus span { display: none; }
-  .unified-room-app.is-phone-room .unified-screen-strip .screen-tile-focus .icon { opacity: 1; }
+  .unified-room-app.is-phone-room .unified-screen-strip .screen-tile-focus > .t-icon-swap { opacity: 1; }
   .desktop-update-card { top: max(.55rem, env(safe-area-inset-top)); right: .55rem; left: .55rem; width: auto; }
   .onboarding-backdrop { padding: 0; place-items: end center; backdrop-filter: blur(5px); }
   .onboarding-dialog { width: 100%; height: min(43rem, calc(100dvh - max(.35rem, env(safe-area-inset-top)))); min-height: 0; max-height: none; border-width: 1px 0 0; border-radius: 1.1rem 1.1rem 0 0; grid-template: 3.25rem minmax(10rem, 29dvh) minmax(0, 1fr) 2.4rem max(3.7rem, calc(3.3rem + env(safe-area-inset-bottom))) / minmax(0, 1fr); }
@@ -1079,7 +1085,7 @@
     background: #111516;
     box-shadow: none;
     transform-origin: 50% 100%;
-    animation: mobile-sheet-enter 260ms var(--ease-out) both;
+    animation: mobile-sheet-enter var(--panel-open-dur) var(--panel-ease) both;
     backface-visibility: hidden;
     contain: layout paint;
     touch-action: pan-y;
@@ -1112,7 +1118,7 @@
     border-radius: 1.3rem 1.3rem 0 0;
     box-shadow: none;
     transform-origin: 50% 100%;
-    animation: mobile-sheet-enter 280ms var(--ease-out) both;
+    animation: mobile-sheet-enter var(--panel-open-dur) var(--panel-ease) both;
   }
   .unified-room-app.is-phone-room .unified-chat-settings-anchor .chat-settings-popover::before { content: ""; position: absolute; top: .48rem; left: 50%; width: 2.25rem; height: .24rem; border-radius: 999px; background: #4f5557; transform: translateX(-50%); }
   .unified-room-app.is-phone-room .chat-settings-popover > label { min-height: 3.5rem; }
@@ -1145,7 +1151,7 @@
     background: rgba(10,12,13,.985);
     box-shadow: none;
     backdrop-filter: none;
-    animation: mobile-sheet-enter 300ms var(--ease-out) both;
+    animation: mobile-sheet-enter var(--panel-open-dur) var(--panel-ease) both;
   }
   .unified-room-app.is-phone-room.is-controls-open .unified-control-panel::before,
   .unified-room-app.is-phone-room .unified-profile-popover::before { content: ""; position: absolute; z-index: 2; top: .48rem; left: 50%; width: 2.35rem; height: .24rem; border-radius: 999px; background: #50575a; transform: translateX(-50%); }
@@ -1173,7 +1179,7 @@
     border-radius: 1.35rem 1.35rem 0 0;
     box-shadow: none;
     backdrop-filter: none;
-    animation: mobile-sheet-enter 300ms var(--ease-out) both;
+    animation: mobile-sheet-enter var(--panel-open-dur) var(--panel-ease) both;
     -webkit-overflow-scrolling: touch;
   }
   .unified-room-app.is-phone-room .unified-profile-popover > header { min-height: 3.15rem; padding-top: .35rem; }
@@ -1185,7 +1191,7 @@
   .unified-room-app.is-phone-room .unified-profile-popover .avatar-picker button { min-height: 4.15rem; }
 
   .mobile-sheet-layer { position: fixed; z-index: 70; inset: 0; display: block; pointer-events: none; }
-  .mobile-sheet-backdrop { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; display: block; pointer-events: auto; background: rgba(0,0,0,.62); backdrop-filter: none; animation: mobile-sheet-backdrop-enter 180ms ease-out both; }
+  .mobile-sheet-backdrop { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; display: block; pointer-events: auto; background: rgba(0,0,0,.62); backdrop-filter: none; animation: mobile-sheet-backdrop-enter var(--duration-fast) ease-out both; }
   .mobile-sheet-host { position: absolute; right: 0; bottom: 0; left: 0; pointer-events: none; }
   .mobile-sheet-host > .dock-popover {
     position: relative;
@@ -1203,7 +1209,7 @@
     box-shadow: none;
     backdrop-filter: none;
     transform: none;
-    animation: mobile-sheet-enter 300ms var(--ease-out) both;
+    animation: mobile-sheet-enter var(--panel-open-dur) var(--panel-ease) both;
     backface-visibility: hidden;
     contain: layout paint;
     touch-action: pan-y;
@@ -1252,7 +1258,7 @@
   .mobile-sheet-host .room-device-options-list > button { min-height: 3.25rem; padding: .48rem .62rem; border-radius: .7rem; }
 
   .unified-room-app.is-phone-room .modal-backdrop { align-items: end; padding: 0; backdrop-filter: none; }
-  .unified-room-app.is-phone-room .qr-modal { width: 100%; max-height: calc(100dvh - 1rem); padding: 1.5rem 1rem max(1rem, env(safe-area-inset-bottom)); overflow-y: auto; border-width: 1px 0 0; border-radius: 1.35rem 1.35rem 0 0; box-shadow: none; animation: mobile-sheet-enter 300ms var(--ease-out) both; }
+  .unified-room-app.is-phone-room .qr-modal { width: 100%; max-height: calc(100dvh - 1rem); padding: 1.5rem 1rem max(1rem, env(safe-area-inset-bottom)); overflow-y: auto; border-width: 1px 0 0; border-radius: 1.35rem 1.35rem 0 0; box-shadow: none; animation: mobile-sheet-enter var(--panel-open-dur) var(--panel-ease) both; }
   .unified-room-app.is-phone-room .qr-modal img { width: min(15.5rem, 62dvh); }
   .unified-room-app.is-phone-room .qr-modal > button { width: 100%; min-height: 3rem; }
 
@@ -1265,11 +1271,11 @@
     transform: translate3d(0, var(--sheet-drag-y, 0px), 0) !important;
   }
   .unified-room-app.is-phone-room [data-mobile-sheet="true"].is-sheet-dragging { transition: none !important; user-select: none; will-change: transform; }
-  .unified-room-app.is-phone-room [data-mobile-sheet="true"].is-sheet-settling { transition: transform 260ms cubic-bezier(.2, .8, .2, 1) !important; }
-  .unified-room-app.is-phone-room [data-mobile-sheet="true"].is-sheet-dismissing { pointer-events: none; transition: transform 240ms cubic-bezier(.4, 0, .2, 1) !important; }
+  .unified-room-app.is-phone-room [data-mobile-sheet="true"].is-sheet-settling { transition: transform var(--duration-fast) var(--ease-smooth-out) !important; }
+  .unified-room-app.is-phone-room [data-mobile-sheet="true"].is-sheet-dismissing { pointer-events: none; transition: transform var(--panel-close-dur) var(--panel-ease) !important; }
   .mobile-sheet-backdrop.is-sheet-backdrop-dismissing,
   .mobile-overlay-backdrop.is-sheet-backdrop-dismissing,
-  .unified-room-app.is-phone-room .modal-backdrop.is-sheet-backdrop-dismissing { pointer-events: none; opacity: 0; animation: none !important; transition: opacity 240ms ease-in !important; }
+  .unified-room-app.is-phone-room .modal-backdrop.is-sheet-backdrop-dismissing { pointer-events: none; opacity: 0; animation: none !important; transition: opacity var(--panel-close-dur) ease-in !important; }
   .unified-room-app.is-phone-room.has-mobile-overlay .room-gradient-waves { pointer-events: none; }
   .unified-room-app.is-phone-room.has-mobile-overlay .unified-call-dock { backdrop-filter: none; }
 
