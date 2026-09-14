@@ -248,6 +248,30 @@ function Icon({ name }: { name: IconName }) {
   return <svg className={`room-icon icon icon-${name}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
 
+function ChatDeliveryIndicator({ delivery, onRetry }: { delivery: ChatDelivery; onRetry: () => void }) {
+  if (delivery === 'failed') {
+    return (
+      <button className="chat-delivery is-failed" type="button" onClick={onRetry} aria-label="Falha no envio. Tentar novamente" title="Falha no envio · tentar novamente">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.25"/><path d="M8 4.5v4.25M8 11.35h.01"/></svg>
+      </button>
+    );
+  }
+
+  const label = delivery === 'pending' ? 'Enviando' : delivery === 'delivered' ? 'Entregue' : 'Enviada';
+  return (
+    <span className={`chat-delivery is-${delivery}`} role="status" aria-label={label} title={label}>
+      {delivery === 'pending' ? (
+        <svg className="chat-delivery-clock" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.75"/><path d="M8 4.8v3.55l2.35 1.4"/></svg>
+      ) : (
+        <svg className="chat-delivery-ticks" viewBox="0 0 19 13" aria-hidden="true">
+          {delivery === 'delivered' && <path d="m1.5 7 3 3L10.8 3.7"/>}
+          <path d={delivery === 'delivered' ? 'm6.3 7 3 3 7.2-7.2' : 'm2.2 7 3 3 7.2-7.2'}/>
+        </svg>
+      )}
+    </span>
+  );
+}
+
 function BrandMark() {
   return (
     <svg className="screenlink-brand-mark" viewBox="0 0 48 48" fill="none" aria-hidden="true">
@@ -2975,13 +2999,16 @@ export default function RoomApp() {
           const own = isOwnChatMessage(message);
           return (
             <article className={`chat-message ${own ? 'is-own' : ''}`} key={message.id}>
-              <header><strong>{own ? 'Você' : message.senderName}</strong><time dateTime={new Date(message.sentAt).toISOString()}>{new Date(message.sentAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</time></header>
-              <p>{renderChatText(message.text)}</p>
-              {own && message.delivery && <div className={`chat-delivery is-${message.delivery}`} aria-live="polite">
-                {message.delivery === 'failed'
-                  ? <button type="button" onClick={() => retryChatMessage(message.id)}>Falhou · reenviar</button>
-                  : <span>{message.delivery === 'pending' ? 'Enviando…' : message.delivery === 'delivered' ? 'Entregue' : 'Enviada'}</span>}
-              </div>}
+              <div className="chat-bubble">
+                {!own && <strong className="chat-message-sender">{message.senderName}</strong>}
+                <p>
+                  <span className="chat-message-copy">{renderChatText(message.text)}</span>
+                  <span className="chat-message-meta">
+                    <time dateTime={new Date(message.sentAt).toISOString()}>{new Date(message.sentAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</time>
+                    {own && message.delivery && <ChatDeliveryIndicator delivery={message.delivery} onRetry={() => retryChatMessage(message.id)}/>}
+                  </span>
+                </p>
+              </div>
             </article>
           );
         }) : <div className="chat-empty"><Icon name="chat"/><strong>A conversa começa aqui</strong><span>As mensagens são temporárias e ficam somente nesta chamada.</span></div>}
