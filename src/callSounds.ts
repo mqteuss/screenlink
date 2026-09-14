@@ -86,22 +86,41 @@ async function applyOutputDevice(context: AudioContext) {
 }
 
 function primeContext(soundGraph: SoundGraph) {
-  // Um buffer silencioso iniciado dentro do gesto destrava Web Audio no Safari/iOS.
+  // Iniciar uma fonte dentro do gesto também destrava o Web Audio no Chrome/Android.
   const source = soundGraph.context.createBufferSource();
   source.buffer = soundGraph.context.createBuffer(1, 1, soundGraph.context.sampleRate);
   source.connect(soundGraph.output);
   source.start();
 }
 
+function waitForRunningState(context: AudioContext, timeoutMs = 450) {
+  if (context.state === 'running') return Promise.resolve(true);
+  return new Promise<boolean>(resolve => {
+    let settled = false;
+    const finish = (running: boolean) => {
+      if (settled) return;
+      settled = true;
+      context.removeEventListener('statechange', handleStateChange);
+      window.clearTimeout(timeout);
+      resolve(running);
+    };
+    const handleStateChange = () => {
+      if (context.state === 'running') finish(true);
+      else if (context.state === 'closed') finish(false);
+    };
+    const timeout = window.setTimeout(() => finish(context.state === 'running'), timeoutMs);
+    context.addEventListener('statechange', handleStateChange);
+  });
+}
+
 async function startContext(soundGraph: SoundGraph) {
   const { context } = soundGraph;
   if (context.state === 'closed') return false;
-  if (context.state !== 'running') {
-    await context.resume().catch(() => undefined);
-  }
-  if (context.state !== 'running') return false;
+  if (context.state === 'running') return true;
+  // Precisa ocorrer antes do primeiro await para preservar a ativação transitória do clique/toque.
   primeContext(soundGraph);
-  return true;
+  void context.resume().catch(() => undefined);
+  return waitForRunningState(context);
 }
 
 function connectWithPan(context: AudioContext, source: AudioNode, destination: AudioNode, pan = 0) {

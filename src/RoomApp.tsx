@@ -946,10 +946,16 @@ export default function RoomApp() {
       if (document.visibilityState === 'visible') unlock();
     };
     document.addEventListener('pointerdown', unlock, { capture: true, passive: true });
+    document.addEventListener('pointerup', unlock, { capture: true, passive: true });
+    document.addEventListener('touchend', unlock, { capture: true, passive: true });
+    document.addEventListener('click', unlock, { capture: true, passive: true });
     document.addEventListener('keydown', unlock, { capture: true });
     document.addEventListener('visibilitychange', resumeWhenVisible);
     return () => {
       document.removeEventListener('pointerdown', unlock, { capture: true });
+      document.removeEventListener('pointerup', unlock, { capture: true });
+      document.removeEventListener('touchend', unlock, { capture: true });
+      document.removeEventListener('click', unlock, { capture: true });
       document.removeEventListener('keydown', unlock, { capture: true });
       document.removeEventListener('visibilitychange', resumeWhenVisible);
     };
@@ -2459,8 +2465,10 @@ export default function RoomApp() {
     }
     const played = await playCallSound('participantJoined', audioSettingsRef.current.outputVolume / 100);
     setInterfaceSoundFeedback(played
-      ? 'Som de teste reproduzido na saída selecionada.'
-      : 'O navegador ainda bloqueou o som. Toque em Testar novamente.');
+      ? audioSettingsRef.current.outputVolume > 0
+        ? 'Som de teste reproduzido na saída selecionada.'
+        : 'O som foi reproduzido, mas o volume de saída está em 0%.'
+      : 'Não foi possível iniciar a saída de áudio. Confira o volume do sistema e tente novamente.');
   }
 
   const releaseWakeLock = useCallback(async () => {

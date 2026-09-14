@@ -23,6 +23,7 @@ let appUrlToLoad = '';
 let disposeProfileIpc = null;
 let disposeDisplayMedia = null;
 
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 app.setName('ScreenLink');
 app.setAppUserModelId(APP_ID);
 
