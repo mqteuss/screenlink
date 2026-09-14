@@ -601,9 +601,10 @@
 .exit-options > button.is-danger { color: #ef9a9e; }
 
 .unified-chat-panel .chat-composer { position: relative; grid-template-columns: 2.05rem minmax(0, 1fr) 2.15rem; padding-left: .3rem; }
-.unified-chat-panel .chat-composer textarea { min-height: 2.05rem; height: auto; padding: .54rem .15rem; overflow-y: auto; line-height: .97rem; }
-.emoji-picker-anchor { position: relative; display: grid; place-items: center; }
+.unified-chat-panel .chat-composer textarea { min-height: 2.05rem; height: auto; padding: .54rem .15rem; line-height: 1.05rem; }
+.emoji-picker-anchor { position: relative; align-self: end; display: grid; place-items: center; }
 .chat-composer .emoji-picker-anchor > button { color: #94999b; background: transparent; }
+.chat-composer .emoji-picker-anchor > button .icon { width: 1.08rem; height: 1.08rem; stroke-width: 1.9; }
 .chat-composer .emoji-picker-anchor > button:hover, .chat-composer .emoji-picker-anchor > button.is-open { color: #f0f3f4; background: #303334; }
 .unified-chat-panel .chat-composer > button { width: 2.15rem; height: 2.15rem; color: #0d0f10; background: #f1f3f3; box-shadow: 0 .2rem .65rem rgba(0,0,0,.22); }
 .unified-chat-panel .chat-composer > button:not(:disabled),
@@ -1045,10 +1046,12 @@
   .unified-room-app.is-phone-room .unified-chat-panel .chat-message-sender { font-size: .73rem; }
   .unified-room-app.is-phone-room .unified-chat-panel .chat-message-meta { font-size: .62rem; }
   .unified-room-app.is-phone-room .unified-chat-panel .chat-composer { min-height: 3rem; padding: .24rem .08rem; grid-template-columns: 2.5rem minmax(0, 1fr) 2.5rem; gap: .28rem; }
+  .unified-room-app.is-phone-room .unified-chat-panel .chat-composer.is-multiline { border-radius: 1.3rem; padding-top: .55rem; }
   .unified-room-app.is-phone-room .chat-composer .emoji-picker-anchor > button,
   .unified-room-app.is-phone-room .unified-chat-panel .chat-composer > button { width: 2.5rem; height: 2.5rem; }
+  .unified-room-app.is-phone-room .chat-composer .emoji-picker-anchor > button .icon { width: 1.5rem; height: 1.5rem; stroke-width: 1.8; }
   .unified-room-app.is-phone-room .unified-chat-panel .chat-composer > button .icon { width: 1.12rem; height: 1.12rem; }
-  .unified-room-app.is-phone-room .unified-chat-panel .chat-composer textarea { min-height: 2.4rem; padding: .62rem 0 .5rem; font-size: .875rem; }
+  .unified-room-app.is-phone-room .unified-chat-panel .chat-composer textarea { min-height: 2.4rem; max-height: 8.75rem; padding: .56rem .05rem .48rem; font-size: .9375rem; line-height: 1.25rem; }
   .unified-room-app.is-phone-room.is-chat-input-focused .unified-chat-sidebar {
     top: var(--room-visual-viewport-top, 0px);
     bottom: auto;

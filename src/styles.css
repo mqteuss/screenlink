@@ -383,9 +383,12 @@ h1, h2, p { margin-top: 0; }
 .chat-empty strong { margin-bottom: .3rem; color: #d2d2d2; font-size: .8rem; font-weight: 580; }
 .chat-empty strong:last-child { margin-bottom: 0; }
 .chat-empty span { max-width: 15rem; font-size: .67rem; line-height: 1.45; }
-.chat-composer { min-height: 2.7rem; margin-top: .2rem; border: 0; border-radius: 999px; padding: .25rem .3rem .25rem .75rem; display: grid; grid-template-columns: minmax(0, 1fr) 2.15rem; align-items: end; gap: .35rem; background: #1d1d1d; box-shadow: none; transition: background var(--standard); }
+.chat-composer { min-height: 2.7rem; margin-top: .2rem; border: 0; border-radius: 999px; padding: .25rem .3rem .25rem .75rem; display: grid; grid-template-columns: minmax(0, 1fr) 2.15rem; align-items: end; gap: .35rem; background: #1d1d1d; box-shadow: none; transition: background var(--standard), border-radius var(--standard), padding var(--standard); }
 .chat-composer:focus-within { background: #252525; }
-.chat-composer textarea { width: 100%; max-height: 6rem; min-height: 2rem; border: 0; padding: .43rem 0 .35rem; resize: none; color: #ededed; background: transparent; outline: 0; font-size: .8rem; line-height: 1.35; }
+.chat-composer.is-multiline { border-radius: 1rem; }
+.chat-composer textarea { box-sizing: border-box; width: 100%; max-height: 7.5rem; min-height: 2rem; border: 0; padding: .43rem 0 .35rem; overflow-x: hidden; overflow-y: hidden; overscroll-behavior: contain; resize: none; color: #ededed; background: transparent; outline: 0; font-size: .8rem; line-height: 1.35; scrollbar-width: thin; scrollbar-color: #666 transparent; }
+.chat-composer textarea::-webkit-scrollbar { width: .2rem; }
+.chat-composer textarea::-webkit-scrollbar-thumb { border-radius: 999px; background: #666; }
 .chat-composer textarea::placeholder { color: #777; }
 .chat-composer button { width: 2.05rem; height: 2.05rem; border: 0; border-radius: 50%; display: grid; place-items: center; color: #747474; background: #292929; transition: color var(--standard), background var(--fast), transform var(--fast), opacity var(--fast); }
 .chat-composer button:not(:disabled) { color: #fff; background: #3d3d3d; }

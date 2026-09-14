@@ -576,8 +576,22 @@ function renderChatText(text: string) {
 
 function resizeChatInput(input: HTMLTextAreaElement | null) {
   if (!input) return;
+  const composer = input.closest('.chat-composer');
   input.style.height = 'auto';
-  input.style.height = `${Math.min(input.scrollHeight, 96)}px`;
+  const styles = window.getComputedStyle(input);
+  const minimumHeight = Number.parseFloat(styles.minHeight) || 0;
+  const maximumHeight = Number.parseFloat(styles.maxHeight) || 96;
+  const lineHeight = Number.parseFloat(styles.lineHeight) || 16;
+  const verticalPadding = (Number.parseFloat(styles.paddingTop) || 0) + (Number.parseFloat(styles.paddingBottom) || 0);
+  const naturalHeight = Math.ceil(input.scrollHeight);
+  const nextHeight = Math.max(minimumHeight, Math.min(naturalHeight, maximumHeight));
+  const multiline = input.value.includes('\n') || naturalHeight - verticalPadding > lineHeight * 1.35;
+  const scrollable = naturalHeight > maximumHeight + 1;
+
+  input.style.height = `${nextHeight}px`;
+  input.style.overflowY = scrollable ? 'auto' : 'hidden';
+  composer?.classList.toggle('is-multiline', multiline);
+  composer?.classList.toggle('is-scrollable', scrollable);
 }
 
 function closestVerticalScroller(target: EventTarget | null, sheet: HTMLElement) {
@@ -1284,6 +1298,28 @@ export default function RoomApp() {
       app.style.removeProperty('--room-visual-viewport-top');
     };
   }, [phone]);
+
+  useLayoutEffect(() => {
+    if (!chatOpen) return;
+    const input = chatInputRef.current;
+    if (!input) return;
+    let previousWidth = input.getBoundingClientRect().width;
+    const syncInputHeight = () => resizeChatInput(input);
+    const resizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(entries => {
+      const nextWidth = entries[0]?.contentRect.width ?? input.getBoundingClientRect().width;
+      if (Math.abs(nextWidth - previousWidth) < 0.5) return;
+      previousWidth = nextWidth;
+      syncInputHeight();
+    });
+
+    syncInputHeight();
+    resizeObserver?.observe(input);
+    window.addEventListener('resize', syncInputHeight);
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener('resize', syncInputHeight);
+    };
+  }, [chatOpen, phone]);
 
   useEffect(() => {
     if (!mobile) setControlsOpen(false);
