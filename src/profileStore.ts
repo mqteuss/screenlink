@@ -9,9 +9,33 @@ type ScreenLinkProfileBridge = {
   save: (profile: StoredProfile) => Promise<void>;
 };
 
+type ScreenLinkDesktopBridge = {
+  isDesktop: boolean;
+  platform: string;
+  getUpdateState: () => Promise<DesktopUpdateState>;
+  checkForUpdates: () => Promise<DesktopUpdateState>;
+  downloadUpdate: () => Promise<DesktopUpdateState>;
+  installUpdate: () => Promise<boolean>;
+  onUpdateState: (callback: (state: DesktopUpdateState) => void) => () => void;
+};
+
+export type DesktopUpdateStatus = 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'installing' | 'current' | 'error' | 'portable' | 'unsupported' | 'development';
+export type DesktopUpdateState = {
+  status: DesktopUpdateStatus;
+  currentVersion: string;
+  version: string;
+  percent: number | null;
+  transferred: number | null;
+  total: number | null;
+  message: string;
+  notice: boolean;
+  canAutoUpdate: boolean;
+};
+
 declare global {
   interface Window {
     screenLinkProfile?: ScreenLinkProfileBridge;
+    screenLinkDesktop?: ScreenLinkDesktopBridge;
   }
 }
 

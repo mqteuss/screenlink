@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron';
+const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('screenLinkDisplayPicker', Object.freeze({
   list: () => ipcRenderer.invoke('screenlink:display-picker:list'),

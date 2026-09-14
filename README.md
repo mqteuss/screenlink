@@ -106,6 +106,11 @@ npm run desktop:pack  # cria uma pasta não instalável para inspeção
 npm run desktop:dist  # gera instalador e versão portátil x64 em release/
 ```
 
+O instalador público fica disponível pelo botão **Baixar para Windows** do site e pelo
+endereço estável abaixo. Ele sempre aponta para a versão mais recente publicada:
+
+`https://github.com/mqteuss/screenlink/releases/latest/download/ScreenLink-Setup-x64.exe`
+
 Por padrão, o Electron se conecta ao deploy HTTPS oficial do ScreenLink, inclusive depois
 de um cold start do Render. Se ele não responder, o aplicativo cai automaticamente para o
 servidor local empacotado. Também é possível apontar para outro deploy HTTPS:

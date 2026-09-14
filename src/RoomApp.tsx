@@ -3,10 +3,10 @@ import QRCode from 'qrcode';
 import { playInterfaceSound as playCallSound, setInterfaceSoundOutputDevice, unlockInterfaceSounds, type InterfaceSoundName } from './callSounds';
 import GradientWaves from './GradientWaves';
 import { createPrivateRoom, parseInvite, signalUrl, type IceServerConfig, type Invite, type RoomParticipant, type RoomProfile, type SessionDescription } from './protocol';
-import { loadStoredProfile, prepareAvatar, profileStorageKind, saveStoredProfile } from './profileStore';
+import { loadStoredProfile, prepareAvatar, profileStorageKind, saveStoredProfile, type DesktopUpdateState } from './profileStore';
 
 type RoomMode = 'landing' | 'connecting' | 'connected' | 'error';
-type IconName = 'screen' | 'microphone' | 'microphoneOff' | 'volume' | 'volumeOff' | 'chat' | 'send' | 'hangup' | 'link' | 'copy' | 'settings' | 'users' | 'crown' | 'close' | 'chevron' | 'chevronDown' | 'smile' | 'qr' | 'more' | 'expand' | 'pip' | 'wake' | 'motion';
+type IconName = 'screen' | 'microphone' | 'microphoneOff' | 'volume' | 'volumeOff' | 'chat' | 'send' | 'hangup' | 'link' | 'copy' | 'settings' | 'users' | 'crown' | 'close' | 'chevron' | 'chevronDown' | 'smile' | 'qr' | 'more' | 'expand' | 'pip' | 'wake' | 'motion' | 'grid' | 'download' | 'refresh' | 'check' | 'guide';
 type Session = { invite: Invite; joinCode?: string; joinByCode?: boolean; ownerKey?: string; participantId?: string; maxParticipants?: number };
 type RoomEntry = { kind: 'invite'; invite: Invite } | { kind: 'code'; code: string };
 type ChatDelivery = 'pending' | 'sent' | 'delivered' | 'failed';
@@ -80,12 +80,14 @@ const OWNER_ROOM_KEY = 'screenlink-owner-room-v2';
 const PROFILE_KEY = 'screenlink-room-profile-v2';
 const INTERFACE_SOUNDS_KEY = 'screenlink-interface-sounds-v1';
 const INTERFACE_MOTION_KEY = 'screenlink-interface-motion-v1';
+const ONBOARDING_KEY = 'screenlink-onboarding-v1';
 const CHAT_APPEARANCE_KEY = 'screenlink-chat-appearance-v2';
 const CHAT_OWN_IDS_PREFIX = 'screenlink-chat-own:';
 const PEER_KEY_PREFIX = 'screenlink-room-peer:';
 const COMPACT_LAYOUT_QUERY = '(max-width: 1240px)';
 const PHONE_LAYOUT_QUERY = '(max-width: 760px), (pointer: coarse) and (max-width: 980px)';
 const MOBILE_DEVICE_QUERY = '(pointer: coarse) and (max-width: 980px)';
+const WINDOWS_INSTALLER_URL = 'https://github.com/mqteuss/screenlink/releases/latest/download/ScreenLink-Setup-x64.exe';
 const CHAT_LIMIT = 160;
 const CHAT_CHANNEL_PAYLOAD_LIMIT = 64_000;
 const CHAT_HISTORY_PAYLOAD_LIMIT = 48_000;
@@ -122,6 +124,37 @@ const VIDEO_PRESETS: Record<Resolution, { width: number; height: number; bitrate
   720: { width: 1280, height: 720, bitrate: 3_600_000 },
   1080: { width: 1920, height: 1080, bitrate: 7_000_000 }
 };
+
+const ONBOARDING_STEPS: Array<{ icon: IconName; eyebrow: string; title: string; description: string; points: string[] }> = [
+  {
+    icon: 'guide',
+    eyebrow: 'Visão geral',
+    title: 'Bem-vindo ao ScreenLink',
+    description: 'Uma sala simples para conversar, enviar mensagens e compartilhar telas. Este guia leva menos de um minuto.',
+    points: ['Perfil salvo apenas neste dispositivo', 'Nenhuma conta necessária']
+  },
+  {
+    icon: 'users',
+    eyebrow: 'Sala',
+    title: 'Comece ou entre em uma chamada',
+    description: 'Crie uma sala pelo botão central ou cole o código recebido em Controles. O convite fica disponível assim que a conexão abrir.',
+    points: ['Código curto para convidar', 'A sidebar pode ser recolhida a qualquer momento']
+  },
+  {
+    icon: 'microphone',
+    eyebrow: 'Controles',
+    title: 'Áudio e tela são independentes',
+    description: 'Ligue o microfone ou compartilhe a tela quando precisar. Os chevrons abrem dispositivos, volumes e qualidade.',
+    points: ['Parar a tela mantém a chamada', 'Mais opções reúne tela cheia e miniplayer']
+  },
+  {
+    icon: 'grid',
+    eyebrow: 'Transmissões',
+    title: 'Escolha a tela que quer acompanhar',
+    description: 'Com várias pessoas compartilhando, clique em Destacar. A tela escolhida cresce e as outras ficam acessíveis em miniaturas.',
+    points: ['Troque de tela sem sair do foco', 'Ver todas retorna à grade']
+  }
+];
 
 type WebStorageName = 'localStorage' | 'sessionStorage';
 
@@ -206,6 +239,11 @@ function Icon({ name }: { name: IconName }) {
     pip: <><rect x="3" y="4" width="18" height="16" rx="2.5"/><rect x="12" y="11" width="7" height="6" rx="1.2"/></>,
     wake: <><path d="M12 3v2M5.6 5.6 7 7M3 12h2M19 12h2M17 7l1.4-1.4"/><path d="M8 16a5 5 0 1 1 8 0l-1.2 1.3V20H9.2v-2.7L8 16ZM9.5 22h5"/></>,
     motion: <><path d="M3 8.5c2.1-2.4 4.2-2.4 6.3 0s4.2 2.4 6.3 0 4.2-2.4 6.4 0"/><path d="M3 15.5c2.1-2.4 4.2-2.4 6.3 0s4.2 2.4 6.3 0 4.2-2.4 6.4 0"/></>
+    ,grid: <><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></>,
+    download: <><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 20h16"/></>,
+    refresh: <><path d="M20 7v5h-5"/><path d="M4 17v-5h5"/><path d="M6.1 8.5A7 7 0 0 1 18.8 7L20 12M4 12l1.2 5A7 7 0 0 0 17.9 15.5"/></>,
+    check: <path d="m5 12.5 4.2 4.2L19 7"/>,
+    guide: <><path d="M4 5.5A3.5 3.5 0 0 1 7.5 2H12v18H7.5A3.5 3.5 0 0 0 4 23V5.5Z"/><path d="M20 5.5A3.5 3.5 0 0 0 16.5 2H12v18h4.5A3.5 3.5 0 0 1 20 23V5.5Z"/></>
   };
   return <svg className={`room-icon icon icon-${name}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
@@ -226,6 +264,38 @@ function BrandMark() {
       <circle cx="18.5" cy="22.8" r="2.15" fill="currentColor"/>
       <circle cx="29.5" cy="22.8" r="2.15" fill="currentColor"/>
     </svg>
+  );
+}
+
+function WindowsMark() {
+  return (
+    <svg className="windows-mark" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M2.5 4.6 10.6 3.5v7.75H2.5V4.6Zm9.1-1.24L21.5 2v9.25h-9.9V3.36ZM2.5 12.25h8.1V20l-8.1-1.12v-6.63Zm9.1 0h9.9V22l-9.9-1.36v-8.39Z"/>
+    </svg>
+  );
+}
+
+function OnboardingPreview({ step }: { step: number }) {
+  return (
+    <div className={`onboarding-preview is-step-${step}`} aria-hidden="true">
+      <div className="onboarding-preview-app">
+        <aside className="preview-sidebar preview-sidebar-left">
+          <div className="preview-brand"><BrandMark/><i/></div>
+          {step === 3 ? <div className="preview-chat-thread"><span/><span/><span/></div> : <div className="preview-sidebar-lines"><i/><i/><i/></div>}
+          <div className="preview-profile"><span/><i/></div>
+        </aside>
+        <section className="preview-stage">
+          {step === 0 && <div className="preview-welcome"><BrandMark/><strong>Sua sala está pronta</strong><span>Voz · tela · chat</span></div>}
+          {step === 1 && <div className="preview-room-entry"><BrandMark/><strong>Inicie uma chamada</strong><span className="preview-start-button"><Icon name="users"/>Iniciar chamada</span></div>}
+          {step === 2 && <><div className="preview-call-person"><span/><strong>Você</strong></div><div className="preview-audio-card"><i/><i/><i/></div><div className="preview-dock"><span><Icon name="volume"/></span><span className="is-highlighted"><Icon name="microphone"/></span><span className="is-highlighted"><Icon name="screen"/></span><span><Icon name="chat"/></span><span><Icon name="more"/></span></div></>}
+          {step === 3 && <div className="preview-screen-focus"><div className="preview-main-screen"><span/><strong>Tela de Ana</strong><i><Icon name="expand"/></i></div><div className="preview-screen-list"><span className="preview-all-screens"><Icon name="grid"/>Todas</span><div><span/><strong>Tela de Bruno</strong></div><div><span/><strong>Sua tela</strong></div></div></div>}
+        </section>
+        <aside className="preview-sidebar preview-sidebar-right">
+          <strong>Controles</strong>
+          {step === 1 ? <><label>Entrar com código</label><div className="preview-code"><Icon name="link"/><span>AB12CD</span></div><span className="preview-enter-button">Entrar</span></> : <div className="preview-settings-lines"><i/><i/><i/><i/></div>}
+        </aside>
+      </div>
+    </div>
   );
 }
 
@@ -751,7 +821,7 @@ async function readPeerRttMs(pc: RTCPeerConnection): Promise<number | null> {
   return rtt === null ? null : Math.round(rtt);
 }
 
-function ScreenTile({ stream, name, local }: { stream: MediaStream; name: string; local?: boolean }) {
+function ScreenTile({ stream, name, local, focused, thumbnail, focusable, onFocus }: { stream: MediaStream; name: string; local?: boolean; focused?: boolean; thumbnail?: boolean; focusable?: boolean; onFocus?: () => void }) {
   const ref = useRef<HTMLVideoElement>(null);
   useEffect(() => {
     const video = ref.current;
@@ -761,7 +831,11 @@ function ScreenTile({ stream, name, local }: { stream: MediaStream; name: string
     void video.play().catch(() => undefined);
     return () => { if (video.srcObject === stream) video.srcObject = null; };
   }, [stream]);
-  return <article className="screen-tile"><video ref={ref} autoPlay muted playsInline/><span>{local ? 'Sua tela' : `Tela de ${name}`}</span></article>;
+  return <article className={`screen-tile ${focused ? 'is-focused' : ''} ${thumbnail ? 'is-thumbnail' : ''}`} onDoubleClick={focusable ? onFocus : undefined}>
+    <video ref={ref} autoPlay muted playsInline/>
+    <span className="screen-tile-label">{local ? 'Sua tela' : `Tela de ${name}`}</span>
+    {focusable && <button className="screen-tile-focus" type="button" onClick={onFocus} aria-label={focused ? 'Voltar para todas as telas' : `Destacar a tela de ${local ? 'você' : name}`} title={focused ? 'Ver todas as telas' : 'Destacar esta tela'}><Icon name={focused ? 'grid' : 'expand'}/><span>{focused ? 'Ver todas' : 'Destacar'}</span></button>}
+  </article>;
 }
 
 export default function RoomApp() {
@@ -769,6 +843,11 @@ export default function RoomApp() {
   const initialOwner = useMemo(() => initialInvite ? null : loadOwnerSession(), [initialInvite]);
   const mobileOverlayMarker = useMemo(() => `screenlink-${randomSecret(8)}`, []);
   const [profile, setProfile] = useState<RoomProfile>(() => loadProfile());
+  const [onboardingOpen, setOnboardingOpen] = useState(() => !initialInvite && !initialOwner && readStorage('localStorage', ONBOARDING_KEY) !== 'complete');
+  const [onboardingStep, setOnboardingStep] = useState(0);
+  const [focusedScreenId, setFocusedScreenId] = useState<string | null>(null);
+  const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdateState | null>(null);
+  const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState('');
   const profileRef = useRef(profile);
   const profileEditRevisionRef = useRef(0);
   const [profileNameDraft, setProfileNameDraft] = useState(profile.name);
@@ -885,6 +964,7 @@ export default function RoomApp() {
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const emojiPickerRef = useRef<HTMLDivElement>(null);
   const chatSettingsRef = useRef<HTMLDivElement>(null);
+  const onboardingDialogRef = useRef<HTMLElement>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectNowRef = useRef<(() => void) | null>(null);
   const wakeLockRef = useRef<ScreenWakeLock | null>(null);
@@ -963,6 +1043,62 @@ export default function RoomApp() {
   useEffect(() => {
     writeStorage('localStorage', INTERFACE_MOTION_KEY, String(animationsEnabled));
   }, [animationsEnabled]);
+  useEffect(() => {
+    if (!onboardingOpen) return;
+    const handleTutorialKeys = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        writeStorage('localStorage', ONBOARDING_KEY, 'complete');
+        setOnboardingOpen(false);
+        setOnboardingStep(0);
+        return;
+      }
+      if (event.key === 'ArrowRight') setOnboardingStep(step => Math.min(ONBOARDING_STEPS.length - 1, step + 1));
+      if (event.key === 'ArrowLeft') setOnboardingStep(step => Math.max(0, step - 1));
+      if (event.key !== 'Tab') return;
+      const dialog = onboardingDialogRef.current;
+      if (!dialog) return;
+      const focusable = [...dialog.querySelectorAll<HTMLElement>('button:not(:disabled), [href], input:not(:disabled), [tabindex]:not([tabindex="-1"])')];
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    const focusFrame = window.requestAnimationFrame(() => onboardingDialogRef.current?.focus({ preventScroll: true }));
+    document.addEventListener('keydown', handleTutorialKeys);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.removeEventListener('keydown', handleTutorialKeys);
+    };
+  }, [onboardingOpen]);
+  useEffect(() => {
+    const bridge = window.screenLinkDesktop;
+    if (!bridge?.getUpdateState || !bridge.onUpdateState) return;
+    let active = true;
+    void bridge.getUpdateState().then(state => {
+      if (active) setDesktopUpdate(state);
+    }).catch(() => undefined);
+    const unsubscribe = bridge.onUpdateState(state => {
+      if (active) setDesktopUpdate(state);
+    });
+    return () => {
+      active = false;
+      unsubscribe?.();
+    };
+  }, []);
+  useEffect(() => {
+    setFocusedScreenId(current => {
+      if (!current) return null;
+      const activeShares = Object.values(participants).filter(participant => participant.connected && participant.sharing);
+      return activeShares.length > 1 && activeShares.some(participant => participant.id === current) ? current : null;
+    });
+  }, [participants]);
   useEffect(() => { profileNameDraftRef.current = profileNameDraft; }, [profileNameDraft]);
   useEffect(() => { profileStatusDraftRef.current = profileStatusDraft; }, [profileStatusDraft]);
   useLayoutEffect(() => {
@@ -1112,7 +1248,7 @@ export default function RoomApp() {
 
   useEffect(() => {
     const dismissOverlays = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
       if (qrOpen) {
         setQrOpen(false);
         return;
@@ -2630,6 +2766,47 @@ export default function RoomApp() {
     setChatOpen(!chatOpen);
   }
 
+  function finishOnboarding() {
+    writeStorage('localStorage', ONBOARDING_KEY, 'complete');
+    setOnboardingOpen(false);
+    setOnboardingStep(0);
+  }
+
+  function reopenOnboarding() {
+    setControlsOpen(false);
+    setOnboardingStep(0);
+    setOnboardingOpen(true);
+  }
+
+  async function checkForDesktopUpdate() {
+    const bridge = window.screenLinkDesktop;
+    if (!bridge?.checkForUpdates) return;
+    try {
+      setDismissedUpdateVersion('');
+      setDesktopUpdate(await bridge.checkForUpdates());
+    } catch {
+      // O processo principal também envia um estado legível quando a consulta falha.
+    }
+  }
+
+  async function downloadDesktopUpdate() {
+    const bridge = window.screenLinkDesktop;
+    if (!bridge?.downloadUpdate) return;
+    try {
+      setDesktopUpdate(await bridge.downloadUpdate());
+    } catch {
+      // O card de atualização recebe a falha pelo canal de estado.
+    }
+  }
+
+  async function installDesktopUpdate() {
+    try {
+      await window.screenLinkDesktop?.installUpdate?.();
+    } catch {
+      // Se o instalador não puder iniciar, o atualizador publica o erro na interface.
+    }
+  }
+
   async function copyValue(kind: 'code' | 'link') {
     if (!session) return;
     if (kind === 'code' && !session.joinCode) {
@@ -2679,6 +2856,10 @@ export default function RoomApp() {
     : connectedPeerCount
       ? mediaLatency === null ? 'P2P' : `${latencyLabel} ms`
       : remoteParticipantCount ? 'Conectando P2P' : 'P2P';
+  const desktopApp = Boolean(window.screenLinkDesktop?.isDesktop);
+  const showWindowsDownload = !desktopApp && !phone && /Windows/i.test(navigator.userAgent);
+  const updateNoticeVisible = Boolean(desktopApp && desktopUpdate?.notice && dismissedUpdateVersion !== (desktopUpdate.version || desktopUpdate.status));
+  const onboarding = ONBOARDING_STEPS[onboardingStep];
   const activeChat = chatOpen;
   const activeResolution = automaticQuality ? 720 : resolution;
   const activeFps = automaticQuality ? 30 : fps;
@@ -2956,13 +3137,26 @@ export default function RoomApp() {
         <section className="panel-section interface-motion-section">
           <div className="section-heading"><h3>Interface</h3><small>ESTE DISPOSITIVO</small></div>
           <button className={`toggle-row ${animationsEnabled ? 'is-active' : ''}`} type="button" role="switch" aria-checked={animationsEnabled} onClick={() => setAnimationsEnabled(enabled => !enabled)}><Icon name="motion"/><span className="toggle-row-copy"><strong>Animações e movimento</strong><small>{animationsEnabled ? 'Fundo, mascote e transições suaves' : 'Efeitos visuais pausados'}</small></span><span className="toggle-row-switch"><i/></span></button>
+          <button className="interface-action-row" type="button" onClick={reopenOnboarding}><Icon name="guide"/><span><strong>Rever tutorial</strong><small>Conheça chamadas, chat e compartilhamentos</small></span><Icon name="chevron"/></button>
+          {desktopApp && desktopUpdate && <div className="desktop-update-settings">
+            <div><Icon name={desktopUpdate.status === 'downloaded' ? 'check' : 'refresh'}/><span><strong>Atualizações do aplicativo</strong><small>Versão {desktopUpdate.currentVersion}{desktopUpdate.status === 'portable' ? ' · edição portátil' : ''}</small></span></div>
+            {desktopUpdate.status === 'downloaded'
+              ? <button type="button" onClick={() => void installDesktopUpdate()}>Reiniciar</button>
+              : desktopUpdate.status === 'available'
+                ? <button type="button" onClick={() => void downloadDesktopUpdate()}>Baixar {desktopUpdate.version}</button>
+                : desktopUpdate.status === 'portable'
+                  ? <button type="button" onClick={() => window.open('https://github.com/mqteuss/screenlink/releases/latest', '_blank', 'noopener,noreferrer')}>Abrir downloads</button>
+                  : desktopUpdate.status !== 'development' && desktopUpdate.status !== 'unsupported'
+                    ? <button type="button" onClick={() => void checkForDesktopUpdate()} disabled={desktopUpdate.status === 'checking' || desktopUpdate.status === 'downloading'}>{desktopUpdate.status === 'checking' ? 'Verificando…' : 'Buscar agora'}</button>
+                    : null}
+            {desktopUpdate.message && <p>{desktopUpdate.message}</p>}
+          </div>}
         </section>
     </div>
   );
 
   const callDock = session && mode !== 'error' ? (
     <div className="host-call-dock unified-call-dock" ref={dockRef} aria-label="Controles da chamada">
-      <button className={`dock-connection-indicator ${connectionQuality}`} type="button" aria-label={mediaLatency === null ? 'RTT P2P aguardando medição' : `RTT P2P ${mediaLatency} milissegundos`} data-label="Conexão P2P"><Icon name="link"/><span className="connection-tooltip"><strong>{latencyLabel} ms</strong><small>RTT WebRTC · {connectedPeerCount} par{connectedPeerCount === 1 ? '' : 'es'} · {turnAvailable ? 'TURN pronto' : 'STUN'}</small></span></button>
       <button className={playbackEnabled ? 'is-on' : ''} type="button" onClick={togglePlayback} aria-label={playbackEnabled ? 'Silenciar chamada' : 'Ouvir chamada'} data-label="Áudio"><Icon name={playbackEnabled ? 'volume' : 'volumeOff'}/></button>
       <div className="dock-split-control">
         <button className={microphoneEnabled ? 'is-on' : ''} type="button" onClick={() => void toggleMicrophone()} disabled={microphonePending} aria-busy={microphonePending} aria-label={microphonePending ? 'Abrindo microfone' : microphoneEnabled ? 'Silenciar microfone' : 'Ativar microfone'} data-label={microphonePending ? 'Abrindo…' : 'Microfone'}><Icon name={microphoneEnabled ? 'microphone' : 'microphoneOff'}/></button>
@@ -2981,15 +3175,24 @@ export default function RoomApp() {
     </div>
   ) : null;
 
-  const stageContent = sharingParticipants.length ? (
-    <div className={`unified-screens-grid count-${sharingParticipants.length}`}>
-      {sharingParticipants.map(participant => {
-        if (participant.id === selfId && localScreen) {
-          return <ScreenTile key={participant.id} stream={localScreen} name={participant.name} local/>;
-        }
-        const stream = peersRef.current.get(participant.id)?.screenStream;
-        return stream ? <ScreenTile key={participant.id} stream={stream} name={participant.name}/> : null;
-      })}
+  const screenTiles = sharingParticipants.flatMap(participant => {
+    const stream = participant.id === selfId ? localScreen : peersRef.current.get(participant.id)?.screenStream;
+    return stream ? [{ participant, stream, local: participant.id === selfId }] : [];
+  });
+  const focusedScreen = focusedScreenId ? screenTiles.find(tile => tile.participant.id === focusedScreenId) : undefined;
+  const stageContent = screenTiles.length ? (
+    focusedScreen && screenTiles.length > 1 ? (
+      <div className="unified-screen-focus-layout">
+        <div className="unified-screen-focus-main">
+          <ScreenTile stream={focusedScreen.stream} name={focusedScreen.participant.name} local={focusedScreen.local} focused focusable onFocus={() => setFocusedScreenId(null)}/>
+        </div>
+        <aside className="unified-screen-strip" aria-label="Outras telas compartilhadas">
+          <header><span>Outras telas</span><button type="button" onClick={() => setFocusedScreenId(null)}><Icon name="grid"/>Ver todas</button></header>
+          {screenTiles.filter(tile => tile.participant.id !== focusedScreen.participant.id).map(tile => <ScreenTile key={tile.participant.id} stream={tile.stream} name={tile.participant.name} local={tile.local} thumbnail focusable onFocus={() => setFocusedScreenId(tile.participant.id)}/>)}
+        </aside>
+      </div>
+    ) : <div className={`unified-screens-grid count-${screenTiles.length}`}>
+      {screenTiles.map(tile => <ScreenTile key={tile.participant.id} stream={tile.stream} name={tile.participant.name} local={tile.local} focusable={screenTiles.length > 1} onFocus={() => setFocusedScreenId(tile.participant.id)}/>)}
     </div>
   ) : (
     <div className="stage-empty unified-stage-empty">
@@ -2999,18 +3202,31 @@ export default function RoomApp() {
       <h1>{!session ? 'Inicie uma chamada' : mode === 'connecting' ? 'Entrando na chamada' : mode === 'error' ? 'Sala indisponível' : 'Chamada em andamento'}</h1>
       {mode !== 'connected' && <p>{!session ? 'Crie uma sala ou entre com um código. Quem estiver no computador também pode compartilhar a própria tela.' : mode === 'connecting' ? 'Reconectando à sala sem interromper quem já está aqui…' : error}</p>}
       {!session && <div className="stage-entry-actions"><button className="primary-action" type="button" onClick={() => void createRoom()}><Icon name="users"/> Iniciar chamada</button>{mobile && <button className="secondary-action" type="button" onClick={() => { setControlsOpen(true); setChatOpen(false); }}><Icon name="link"/> Entrar com código</button>}</div>}
+      {!session && showWindowsDownload && <aside className="windows-download-promo" aria-label="Aplicativo ScreenLink para Windows">
+        <div className="windows-download-heading">
+          <span className="windows-download-symbol"><WindowsMark/></span>
+          <span><strong>ScreenLink para Windows</strong><small>Mais integrado ao computador, sem perder suas salas P2P.</small></span>
+        </div>
+        <a className="windows-download-button" href={WINDOWS_INSTALLER_URL} aria-label="Baixar ScreenLink para Windows em formato EXE">
+          <WindowsMark/><span><strong>Baixar para Windows</strong><small>Instalador .exe · x64</small></span><Icon name="download"/>
+        </a>
+        <div className="windows-download-benefits" aria-label="Vantagens do aplicativo para Windows">
+          <span><Icon name="screen"/>Seletor nativo de telas</span>
+          <span><Icon name="volume"/>Áudio do sistema</span>
+          <span><Icon name="refresh"/>Atualizações automáticas</span>
+        </div>
+      </aside>}
       {mode === 'error' && <button className="primary-action" type="button" onClick={leaveRoom}>Voltar</button>}
     </div>
   );
 
   return (
-    <div className={`app room-app unified-room-app ${mobile ? 'viewer-mode is-mobile-room' : ''} ${phone ? 'is-phone-room' : ''} ${activeChat ? 'is-chat-open' : ''} ${controlsOpen ? 'is-controls-open' : ''} ${mobilePresentationOpen ? 'has-mobile-overlay' : ''} ${animationsEnabled ? '' : 'animations-disabled'}`}>
-      <header className="topbar">
-        <div className="brand"><BrandMark/><strong>ScreenLink</strong></div>
-        <div className={`status-pill room-status-${connectionQuality}`}><i/>{session ? connectionStatusLabel : 'Pronto'}</div>
-      </header>
+    <div className={`app room-app unified-room-app ${desktopApp ? 'is-electron-shell' : ''} ${mobile ? 'viewer-mode is-mobile-room' : ''} ${phone ? 'is-phone-room' : ''} ${activeChat ? 'is-chat-open' : ''} ${controlsOpen ? 'is-controls-open' : ''} ${mobilePresentationOpen ? 'has-mobile-overlay' : ''} ${animationsEnabled ? '' : 'animations-disabled'}`}>
+      {desktopApp && !phone && <div className="electron-drag-region" aria-hidden="true"/>}
       <main className="host-main unified-room-main">
-          <aside className={`unified-chat-sidebar ${activeChat ? 'is-open' : 'is-closed'}`} aria-label="Chat da chamada" aria-hidden={!activeChat}>
+          <aside className={`unified-chat-sidebar ${activeChat ? 'is-open' : 'is-closed'}`} aria-label="Navegação e chat da chamada">
+            <div className="unified-sidebar-brand"><div className="brand"><BrandMark/><strong>ScreenLink</strong></div></div>
+            <button className="unified-rail-chat" type="button" onClick={toggleChatSidebar} aria-label={unreadMessages ? `Abrir chat, ${unreadMessages} mensagem${unreadMessages === 1 ? '' : 's'} não lida${unreadMessages === 1 ? '' : 's'}` : 'Abrir chat'}><Icon name="chat"/>{unreadMessages > 0 && <span aria-hidden="true">{unreadMessages === 99 ? '99+' : unreadMessages}</span>}</button>
             <header className="unified-sidebar-header">
               <div className="unified-sidebar-title"><Icon name="chat"/><span><strong>Chat</strong><small>{session ? `Sala ${roomLabel}` : 'LOCAL'}</small></span></div>
               <div className="unified-sidebar-actions">
@@ -3024,7 +3240,7 @@ export default function RoomApp() {
                     <button className="chat-settings-reset" type="button" onClick={() => setChatAppearance(DEFAULT_CHAT_APPEARANCE)}>Restaurar padrão</button>
                   </section>}
                 </div>
-                {mobile && <button className="unified-sidebar-close" type="button" onClick={() => { setChatOpen(false); setProfileOpen(false); setChatSettingsOpen(false); }} aria-label="Fechar chat"><Icon name="close"/></button>}
+                <button className={`unified-sidebar-close ${mobile ? '' : 'is-desktop-collapse'}`} type="button" onClick={() => { setChatOpen(false); setProfileOpen(false); setChatSettingsOpen(false); }} aria-label={mobile ? 'Fechar chat' : 'Recolher barra lateral'} title={mobile ? undefined : 'Recolher barra lateral'}><Icon name={mobile ? 'close' : 'chevron'}/></button>
               </div>
             </header>
             {chatPanel}
@@ -3059,6 +3275,7 @@ export default function RoomApp() {
             grainIntensity={0.05}
             animated={animationsEnabled && !mobilePresentationOpen}
           />
+          {session && sharingParticipants.length === 0 && <div className="stage-room-pill" aria-label={`Sala ${roomLabel}`}><span>Sala</span><strong>{roomLabel}</strong></div>}
           {stageContent}
           {session && sharingParticipants.length > 0 && mode === 'connected' && (
             <div className="participant-rail">{connectedParticipants.map(participant => <div key={participant.id} className={speakingIds.has(participant.id) ? 'is-speaking' : ''}><Avatar avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} leader={participant.id === leaderId} size="small"/><span><strong>{participant.name}</strong><small>{participant.status}</small></span></div>)}</div>
@@ -3066,7 +3283,7 @@ export default function RoomApp() {
           {callDock}
         </section>
         <aside className={`control-panel unified-control-panel ${controlsOpen ? 'is-open' : ''}`} role={phone && controlsOpen ? 'dialog' : undefined} aria-modal={phone && controlsOpen || undefined} aria-hidden={mobile && !controlsOpen} {...controlsSheetGesture}>
-          <div className="panel-header"><div><h2>Controles</h2></div><span className="audience-count">{connectedParticipants.length}/{maxParticipants}</span>{mobile && <button className="mobile-panel-close" type="button" onClick={() => setControlsOpen(false)} aria-label="Fechar controles"><Icon name="close"/></button>}</div>
+          <div className="panel-header"><div><h2>Controles</h2></div><button className={`sidebar-connection-indicator room-status-${connectionQuality}`} type="button" aria-label={!session ? 'Pronto para iniciar uma chamada' : mediaLatency === null ? 'Conexão P2P aguardando medição' : `Conexão P2P com ${mediaLatency} milissegundos de latência`}><i/><span>{session ? connectionStatusLabel : 'Pronto'}</span><span className="connection-tooltip"><strong>{session ? mediaLatency === null ? 'Medindo conexão' : `${latencyLabel} ms` : 'Sem chamada ativa'}</strong><small>{session ? `RTT WebRTC · ${connectedPeerCount} par${connectedPeerCount === 1 ? '' : 'es'} · ${turnAvailable ? 'TURN pronto' : 'STUN'}` : 'O status da rede aparecerá durante a chamada'}</small></span></button>{mobile && <button className="mobile-panel-close" type="button" onClick={() => setControlsOpen(false)} aria-label="Fechar controles"><Icon name="close"/></button>}</div>
           {mobile && <button className="mobile-control-profile" type="button" onClick={() => { setProfileOpen(true); setControlsOpen(false); }}><Avatar avatar={profile.avatar} name={profile.name} leader={Boolean(selfId && selfId === leaderId)} size="small"/><span><strong>{profile.name}</strong><small>{profile.status}</small></span><Icon name="settings"/></button>}
           <div className="panel-view">{callPanel}</div>
         </aside>
@@ -3096,6 +3313,54 @@ export default function RoomApp() {
         </div>
       )}
       {qrOpen && <div className="modal-backdrop" role="presentation" onPointerDown={event => { if (event.target === event.currentTarget) setQrOpen(false); }}><section className="qr-modal" role="dialog" aria-modal="true" aria-labelledby="room-qr-title" {...qrSheetGesture}><span className="eyebrow">SALA {roomLabel}</span><h2 id="room-qr-title">Entrar pelo QR Code</h2><p>Aponte a câmera do celular para abrir o convite completo.</p>{qrCode ? <img src={qrCode} alt={`QR Code da sala ${roomLabel}`}/> : <div className="qr-loading">Gerando QR Code…</div>}<button type="button" onClick={() => setQrOpen(false)}>Fechar</button></section></div>}
+      {updateNoticeVisible && desktopUpdate && <aside className={`desktop-update-card is-${desktopUpdate.status}`} role="status" aria-live="polite">
+        <div className="desktop-update-icon"><Icon name={desktopUpdate.status === 'downloaded' ? 'check' : desktopUpdate.status === 'downloading' ? 'download' : 'refresh'}/></div>
+        <div className="desktop-update-copy">
+          <span>ATUALIZAÇÃO DO SCREENLINK</span>
+          <strong>{desktopUpdate.status === 'available'
+            ? `Versão ${desktopUpdate.version} disponível`
+            : desktopUpdate.status === 'downloading'
+              ? `Baixando ${desktopUpdate.version || 'atualização'}`
+              : desktopUpdate.status === 'downloaded'
+                ? 'Pronta para instalar'
+                : desktopUpdate.status === 'checking'
+                  ? 'Buscando atualizações'
+                  : desktopUpdate.status === 'current'
+                    ? 'ScreenLink atualizado'
+                    : desktopUpdate.status === 'portable'
+                      ? 'Atualização manual'
+                      : desktopUpdate.status === 'development'
+                        ? 'Disponível no aplicativo instalado'
+                        : desktopUpdate.status === 'unsupported'
+                          ? 'Atualizador indisponível neste sistema'
+                          : 'Não foi possível atualizar'}</strong>
+          <small>{desktopUpdate.message}</small>
+          {desktopUpdate.status === 'downloading' && <div className="desktop-update-progress" aria-label={`${desktopUpdate.percent ?? 0}% baixado`}><i style={{ width: `${desktopUpdate.percent ?? 0}%` }}/></div>}
+          <div className="desktop-update-actions">
+            {desktopUpdate.status === 'available' && <button className="is-primary" type="button" onClick={() => void downloadDesktopUpdate()}><Icon name="download"/>Baixar agora</button>}
+            {desktopUpdate.status === 'downloaded' && <button className="is-primary" type="button" onClick={() => void installDesktopUpdate()}><Icon name="refresh"/>Reiniciar e atualizar</button>}
+            {desktopUpdate.status === 'error' && <button type="button" onClick={() => void checkForDesktopUpdate()}><Icon name="refresh"/>Tentar novamente</button>}
+            {desktopUpdate.status !== 'downloading' && desktopUpdate.status !== 'installing' && <button type="button" onClick={() => setDismissedUpdateVersion(desktopUpdate.version || desktopUpdate.status)}>{desktopUpdate.status === 'available' || desktopUpdate.status === 'downloaded' ? 'Agora não' : 'Fechar'}</button>}
+          </div>
+        </div>
+      </aside>}
+      {onboardingOpen && <div className="onboarding-backdrop" role="presentation">
+        <section ref={onboardingDialogRef} className="onboarding-dialog" role="dialog" aria-modal="true" aria-labelledby="onboarding-title" aria-describedby="onboarding-description" tabIndex={-1}>
+          <header><div className="onboarding-brand"><BrandMark/><span>Guia rápido</span></div><span className="onboarding-counter">{String(onboardingStep + 1).padStart(2, '0')} / {String(ONBOARDING_STEPS.length).padStart(2, '0')}</span><button type="button" onClick={finishOnboarding} aria-label="Fechar tutorial"><Icon name="close"/></button></header>
+          <OnboardingPreview step={onboardingStep}/>
+          <div className="onboarding-content" key={`copy-${onboardingStep}`}>
+            <div className="onboarding-step-label"><Icon name={onboarding.icon}/><span>{onboarding.eyebrow}</span></div>
+            <h2 id="onboarding-title">{onboarding.title}</h2>
+            <p id="onboarding-description">{onboarding.description}</p>
+            <div className="onboarding-notes">{onboarding.points.map(point => <span key={point}><Icon name="check"/>{point}</span>)}</div>
+          </div>
+          <nav className="onboarding-progress" aria-label="Progresso do tutorial">{ONBOARDING_STEPS.map((step, index) => <button key={step.title} className={index === onboardingStep ? 'is-current' : index < onboardingStep ? 'is-complete' : ''} type="button" onClick={() => setOnboardingStep(index)} aria-label={`Ir para etapa ${index + 1}`} aria-current={index === onboardingStep ? 'step' : undefined}><span>{index + 1}</span></button>)}</nav>
+          <footer>
+            <button className="onboarding-skip" type="button" onClick={finishOnboarding}>Pular</button>
+            <div><button type="button" onClick={() => setOnboardingStep(step => Math.max(0, step - 1))} disabled={onboardingStep === 0}>Anterior</button><button className="is-primary" type="button" onClick={() => onboardingStep === ONBOARDING_STEPS.length - 1 ? finishOnboarding() : setOnboardingStep(step => step + 1)}>{onboardingStep === ONBOARDING_STEPS.length - 1 ? 'Abrir o ScreenLink' : 'Próximo'}<Icon name={onboardingStep === ONBOARDING_STEPS.length - 1 ? 'check' : 'chevron'}/></button></div>
+          </footer>
+        </section>
+      </div>}
       {error && mode !== 'error' && <button className="call-error" type="button" onClick={() => setError('')}>{error}<Icon name="close"/></button>}
     </div>
   );

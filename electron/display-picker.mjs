@@ -25,7 +25,12 @@ export function registerDisplayMedia({ targetSession, getParentWindow, isTrusted
   let activePicker = null;
 
   function isActivePickerEvent(event) {
-    return Boolean(activePicker && !activePicker.window.isDestroyed() && event.sender === activePicker.window.webContents);
+    return Boolean(
+      activePicker
+      && !activePicker.window.isDestroyed()
+      && event.sender?.id === activePicker.window.webContents.id
+      && event.senderFrame === activePicker.window.webContents.mainFrame
+    );
   }
 
   function settlePicker(sourceId = null) {
@@ -81,7 +86,7 @@ export function registerDisplayMedia({ targetSession, getParentWindow, isTrusted
         backgroundColor: '#0b0f12',
         autoHideMenuBar: true,
         webPreferences: {
-          preload: path.join(ELECTRON_DIR, 'display-picker-preload.mjs'),
+          preload: path.join(ELECTRON_DIR, 'display-picker-preload.cjs'),
           contextIsolation: true,
           nodeIntegration: false,
           sandbox: true,
@@ -91,6 +96,9 @@ export function registerDisplayMedia({ targetSession, getParentWindow, isTrusted
       });
 
       activePicker = { window: pickerWindow, sources, resolve, settled: false };
+      pickerWindow.webContents.on('preload-error', (_event, preloadPath, error) => {
+        console.error(`Falha ao carregar o preload do seletor ${preloadPath}.`, error);
+      });
       pickerWindow.once('ready-to-show', () => pickerWindow.show());
       pickerWindow.on('closed', () => settlePicker());
       pickerWindow.loadFile(path.join(ELECTRON_DIR, 'display-picker.html')).catch(() => settlePicker());

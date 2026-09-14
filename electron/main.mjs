@@ -4,10 +4,11 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { registerDisplayMedia } from './display-picker.mjs';
 import { registerProfileIpc } from './profile-store.mjs';
+import { registerAutoUpdates } from './update-manager.mjs';
 
 const ELECTRON_DIR = path.dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = path.resolve(ELECTRON_DIR, '..');
-const PRELOAD_PATH = path.join(ELECTRON_DIR, 'preload.mjs');
+const PRELOAD_PATH = path.join(ELECTRON_DIR, 'preload.cjs');
 const APP_ID = 'app.screenlink.desktop';
 const DEFAULT_APP_URL = 'https://screenlink-jgnx.onrender.com/';
 const ALLOWED_PERMISSIONS = new Set([
@@ -22,6 +23,7 @@ let trustedOrigin = '';
 let appUrlToLoad = '';
 let disposeProfileIpc = null;
 let disposeDisplayMedia = null;
+let updateManager = null;
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 app.setName('ScreenLink');
@@ -170,6 +172,10 @@ function configureSession() {
 }
 
 function configureWindowSecurity(window) {
+  window.webContents.on('preload-error', (_event, preloadPath, error) => {
+    console.error(`Falha ao carregar o preload ${preloadPath}.`, error);
+  });
+
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (isSafeExternalUrl(url)) void shell.openExternal(url);
     return { action: 'deny' };
@@ -222,6 +228,12 @@ async function bootstrap() {
     userDataDirectory: app.getPath('userData'),
     isTrustedSender
   });
+  updateManager = registerAutoUpdates({
+    ipcMain,
+    app,
+    getMainWindow: () => mainWindow,
+    isTrustedSender
+  });
 
   const window = await createMainWindow();
   const appUrl = await resolveAppUrl();
@@ -229,6 +241,7 @@ async function bootstrap() {
   trustedOrigin = originOf(appUrl);
   if (!trustedOrigin) throw new Error('A origem do ScreenLink é inválida.');
   await window.loadURL(appUrl);
+  updateManager.start();
 }
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -269,4 +282,6 @@ app.on('will-quit', () => {
   disposeDisplayMedia = null;
   disposeProfileIpc?.();
   disposeProfileIpc = null;
+  updateManager?.dispose();
+  updateManager = null;
 });

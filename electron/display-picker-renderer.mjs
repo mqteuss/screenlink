@@ -58,6 +58,9 @@ window.addEventListener('keydown', event => {
 });
 
 try {
+  if (!bridge || typeof bridge.list !== 'function') {
+    throw new Error('A ponte segura do seletor de tela não foi carregada.');
+  }
   sources = await bridge.list();
   screenCount.textContent = String(sources.filter(source => source.kind === 'screen').length);
   windowCount.textContent = String(sources.filter(source => source.kind === 'window').length);
@@ -66,7 +69,8 @@ try {
     for (const button of filterButtons) button.classList.toggle('is-active', button.dataset.filter === activeFilter);
   }
   render();
-} catch {
-  emptyState.textContent = 'Não foi possível listar as telas e janelas.';
+} catch (error) {
+  console.error(error);
+  emptyState.textContent = 'Não foi possível listar as telas e janelas. Feche esta janela e tente novamente.';
   emptyState.hidden = false;
 }

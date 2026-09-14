@@ -7,14 +7,14 @@ on:
       - "v*"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-windows:
     runs-on: windows-latest
     steps:
       - name: Baixar o código
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Preparar Node.js
         uses: actions/setup-node@v7
@@ -25,13 +25,32 @@ jobs:
       - name: Instalar dependências
         run: npm ci
 
+      - name: Conferir versão da tag
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          $packageVersion = node -p "require('./package.json').version"
+          if ("v$packageVersion" -ne "${{ github.ref_name }}") {
+            throw "A tag ${{ github.ref_name }} não corresponde à versão v$packageVersion do package.json."
+          }
+
       - name: Verificar e gerar executáveis
+        if: github.ref_type != 'tag'
         run: npm run desktop:dist
+
+      - name: Publicar atualização na Release do GitHub
+        if: github.ref_type == 'tag'
+        run: npm run desktop:release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publicar artefatos do Windows
         uses: actions/upload-artifact@v7
         with:
           name: ScreenLink-Windows-${{ github.ref_name }}
-          path: release/*.exe
+          path: |
+            release/*.exe
+            release/latest.yml
+            release/*.blockmap
           if-no-files-found: error
           retention-days: 14
