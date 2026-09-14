@@ -19,7 +19,7 @@
     "desktop": "npm run build && electron .",
     "desktop:pack": "npm run build && electron-builder --dir",
     "desktop:dist": "npm run build && electron-builder --win --publish never",
-    "desktop:release": "npm run build && electron-builder --win --publish always"
+    "desktop:release": "npm run desktop:dist"
   },
   "engines": {
     "node": ">=22"

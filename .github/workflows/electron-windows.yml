@@ -35,12 +35,33 @@ jobs:
           }
 
       - name: Verificar e gerar executáveis
-        if: github.ref_type != 'tag'
         run: npm run desktop:dist
 
       - name: Publicar atualização na Release do GitHub
         if: github.ref_type == 'tag'
-        run: npm run desktop:release
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = node -p "require('./package.json').version"
+
+          gh release view $tag --repo "${{ github.repository }}" *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --repo "${{ github.repository }}" --verify-tag --draft --generate-notes --title "ScreenLink $version"
+            if ($LASTEXITCODE -ne 0) { throw "Não foi possível criar a release $tag." }
+          }
+
+          $assets = @(
+            Get-ChildItem -Path "release/*.exe" -File
+            Get-Item -Path "release/latest.yml"
+            Get-ChildItem -Path "release/*.blockmap" -File
+          ) | Select-Object -ExpandProperty FullName -Unique
+
+          if ($assets.Count -lt 4) { throw "A build não gerou todos os artefatos esperados." }
+          gh release upload $tag @assets --repo "${{ github.repository }}" --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Não foi possível enviar os artefatos da release $tag." }
+
+          gh release edit $tag --repo "${{ github.repository }}" --draft=false --prerelease=false --latest
+          if ($LASTEXITCODE -ne 0) { throw "Não foi possível publicar a release $tag." }
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
