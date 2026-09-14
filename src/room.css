@@ -1077,7 +1077,7 @@
     grid-template-rows: auto auto auto auto minmax(0, 1fr);
     gap: .5rem;
     background: #111516;
-    box-shadow: 0 -.8rem 2.2rem rgba(0,0,0,.42);
+    box-shadow: none;
     transform-origin: 50% 100%;
     animation: mobile-sheet-enter 260ms var(--ease-out) both;
     backface-visibility: hidden;
@@ -1110,7 +1110,7 @@
     overflow-y: auto;
     border-width: 1px 0 0;
     border-radius: 1.3rem 1.3rem 0 0;
-    box-shadow: 0 -1rem 3.5rem rgba(0,0,0,.48);
+    box-shadow: none;
     transform-origin: 50% 100%;
     animation: mobile-sheet-enter 280ms var(--ease-out) both;
   }
@@ -1143,7 +1143,7 @@
     border-width: 1px 0 0;
     border-radius: 1.35rem 1.35rem 0 0;
     background: rgba(10,12,13,.985);
-    box-shadow: 0 -1rem 2.6rem rgba(0,0,0,.48);
+    box-shadow: none;
     backdrop-filter: none;
     animation: mobile-sheet-enter 300ms var(--ease-out) both;
   }
@@ -1171,7 +1171,7 @@
     overflow-y: auto;
     border-width: 1px 0 0;
     border-radius: 1.35rem 1.35rem 0 0;
-    box-shadow: 0 -1rem 2.6rem rgba(0,0,0,.48);
+    box-shadow: none;
     backdrop-filter: none;
     animation: mobile-sheet-enter 300ms var(--ease-out) both;
     -webkit-overflow-scrolling: touch;
@@ -1200,7 +1200,7 @@
     border-radius: 1.35rem 1.35rem 0 0;
     pointer-events: auto;
     background: rgba(13,14,15,.99);
-    box-shadow: 0 -1rem 2.8rem rgba(0,0,0,.5);
+    box-shadow: none;
     backdrop-filter: none;
     transform: none;
     animation: mobile-sheet-enter 300ms var(--ease-out) both;
@@ -1252,11 +1252,12 @@
   .mobile-sheet-host .room-device-options-list > button { min-height: 3.25rem; padding: .48rem .62rem; border-radius: .7rem; }
 
   .unified-room-app.is-phone-room .modal-backdrop { align-items: end; padding: 0; backdrop-filter: none; }
-  .unified-room-app.is-phone-room .qr-modal { width: 100%; max-height: calc(100dvh - 1rem); padding: 1.5rem 1rem max(1rem, env(safe-area-inset-bottom)); overflow-y: auto; border-width: 1px 0 0; border-radius: 1.35rem 1.35rem 0 0; animation: mobile-sheet-enter 300ms var(--ease-out) both; }
+  .unified-room-app.is-phone-room .qr-modal { width: 100%; max-height: calc(100dvh - 1rem); padding: 1.5rem 1rem max(1rem, env(safe-area-inset-bottom)); overflow-y: auto; border-width: 1px 0 0; border-radius: 1.35rem 1.35rem 0 0; box-shadow: none; animation: mobile-sheet-enter 300ms var(--ease-out) both; }
   .unified-room-app.is-phone-room .qr-modal img { width: min(15.5rem, 62dvh); }
   .unified-room-app.is-phone-room .qr-modal > button { width: 100%; min-height: 3rem; }
 
   .unified-room-app.is-phone-room [data-mobile-sheet="true"] { touch-action: pan-y; backface-visibility: hidden; }
+  .unified-room-app.is-phone-room [data-mobile-sheet="true"].is-sheet-ready,
   .unified-room-app.is-phone-room [data-mobile-sheet="true"].is-sheet-dragging,
   .unified-room-app.is-phone-room [data-mobile-sheet="true"].is-sheet-settling,
   .unified-room-app.is-phone-room [data-mobile-sheet="true"].is-sheet-dismissing {
@@ -1264,8 +1265,11 @@
     transform: translate3d(0, var(--sheet-drag-y, 0px), 0) !important;
   }
   .unified-room-app.is-phone-room [data-mobile-sheet="true"].is-sheet-dragging { transition: none !important; user-select: none; will-change: transform; }
-  .unified-room-app.is-phone-room [data-mobile-sheet="true"].is-sheet-settling { transition: transform 220ms var(--ease-out) !important; }
-  .unified-room-app.is-phone-room [data-mobile-sheet="true"].is-sheet-dismissing { transition: transform 190ms cubic-bezier(.4, 0, 1, 1) !important; }
+  .unified-room-app.is-phone-room [data-mobile-sheet="true"].is-sheet-settling { transition: transform 260ms cubic-bezier(.2, .8, .2, 1) !important; }
+  .unified-room-app.is-phone-room [data-mobile-sheet="true"].is-sheet-dismissing { pointer-events: none; transition: transform 240ms cubic-bezier(.4, 0, .2, 1) !important; }
+  .mobile-sheet-backdrop.is-sheet-backdrop-dismissing,
+  .mobile-overlay-backdrop.is-sheet-backdrop-dismissing,
+  .unified-room-app.is-phone-room .modal-backdrop.is-sheet-backdrop-dismissing { pointer-events: none; opacity: 0; animation: none !important; transition: opacity 240ms ease-in !important; }
   .unified-room-app.is-phone-room.has-mobile-overlay .room-gradient-waves { pointer-events: none; }
   .unified-room-app.is-phone-room.has-mobile-overlay .unified-call-dock { backdrop-filter: none; }
 

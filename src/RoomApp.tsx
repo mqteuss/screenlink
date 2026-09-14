@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type TouchEvent as ReactTouchEvent } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent as ReactAnimationEvent, type FormEvent, type TouchEvent as ReactTouchEvent } from 'react';
 import QRCode from 'qrcode';
 import { playInterfaceSound as playCallSound, setInterfaceSoundOutputDevice, unlockInterfaceSounds, type InterfaceSoundName } from './callSounds';
 import GradientWaves from './GradientWaves';
@@ -612,10 +612,27 @@ function touchById(touches: TouchList, touchId: number) {
   return null;
 }
 
+function bottomSheetBackdrop(element: HTMLElement) {
+  const sheetLayer = element.closest<HTMLElement>('.mobile-sheet-layer');
+  if (sheetLayer) return sheetLayer.querySelector<HTMLElement>('.mobile-sheet-backdrop');
+  const modalBackdrop = element.closest<HTMLElement>('.modal-backdrop');
+  if (modalBackdrop) return modalBackdrop;
+  return element.closest<HTMLElement>('.unified-room-app')?.querySelector<HTMLElement>('.mobile-overlay-backdrop') ?? null;
+}
+
 function useBottomSheetGesture(enabled: boolean, onDismiss: () => void) {
   const dismissRef = useRef(onDismiss);
   const dragRef = useRef<SheetDragSession | null>(null);
   const removeNativeListenersRef = useRef<(() => void) | null>(null);
+  const settleFrameRef = useRef<number | null>(null);
+  const settleTimerRef = useRef<number | null>(null);
+  const dismissFrameRef = useRef<number | null>(null);
+  const dismissTimerRef = useRef<number | null>(null);
+  const sheetElementRef = useRef<HTMLElement | null>(null);
+  const motionElementRef = useRef<HTMLElement | null>(null);
+  const motionBackdropRef = useRef<HTMLElement | null>(null);
+  const closingRef = useRef(false);
+  const sheetId = `mobile-sheet-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`;
   dismissRef.current = onDismiss;
 
   const removeNativeListeners = useCallback(() => {
@@ -623,31 +640,120 @@ function useBottomSheetGesture(enabled: boolean, onDismiss: () => void) {
     removeNativeListenersRef.current = null;
   }, []);
 
+  const resetMotion = useCallback(() => {
+    if (settleFrameRef.current !== null) window.cancelAnimationFrame(settleFrameRef.current);
+    if (dismissFrameRef.current !== null) window.cancelAnimationFrame(dismissFrameRef.current);
+    if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
+    if (dismissTimerRef.current !== null) window.clearTimeout(dismissTimerRef.current);
+    settleFrameRef.current = null;
+    dismissFrameRef.current = null;
+    settleTimerRef.current = null;
+    dismissTimerRef.current = null;
+    sheetElementRef.current?.classList.remove('is-sheet-ready', 'is-sheet-dragging', 'is-sheet-settling', 'is-sheet-dismissing');
+    sheetElementRef.current?.style.removeProperty('--sheet-drag-y');
+    sheetElementRef.current?.style.removeProperty('animation');
+    motionBackdropRef.current?.classList.remove('is-sheet-backdrop-dismissing');
+    sheetElementRef.current = null;
+    motionElementRef.current = null;
+    motionBackdropRef.current = null;
+    closingRef.current = false;
+  }, []);
+
   const releaseSession = useCallback((settle = true) => {
     removeNativeListeners();
     const session = dragRef.current;
     dragRef.current = null;
     if (!session) return;
-    if (session.frame !== null) window.cancelAnimationFrame(session.frame);
+    if (session.frame !== null) {
+      window.cancelAnimationFrame(session.frame);
+      session.element.style.setProperty('--sheet-drag-y', `${session.offset}px`);
+    }
     const { element } = session;
-    element.classList.remove('is-sheet-dragging');
     if (!settle || !session.dragging) {
       element.classList.remove('is-sheet-settling', 'is-sheet-dismissing');
+      element.classList.remove('is-sheet-dragging');
       element.style.removeProperty('--sheet-drag-y');
       return;
     }
+    if (settleFrameRef.current !== null) window.cancelAnimationFrame(settleFrameRef.current);
+    if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
+    motionElementRef.current = element;
+    sheetElementRef.current = element;
+    element.style.setProperty('animation', 'none');
+    element.classList.add('is-sheet-ready');
     element.classList.add('is-sheet-settling');
-    element.style.setProperty('--sheet-drag-y', '0px');
-    window.setTimeout(() => {
+    element.classList.remove('is-sheet-dragging', 'is-sheet-dismissing');
+    void element.offsetHeight;
+    settleFrameRef.current = window.requestAnimationFrame(() => {
+      settleFrameRef.current = null;
+      element.style.setProperty('--sheet-drag-y', '0px');
+    });
+    settleTimerRef.current = window.setTimeout(() => {
+      settleTimerRef.current = null;
       element.classList.remove('is-sheet-settling');
       element.style.removeProperty('--sheet-drag-y');
-    }, 240);
+      if (motionElementRef.current === element) motionElementRef.current = null;
+    }, 280);
   }, [removeNativeListeners]);
 
+  const dismissSheet = useCallback((knownElement?: HTMLElement) => {
+    if (closingRef.current) return;
+    const element = knownElement ?? document.querySelector<HTMLElement>(`[data-mobile-sheet-id="${sheetId}"]`);
+    if (!element) {
+      dismissRef.current();
+      return;
+    }
+    const app = element.closest<HTMLElement>('.unified-room-app');
+    const reducedMotion = app?.classList.contains('animations-disabled') || window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    removeNativeListeners();
+    const session = dragRef.current;
+    dragRef.current = null;
+    if (session && session.frame !== null) {
+      window.cancelAnimationFrame(session.frame);
+      session.element.style.setProperty('--sheet-drag-y', `${session.offset}px`);
+    }
+    if (reducedMotion) {
+      resetMotion();
+      dismissRef.current();
+      return;
+    }
+
+    if (settleFrameRef.current !== null) window.cancelAnimationFrame(settleFrameRef.current);
+    if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
+    settleFrameRef.current = null;
+    settleTimerRef.current = null;
+    const backdrop = bottomSheetBackdrop(element);
+    sheetElementRef.current = element;
+    motionElementRef.current = element;
+    motionBackdropRef.current = backdrop;
+    closingRef.current = true;
+    element.style.setProperty('animation', 'none');
+    element.classList.add('is-sheet-ready', 'is-sheet-dismissing');
+    element.classList.remove('is-sheet-dragging', 'is-sheet-settling');
+    backdrop?.classList.add('is-sheet-backdrop-dismissing');
+    void element.offsetHeight;
+    dismissFrameRef.current = window.requestAnimationFrame(() => {
+      dismissFrameRef.current = null;
+      const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+      element.style.setProperty('--sheet-drag-y', `${Math.max(viewportHeight, element.clientHeight + 64)}px`);
+    });
+    dismissTimerRef.current = window.setTimeout(() => {
+      dismissTimerRef.current = null;
+      closingRef.current = false;
+      dismissRef.current();
+    }, 270);
+  }, [removeNativeListeners, resetMotion, sheetId]);
+
   useEffect(() => {
-    if (!enabled) releaseSession(false);
-    return () => releaseSession(false);
-  }, [enabled, releaseSession]);
+    if (!enabled) {
+      releaseSession(false);
+      resetMotion();
+    }
+    return () => {
+      releaseSession(false);
+      resetMotion();
+    };
+  }, [enabled, releaseSession, resetMotion]);
 
   const onNativeTouchMove = useCallback((event: TouchEvent) => {
     const session = dragRef.current;
@@ -678,7 +784,9 @@ function useBottomSheetGesture(enabled: boolean, onDismiss: () => void) {
     if (event.cancelable) event.preventDefault();
     const elapsed = Math.max(1, event.timeStamp - session.lastTime);
     const instantVelocity = (touch.clientY - session.lastY) / elapsed;
-    session.velocity = session.velocity * .68 + instantVelocity * .32;
+    session.velocity = session.velocity && Math.sign(session.velocity) !== Math.sign(instantVelocity)
+      ? instantVelocity
+      : session.velocity * .62 + instantVelocity * .38;
     session.lastY = touch.clientY;
     session.lastTime = event.timeStamp;
     const height = Math.max(1, session.element.clientHeight);
@@ -702,20 +810,16 @@ function useBottomSheetGesture(enabled: boolean, onDismiss: () => void) {
       session.element.style.setProperty('--sheet-drag-y', `${session.offset}px`);
     }
     const dismiss = !cancelled && session.dragging && (
-      session.offset >= Math.min(112, session.element.clientHeight * .2) || session.velocity > .58
+      session.offset >= Math.min(120, session.element.clientHeight * .22)
+      || (session.offset >= Math.min(36, session.element.clientHeight * .08) && session.velocity > .72)
     );
+    if (session.dragging && event.cancelable) event.preventDefault();
     if (!dismiss) {
       releaseSession(true);
       return;
     }
-    if (event.cancelable) event.preventDefault();
-    dragRef.current = null;
-    removeNativeListeners();
-    session.element.classList.remove('is-sheet-dragging');
-    session.element.classList.add('is-sheet-dismissing');
-    session.element.style.setProperty('--sheet-drag-y', `${Math.max(window.innerHeight, session.element.clientHeight + 48)}px`);
-    window.setTimeout(() => dismissRef.current(), 190);
-  }, [releaseSession, removeNativeListeners]);
+    dismissSheet(session.element);
+  }, [dismissSheet, releaseSession]);
 
   const onNativeTouchEnd = useCallback((event: TouchEvent) => finishGesture(event), [finishGesture]);
   const onNativeTouchCancel = useCallback((event: TouchEvent) => finishGesture(event, true), [finishGesture]);
@@ -727,6 +831,10 @@ function useBottomSheetGesture(enabled: boolean, onDismiss: () => void) {
     removeNativeListeners();
     const touch = event.touches[0];
     const element = event.currentTarget;
+    if (closingRef.current || element.classList.contains('is-sheet-settling')) return;
+    sheetElementRef.current = element;
+    element.style.setProperty('animation', 'none');
+    element.classList.add('is-sheet-ready');
     element.classList.remove('is-sheet-settling', 'is-sheet-dismissing');
     element.style.removeProperty('--sheet-drag-y');
     dragRef.current = {
@@ -753,10 +861,18 @@ function useBottomSheetGesture(enabled: boolean, onDismiss: () => void) {
     };
   }, [enabled, onNativeTouchCancel, onNativeTouchEnd, onNativeTouchMove, removeNativeListeners]);
 
-  return {
+  const onAnimationEnd = useCallback((event: ReactAnimationEvent<HTMLElement>) => {
+    if (event.target !== event.currentTarget || event.animationName !== 'mobile-sheet-enter') return;
+    sheetElementRef.current = event.currentTarget;
+    event.currentTarget.style.setProperty('animation', 'none');
+  }, []);
+
+  return [{
     'data-mobile-sheet': enabled ? 'true' : undefined,
-    onTouchStart
-  };
+    'data-mobile-sheet-id': enabled ? sheetId : undefined,
+    onTouchStart,
+    onAnimationEnd
+  }, dismissSheet] as const;
 }
 
 function normalizeStatus(value: string) {
@@ -1369,34 +1485,43 @@ export default function RoomApp() {
     const dismiss = (event: PointerEvent) => {
       const target = event.target as Node;
       if (!dockRef.current?.contains(target) && !mobileSheetRef.current?.contains(target)) {
-        setAudioMenuOpen(false);
-        setScreenMenuOpen(false);
-        setMoreMenuOpen(false);
-        setLeaveMenuOpen(false);
+        if (phone) dismissMobileOverlayRef.current();
+        else {
+          setAudioMenuOpen(false);
+          setScreenMenuOpen(false);
+          setMoreMenuOpen(false);
+          setLeaveMenuOpen(false);
+        }
       }
     };
     document.addEventListener('pointerdown', dismiss);
     return () => document.removeEventListener('pointerdown', dismiss);
-  }, [audioMenuOpen, leaveMenuOpen, moreMenuOpen, screenMenuOpen]);
+  }, [audioMenuOpen, leaveMenuOpen, moreMenuOpen, phone, screenMenuOpen]);
 
   useEffect(() => {
     if (!emojiOpen) return;
     const dismiss = (event: PointerEvent) => {
       const target = event.target as Node;
-      if (!emojiPickerRef.current?.contains(target) && !emojiPanelRef.current?.contains(target)) setEmojiOpen(false);
+      if (!emojiPickerRef.current?.contains(target) && !emojiPanelRef.current?.contains(target)) {
+        if (phone) dismissMobileOverlayRef.current();
+        else setEmojiOpen(false);
+      }
     };
     document.addEventListener('pointerdown', dismiss);
     return () => document.removeEventListener('pointerdown', dismiss);
-  }, [emojiOpen]);
+  }, [emojiOpen, phone]);
 
   useEffect(() => {
     if (!chatSettingsOpen) return;
     const dismiss = (event: PointerEvent) => {
-      if (!chatSettingsRef.current?.contains(event.target as Node)) setChatSettingsOpen(false);
+      if (!chatSettingsRef.current?.contains(event.target as Node)) {
+        if (phone) dismissMobileOverlayRef.current();
+        else setChatSettingsOpen(false);
+      }
     };
     document.addEventListener('pointerdown', dismiss);
     return () => document.removeEventListener('pointerdown', dismiss);
-  }, [chatSettingsOpen]);
+  }, [chatSettingsOpen, phone]);
 
   useEffect(() => {
     if (!session?.invite.token) {
@@ -1419,18 +1544,25 @@ export default function RoomApp() {
     const dismiss = (event: PointerEvent) => {
       const target = event.target as Node;
       if (!profilePopoverRef.current?.contains(target) && !profileBarRef.current?.contains(target)) {
-        commitProfileName();
-        commitProfileStatus();
-        setProfileOpen(false);
+        if (phone) dismissMobileOverlayRef.current();
+        else {
+          commitProfileName();
+          commitProfileStatus();
+          setProfileOpen(false);
+        }
       }
     };
     document.addEventListener('pointerdown', dismiss);
     return () => document.removeEventListener('pointerdown', dismiss);
-  }, [profileOpen]);
+  }, [phone, profileOpen]);
 
   useEffect(() => {
     const dismissOverlays = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || event.defaultPrevented) return;
+      if (phone && (qrOpen || profileOpen || emojiOpen || chatSettingsOpen || audioMenuOpen || screenMenuOpen || moreMenuOpen || leaveMenuOpen || controlsOpen)) {
+        dismissMobileOverlayRef.current();
+        return;
+      }
       if (qrOpen) {
         setQrOpen(false);
         return;
@@ -1466,7 +1598,7 @@ export default function RoomApp() {
     };
     document.addEventListener('keydown', dismissOverlays);
     return () => document.removeEventListener('keydown', dismissOverlays);
-  }, [audioMenuOpen, chatOpen, chatSettingsOpen, controlsOpen, emojiOpen, leaveMenuOpen, moreMenuOpen, profileOpen, qrOpen, screenMenuOpen]);
+  }, [audioMenuOpen, chatOpen, chatSettingsOpen, controlsOpen, emojiOpen, leaveMenuOpen, moreMenuOpen, phone, profileOpen, qrOpen, screenMenuOpen]);
 
   const scrollChatToLatest = useCallback((smooth = false) => {
     const log = chatLogRef.current;
@@ -2839,7 +2971,8 @@ export default function RoomApp() {
     } catch {
       setError('A tela cheia não está disponível neste navegador.');
     }
-    setMoreMenuOpen(false);
+    if (phone && moreMenuOpen) dismissMobileOverlayRef.current();
+    else setMoreMenuOpen(false);
   }
 
   async function togglePictureInPicture() {
@@ -2852,7 +2985,8 @@ export default function RoomApp() {
     } catch {
       setError('Não foi possível abrir o miniplayer agora.');
     }
-    setMoreMenuOpen(false);
+    if (phone && moreMenuOpen) dismissMobileOverlayRef.current();
+    else setMoreMenuOpen(false);
   }
 
   function toggleKeepAwake() {
@@ -2893,7 +3027,8 @@ export default function RoomApp() {
       transmitPendingChat(message.id, true);
     }
     setChatValue('');
-    setEmojiOpen(false);
+    if (phone && emojiOpen) dismissMobileOverlayRef.current();
+    else setEmojiOpen(false);
     window.requestAnimationFrame(() => resizeChatInput(chatInputRef.current));
   }
 
@@ -2942,8 +3077,10 @@ export default function RoomApp() {
 
   function toggleEmojiPicker() {
     if (emojiOpen) {
-      setEmojiOpen(false);
-      if (phone) chatInputRef.current?.focus();
+      if (phone) {
+        dismissMobileOverlayRef.current();
+        window.setTimeout(() => chatInputRef.current?.focus(), 280);
+      } else setEmojiOpen(false);
       return;
     }
     setEmojiSearch('');
@@ -3114,19 +3251,19 @@ export default function RoomApp() {
                   ? 'chat'
                   : '';
   const mobilePresentationOpen = phone && Boolean(mobileOverlayKey);
-  const dockSheetGesture = useBottomSheetGesture(dockSheetOpen, closeDockSheets);
-  const controlsSheetGesture = useBottomSheetGesture(phone && controlsOpen, () => setControlsOpen(false));
-  const profileSheetGesture = useBottomSheetGesture(phone && profileOpen, closeProfileSheet);
-  const chatSettingsSheetGesture = useBottomSheetGesture(phone && chatSettingsOpen, () => setChatSettingsOpen(false));
-  const emojiSheetGesture = useBottomSheetGesture(phone && emojiOpen, () => setEmojiOpen(false));
-  const qrSheetGesture = useBottomSheetGesture(phone && qrOpen, () => setQrOpen(false));
+  const [dockSheetGesture, dismissDockSheet] = useBottomSheetGesture(dockSheetOpen, closeDockSheets);
+  const [controlsSheetGesture, dismissControlsSheet] = useBottomSheetGesture(phone && controlsOpen, () => setControlsOpen(false));
+  const [profileSheetGesture, dismissProfileSheet] = useBottomSheetGesture(phone && profileOpen, closeProfileSheet);
+  const [chatSettingsSheetGesture, dismissChatSettingsSheet] = useBottomSheetGesture(phone && chatSettingsOpen, () => setChatSettingsOpen(false));
+  const [emojiSheetGesture, dismissEmojiSheet] = useBottomSheetGesture(phone && emojiOpen, () => setEmojiOpen(false));
+  const [qrSheetGesture, dismissQrSheet] = useBottomSheetGesture(phone && qrOpen, () => setQrOpen(false));
   dismissMobileOverlayRef.current = () => {
-    if (mobileOverlayKey === 'qr') setQrOpen(false);
-    else if (mobileOverlayKey === 'profile') closeProfileSheet();
-    else if (mobileOverlayKey === 'chat-settings') setChatSettingsOpen(false);
-    else if (mobileOverlayKey === 'emoji') setEmojiOpen(false);
-    else if (mobileOverlayKey === 'dock') closeDockSheets();
-    else if (mobileOverlayKey === 'controls') setControlsOpen(false);
+    if (mobileOverlayKey === 'qr') dismissQrSheet();
+    else if (mobileOverlayKey === 'profile') dismissProfileSheet();
+    else if (mobileOverlayKey === 'chat-settings') dismissChatSettingsSheet();
+    else if (mobileOverlayKey === 'emoji') dismissEmojiSheet();
+    else if (mobileOverlayKey === 'dock') dismissDockSheet();
+    else if (mobileOverlayKey === 'controls') dismissControlsSheet();
     else if (mobileOverlayKey === 'chat') {
       setChatOpen(false);
       setProfileOpen(false);
@@ -3222,7 +3359,7 @@ export default function RoomApp() {
 
   const audioPopover = audioMenuOpen ? (
     <section className="dock-popover audio-popover unified-audio-popover" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="audio-sheet-title" {...dockSheetGesture}>
-      <header><strong id="audio-sheet-title">Áudio</strong><small>DISPOSITIVOS E VOZ</small><button className="mobile-sheet-close" type="button" onClick={() => setAudioMenuOpen(false)} aria-label="Fechar configurações de áudio"><Icon name="close"/></button></header>
+      <header><strong id="audio-sheet-title">Áudio</strong><small>DISPOSITIVOS E VOZ</small><button className="mobile-sheet-close" type="button" onClick={() => dismissDockSheet()} aria-label="Fechar configurações de áudio"><Icon name="close"/></button></header>
       <div className="room-device-stack">
         <RoomDevicePicker input label="Dispositivo de entrada" value={audioSettings.inputDeviceId} devices={audioDevices} onChange={deviceId => void changeInputDevice(deviceId)}/>
         <RoomDevicePicker label="Dispositivo de saída" value={audioSettings.outputDeviceId} devices={audioDevices} onChange={changeOutputDevice}/>
@@ -3277,8 +3414,8 @@ export default function RoomApp() {
 
   const screenPopover = screenMenuOpen ? (
     <section className="dock-popover more-popover screen-popover unified-screen-popover" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="screen-sheet-title" {...dockSheetGesture}>
-      <header><strong id="screen-sheet-title">Compartilhamento</strong><small>{sharing ? 'ATIVO' : 'PRONTO'}</small><button className="mobile-sheet-close" type="button" onClick={() => setScreenMenuOpen(false)} aria-label="Fechar configurações do compartilhamento"><Icon name="close"/></button></header>
-      <button type="button" onClick={() => { void toggleScreenShare(); setScreenMenuOpen(false); }} disabled={screenSharePending || (!sharing && !screenShareSupported)}><Icon name="screen"/><span><strong>{screenSharePending ? 'Abrindo seletor…' : sharing ? 'Parar compartilhamento' : 'Compartilhar tela'}</strong><small>{sharing ? 'A chamada continuará ativa' : screenShareSupported ? 'Escolha uma tela, janela ou aba' : 'Não disponível neste navegador'}</small></span></button>
+      <header><strong id="screen-sheet-title">Compartilhamento</strong><small>{sharing ? 'ATIVO' : 'PRONTO'}</small><button className="mobile-sheet-close" type="button" onClick={() => dismissDockSheet()} aria-label="Fechar configurações do compartilhamento"><Icon name="close"/></button></header>
+      <button type="button" onClick={() => { void toggleScreenShare(); dismissDockSheet(); }} disabled={screenSharePending || (!sharing && !screenShareSupported)}><Icon name="screen"/><span><strong>{screenSharePending ? 'Abrindo seletor…' : sharing ? 'Parar compartilhamento' : 'Compartilhar tela'}</strong><small>{sharing ? 'A chamada continuará ativa' : screenShareSupported ? 'Escolha uma tela, janela ou aba' : 'Não disponível neste navegador'}</small></span></button>
       <div className="screen-popover-scroll">
         <section className="screen-menu-section">
           <header><strong>Áudio recebido</strong><small>{remoteSharingParticipants.length ? `${remoteSharingParticipants.length} TELA${remoteSharingParticipants.length === 1 ? '' : 'S'}` : 'SEM TELAS'}</small></header>
@@ -3302,7 +3439,7 @@ export default function RoomApp() {
 
   const morePopover = moreMenuOpen ? (
     <section className="dock-popover more-popover viewing-popover" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="more-sheet-title" {...dockSheetGesture}>
-      <header><strong id="more-sheet-title">Mais opções</strong><small>ESTE DISPOSITIVO</small><button className="mobile-sheet-close" type="button" onClick={() => setMoreMenuOpen(false)} aria-label="Fechar mais opções"><Icon name="close"/></button></header>
+      <header><strong id="more-sheet-title">Mais opções</strong><small>ESTE DISPOSITIVO</small><button className="mobile-sheet-close" type="button" onClick={() => dismissDockSheet()} aria-label="Fechar mais opções"><Icon name="close"/></button></header>
       {mobile && <button type="button" onClick={() => { setMoreMenuOpen(false); setScreenMenuOpen(true); }}><Icon name="screen"/><span><strong>Compartilhamentos</strong><small>{remoteSharingParticipants.length ? `Ajustar áudio de ${remoteSharingParticipants.length} tela${remoteSharingParticipants.length === 1 ? '' : 's'}` : screenShareSupported ? 'Tela, áudio e bitrate' : 'Áudio das telas recebidas'}</small></span><Icon name="chevron"/></button>}
       <button type="button" onClick={() => void toggleFullscreen()}><Icon name="expand"/><span><strong>{document.fullscreenElement ? 'Sair da tela cheia' : 'Tela cheia'}</strong><small>Amplia a área compartilhada</small></span></button>
       <button type="button" onClick={() => void togglePictureInPicture()} disabled={!sharingParticipants.length}><Icon name="pip"/><span><strong>Miniplayer</strong><small>{sharingParticipants.length ? 'Mantém uma tela sobre as outras janelas' : 'Disponível quando alguém compartilhar'}</small></span></button>
@@ -3312,7 +3449,7 @@ export default function RoomApp() {
 
   const exitPopover = leaveMenuOpen ? (
     <section className="dock-popover audio-popover exit-popover" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="exit-sheet-title" {...dockSheetGesture}>
-      <header><strong id="exit-sheet-title">Sair da chamada</strong><small>AÇÕES DA SALA</small><button className="mobile-sheet-close" type="button" onClick={() => setLeaveMenuOpen(false)} aria-label="Fechar opções para sair"><Icon name="close"/></button></header>
+      <header><strong id="exit-sheet-title">Sair da chamada</strong><small>AÇÕES DA SALA</small><button className="mobile-sheet-close" type="button" onClick={() => dismissDockSheet()} aria-label="Fechar opções para sair"><Icon name="close"/></button></header>
       <div className="exit-options">
         <button type="button" onClick={leaveRoom}><Icon name="hangup"/><span><strong>Sair da chamada</strong><small>A sala continua para quem permanecer</small></span></button>
         {isOwner && <button className="is-danger" type="button" onClick={closeRoom}><Icon name="close"/><span><strong>Encerrar sala</strong><small>Desconecta todas as pessoas agora</small></span></button>}
@@ -3382,17 +3519,17 @@ export default function RoomApp() {
       <button className={playbackEnabled ? 'is-on' : ''} type="button" onClick={togglePlayback} aria-label={playbackEnabled ? 'Silenciar chamada' : 'Ouvir chamada'} data-label="Áudio"><Icon name={playbackEnabled ? 'volume' : 'volumeOff'}/></button>
       <div className="dock-split-control">
         <button className={microphoneEnabled ? 'is-on' : ''} type="button" onClick={() => void toggleMicrophone()} disabled={microphonePending} aria-busy={microphonePending} aria-label={microphonePending ? 'Abrindo microfone' : microphoneEnabled ? 'Silenciar microfone' : 'Ativar microfone'} data-label={microphonePending ? 'Abrindo…' : 'Microfone'}><Icon name={microphoneEnabled ? 'microphone' : 'microphoneOff'}/></button>
-        <button className={`dock-chevron ${audioMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { setAudioMenuOpen(open => !open); setScreenMenuOpen(false); setMoreMenuOpen(false); setLeaveMenuOpen(false); }} aria-expanded={audioMenuOpen} aria-label="Configurações de áudio" data-label="Ajustes"><Icon name="chevronDown"/></button>
+        <button className={`dock-chevron ${audioMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { if (audioMenuOpen) dismissDockSheet(); else { setAudioMenuOpen(true); setScreenMenuOpen(false); setMoreMenuOpen(false); setLeaveMenuOpen(false); } }} aria-expanded={audioMenuOpen} aria-label="Configurações de áudio" data-label="Ajustes"><Icon name="chevronDown"/></button>
       </div>
       {(!mobile || screenShareSupported) && <div className="dock-split-control screen-split-control">
         <button className={`${sharing ? 'is-on' : ''} ${!sharing && !screenShareSupported ? 'is-unsupported' : ''}`} type="button" onClick={() => void toggleScreenShare()} disabled={screenSharePending || (!sharing && !screenShareSupported)} aria-label={screenSharePending ? 'Abrindo seletor de tela' : sharing ? 'Parar compartilhamento' : screenShareSupported ? 'Compartilhar tela' : 'Compartilhamento de tela indisponível neste navegador'} aria-pressed={sharing} aria-busy={screenSharePending} data-label={screenSharePending ? 'Abrindo…' : sharing ? 'Parar tela' : screenShareSupported ? 'Compartilhar' : 'Indisponível'} title={!sharing && !screenShareSupported ? 'Este navegador não permite compartilhar a tela' : undefined}><Icon name="screen"/></button>
-        <button className={`dock-chevron ${screenMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { setScreenMenuOpen(open => !open); setAudioMenuOpen(false); setMoreMenuOpen(false); setLeaveMenuOpen(false); }} aria-expanded={screenMenuOpen} aria-label="Configurações da tela" data-label="Ajustes"><Icon name="chevronDown"/></button>
+        <button className={`dock-chevron ${screenMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { if (screenMenuOpen) dismissDockSheet(); else { setScreenMenuOpen(true); setAudioMenuOpen(false); setMoreMenuOpen(false); setLeaveMenuOpen(false); } }} aria-expanded={screenMenuOpen} aria-label="Configurações da tela" data-label="Ajustes"><Icon name="chevronDown"/></button>
       </div>}
       <button className={`dock-chat-button ${activeChat ? 'is-on' : ''}`} type="button" onClick={toggleChatSidebar} aria-label={activeChat ? 'Fechar chat' : unreadMessages ? `Abrir chat, ${unreadMessages} mensagem${unreadMessages === 1 ? '' : 's'} não lida${unreadMessages === 1 ? '' : 's'}` : 'Abrir chat'} data-label="Chat"><Icon name="chat"/>{unreadMessages > 0 && <span className="chat-unread-badge" aria-hidden="true">{unreadMessages === 99 ? '99+' : unreadMessages}</span>}</button>
-      <button className={moreMenuOpen ? 'is-on' : ''} type="button" onClick={() => { setMoreMenuOpen(open => !open); setAudioMenuOpen(false); setScreenMenuOpen(false); setLeaveMenuOpen(false); }} aria-expanded={moreMenuOpen} aria-label="Mais opções" data-label="Mais"><Icon name="more"/></button>
-      {mobile && <button className={controlsOpen ? 'is-on mobile-controls-trigger' : 'mobile-controls-trigger'} type="button" onClick={() => { setControlsOpen(open => !open); setChatOpen(false); setProfileOpen(false); setAudioMenuOpen(false); setScreenMenuOpen(false); setMoreMenuOpen(false); setLeaveMenuOpen(false); }} aria-expanded={controlsOpen} aria-label="Abrir controles" data-label="Controles"><Icon name="settings"/></button>}
+      <button className={moreMenuOpen ? 'is-on' : ''} type="button" onClick={() => { if (moreMenuOpen) dismissDockSheet(); else { setMoreMenuOpen(true); setAudioMenuOpen(false); setScreenMenuOpen(false); setLeaveMenuOpen(false); } }} aria-expanded={moreMenuOpen} aria-label="Mais opções" data-label="Mais"><Icon name="more"/></button>
+      {mobile && <button className={controlsOpen ? 'is-on mobile-controls-trigger' : 'mobile-controls-trigger'} type="button" onClick={() => { if (controlsOpen) dismissControlsSheet(); else { setControlsOpen(true); setChatOpen(false); setProfileOpen(false); setAudioMenuOpen(false); setScreenMenuOpen(false); setMoreMenuOpen(false); setLeaveMenuOpen(false); } }} aria-expanded={controlsOpen} aria-label="Abrir controles" data-label="Controles"><Icon name="settings"/></button>}
       <span className="dock-divider"/>
-      <button className="hangup" type="button" onClick={() => { setLeaveMenuOpen(open => !open); setAudioMenuOpen(false); setScreenMenuOpen(false); setMoreMenuOpen(false); }} aria-expanded={leaveMenuOpen} aria-label="Opções para sair da chamada" data-label="Sair"><Icon name="hangup"/></button>
+      <button className="hangup" type="button" onClick={() => { if (leaveMenuOpen) dismissDockSheet(); else { setLeaveMenuOpen(true); setAudioMenuOpen(false); setScreenMenuOpen(false); setMoreMenuOpen(false); } }} aria-expanded={leaveMenuOpen} aria-label="Opções para sair da chamada" data-label="Sair"><Icon name="hangup"/></button>
       {!phone && dockPopovers}
     </div>
   ) : null;
@@ -3453,7 +3590,7 @@ export default function RoomApp() {
               <div className="unified-sidebar-title"><Icon name="chat"/><span><strong>Chat</strong><small>{session ? `Sala ${roomLabel}` : 'LOCAL'}</small></span></div>
               <div className="unified-sidebar-actions">
                 <div className="unified-chat-settings-anchor" ref={chatSettingsRef}>
-                  <button className={`chat-settings-trigger ${chatSettingsOpen ? 'is-open' : ''}`} type="button" aria-label="Personalizar aparência do chat" aria-expanded={chatSettingsOpen} onClick={() => setChatSettingsOpen(open => !open)}><Icon name="settings"/></button>
+                  <button className={`chat-settings-trigger ${chatSettingsOpen ? 'is-open' : ''}`} type="button" aria-label="Personalizar aparência do chat" aria-expanded={chatSettingsOpen} onClick={() => { if (chatSettingsOpen) dismissChatSettingsSheet(); else setChatSettingsOpen(true); }}><Icon name="settings"/></button>
                   {chatSettingsOpen && <section className="chat-settings-popover" aria-label="Aparência do chat" {...chatSettingsSheetGesture}>
                     <header><strong>Aparência do chat</strong><small>SÓ NESTE DISPOSITIVO</small></header>
                     <label><span><strong>Seu balão</strong><small>Destaque das suas mensagens</small></span><input type="color" value={chatAppearance.ownBubble} aria-label="Cor do seu balão" onChange={event => setChatAppearance(current => ({ ...current, ownBubble: event.currentTarget.value }))}/></label>
@@ -3466,7 +3603,7 @@ export default function RoomApp() {
               </div>
             </header>
             {chatPanel}
-            <button ref={profileBarRef} className="unified-profile-bar" type="button" onClick={() => setProfileOpen(open => !open)} aria-expanded={profileOpen} aria-label={profileOpen ? 'Fechar perfil' : 'Abrir perfil'}>
+            <button ref={profileBarRef} className="unified-profile-bar" type="button" onClick={() => { if (profileOpen) dismissProfileSheet(); else setProfileOpen(true); }} aria-expanded={profileOpen} aria-label={profileOpen ? 'Fechar perfil' : 'Abrir perfil'}>
               <Avatar avatar={profile.avatar} name={profile.name} speaking={speakingIds.has(selfId)} leader={Boolean(selfId && selfId === leaderId)} size="small"/>
               <span><strong>{profile.name}</strong><small>{profile.status}</small></span>
               <Icon name="settings"/>
@@ -3505,28 +3642,21 @@ export default function RoomApp() {
           {callDock}
         </section>
         <aside className={`control-panel unified-control-panel ${controlsOpen ? 'is-open' : ''}`} role={phone && controlsOpen ? 'dialog' : undefined} aria-modal={phone && controlsOpen || undefined} aria-hidden={mobile && !controlsOpen} {...controlsSheetGesture}>
-          <div className="panel-header"><div><h2>Controles</h2></div><button className={`sidebar-connection-indicator room-status-${connectionQuality}`} type="button" aria-label={!session ? 'Pronto para iniciar uma chamada' : mediaLatency === null ? 'Conexão P2P aguardando medição' : `Conexão P2P com ${mediaLatency} milissegundos de latência`}><i/><span>{session ? connectionStatusLabel : 'Pronto'}</span><span className="connection-tooltip"><strong>{session ? mediaLatency === null ? 'Medindo conexão' : `${latencyLabel} ms` : 'Sem chamada ativa'}</strong><small>{session ? `RTT WebRTC · ${connectedPeerCount} par${connectedPeerCount === 1 ? '' : 'es'} · ${turnAvailable ? 'TURN pronto' : 'STUN'}` : 'O status da rede aparecerá durante a chamada'}</small></span></button>{mobile && <button className="mobile-panel-close" type="button" onClick={() => setControlsOpen(false)} aria-label="Fechar controles"><Icon name="close"/></button>}</div>
+          <div className="panel-header"><div><h2>Controles</h2></div><button className={`sidebar-connection-indicator room-status-${connectionQuality}`} type="button" aria-label={!session ? 'Pronto para iniciar uma chamada' : mediaLatency === null ? 'Conexão P2P aguardando medição' : `Conexão P2P com ${mediaLatency} milissegundos de latência`}><i/><span>{session ? connectionStatusLabel : 'Pronto'}</span><span className="connection-tooltip"><strong>{session ? mediaLatency === null ? 'Medindo conexão' : `${latencyLabel} ms` : 'Sem chamada ativa'}</strong><small>{session ? `RTT WebRTC · ${connectedPeerCount} par${connectedPeerCount === 1 ? '' : 'es'} · ${turnAvailable ? 'TURN pronto' : 'STUN'}` : 'O status da rede aparecerá durante a chamada'}</small></span></button>{mobile && <button className="mobile-panel-close" type="button" onClick={() => dismissControlsSheet()} aria-label="Fechar controles"><Icon name="close"/></button>}</div>
           {mobile && <button className="mobile-control-profile" type="button" onClick={() => { setProfileOpen(true); setControlsOpen(false); }}><Avatar avatar={profile.avatar} name={profile.name} leader={Boolean(selfId && selfId === leaderId)} size="small"/><span><strong>{profile.name}</strong><small>{profile.status}</small></span><Icon name="settings"/></button>}
           <div className="panel-view">{callPanel}</div>
         </aside>
       </main>
       {phone && (controlsOpen || profileOpen) && (
-        <button className="mobile-overlay-backdrop" type="button" tabIndex={-1} aria-label="Fechar painel" onClick={() => {
-          if (profileOpen) {
-            commitProfileName();
-            commitProfileStatus();
-            setProfileOpen(false);
-          }
-          setControlsOpen(false);
-        }}/>
+        <button className="mobile-overlay-backdrop" type="button" tabIndex={-1} aria-label="Fechar painel" onClick={() => { if (profileOpen) dismissProfileSheet(); else dismissControlsSheet(); }}/>
       )}
       {dockSheetOpen && <div ref={mobileSheetRef} className="mobile-sheet-layer">
-        <button className="mobile-sheet-backdrop" type="button" tabIndex={-1} aria-label="Fechar painel" onClick={closeDockSheets}/>
+        <button className="mobile-sheet-backdrop" type="button" tabIndex={-1} aria-label="Fechar painel" onClick={() => dismissDockSheet()}/>
         <div className="mobile-sheet-host">{dockPopovers}</div>
       </div>}
       {profileOpen && (
         <div ref={profilePopoverRef} className="room-popover profile-popover unified-profile-popover" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="profile-sheet-title" {...profileSheetGesture}>
-          <header><div><span className="eyebrow">SEU PERFIL</span><h3 id="profile-sheet-title">Como você aparece</h3></div><button type="button" onClick={() => { commitProfileName(); commitProfileStatus(); setProfileOpen(false); }} aria-label="Fechar perfil"><Icon name="close"/></button></header>
+          <header><div><span className="eyebrow">SEU PERFIL</span><h3 id="profile-sheet-title">Como você aparece</h3></div><button type="button" onClick={() => dismissProfileSheet()} aria-label="Fechar perfil"><Icon name="close"/></button></header>
           <label htmlFor="profile-name">Nome</label><input id="profile-name" value={profileNameDraft} onChange={event => { profileEditRevisionRef.current += 1; profileNameDraftRef.current = event.target.value; setProfileNameDraft(event.target.value); }} onBlur={commitProfileName} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { profileNameDraftRef.current = profileRef.current.name; setProfileNameDraft(profileRef.current.name); event.currentTarget.blur(); } }} maxLength={28}/>
           <label htmlFor="profile-status">Mensagem de status</label><input id="profile-status" value={profileStatusDraft} onChange={event => { profileEditRevisionRef.current += 1; profileStatusDraftRef.current = event.target.value; setProfileStatusDraft(event.target.value); }} onBlur={commitProfileStatus} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { profileStatusDraftRef.current = profileRef.current.status; setProfileStatusDraft(profileRef.current.status); event.currentTarget.blur(); } }} maxLength={64} placeholder="Disponível"/>
           <div className="profile-photo-heading"><label>Foto</label><small>{profileSaveState === 'saving' ? 'SALVANDO…' : profileSaveState === 'saved' ? profileStorageKind() === 'sqlite' ? 'SALVO NO SQLITE LOCAL' : 'SALVO NESTE NAVEGADOR' : profileSaveState === 'error' ? 'ERRO AO SALVAR' : 'ARMAZENAMENTO LOCAL'}</small></div>
@@ -3534,7 +3664,7 @@ export default function RoomApp() {
           <label>Avatares do app</label><div className="avatar-picker">{AVATARS.map(avatar => <button className={profile.avatar === avatar.id ? 'selected' : ''} type="button" key={avatar.id} onClick={() => updateProfile({ avatar: avatar.id })}><Avatar avatar={avatar.id} name={avatar.label}/><span>{avatar.label}</span></button>)}</div>
         </div>
       )}
-      {qrOpen && <div className="modal-backdrop" role="presentation" onPointerDown={event => { if (event.target === event.currentTarget) setQrOpen(false); }}><section className="qr-modal" role="dialog" aria-modal="true" aria-labelledby="room-qr-title" {...qrSheetGesture}><span className="eyebrow">SALA {roomLabel}</span><h2 id="room-qr-title">Entrar pelo QR Code</h2><p>Aponte a câmera do celular para abrir o convite completo.</p>{qrCode ? <img src={qrCode} alt={`QR Code da sala ${roomLabel}`}/> : <div className="qr-loading">Gerando QR Code…</div>}<button type="button" onClick={() => setQrOpen(false)}>Fechar</button></section></div>}
+      {qrOpen && <div className="modal-backdrop" role="presentation" onPointerDown={event => { if (event.target === event.currentTarget) dismissQrSheet(); }}><section className="qr-modal" role="dialog" aria-modal="true" aria-labelledby="room-qr-title" {...qrSheetGesture}><span className="eyebrow">SALA {roomLabel}</span><h2 id="room-qr-title">Entrar pelo QR Code</h2><p>Aponte a câmera do celular para abrir o convite completo.</p>{qrCode ? <img src={qrCode} alt={`QR Code da sala ${roomLabel}`}/> : <div className="qr-loading">Gerando QR Code…</div>}<button type="button" onClick={() => dismissQrSheet()}>Fechar</button></section></div>}
       {updateNoticeVisible && desktopUpdate && <aside className={`desktop-update-card is-${desktopUpdate.status}`} role="status" aria-live="polite">
         <div className="desktop-update-icon"><Icon name={desktopUpdate.status === 'downloaded' ? 'check' : desktopUpdate.status === 'downloading' ? 'download' : 'refresh'}/></div>
         <div className="desktop-update-copy">
