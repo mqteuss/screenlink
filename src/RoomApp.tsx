@@ -6,7 +6,7 @@ import { createPrivateRoom, parseInvite, signalUrl, type IceServerConfig, type I
 import { loadStoredProfile, prepareAvatar, profileStorageKind, saveStoredProfile, type DesktopUpdateState } from './profileStore';
 
 type RoomMode = 'landing' | 'connecting' | 'connected' | 'error';
-type IconName = 'screen' | 'microphone' | 'microphoneOff' | 'volume' | 'volumeOff' | 'chat' | 'send' | 'hangup' | 'link' | 'copy' | 'settings' | 'users' | 'crown' | 'close' | 'chevron' | 'chevronDown' | 'smile' | 'qr' | 'more' | 'expand' | 'pip' | 'wake' | 'motion' | 'grid' | 'download' | 'refresh' | 'check' | 'guide';
+type IconName = 'screen' | 'microphone' | 'microphoneOff' | 'volume' | 'volumeOff' | 'chat' | 'send' | 'hangup' | 'link' | 'copy' | 'settings' | 'users' | 'crown' | 'close' | 'chevron' | 'chevronDown' | 'smile' | 'keyboard' | 'search' | 'qr' | 'more' | 'expand' | 'pip' | 'wake' | 'motion' | 'grid' | 'download' | 'refresh' | 'check' | 'guide';
 type Session = { invite: Invite; joinCode?: string; joinByCode?: boolean; ownerKey?: string; participantId?: string; maxParticipants?: number };
 type RoomEntry = { kind: 'invite'; invite: Invite } | { kind: 'code'; code: string };
 type ChatDelivery = 'pending' | 'sent' | 'delivered' | 'failed';
@@ -17,6 +17,9 @@ type ChatChannelPayload =
   | { type: 'chat-ack'; messageId: string }
   | { type: 'chat-history'; messages: ChatWireMessage[] };
 type ChatAppearance = { ownBubble: string; otherBubble: string; nameColor: string };
+type ChatEmojiCategory = 'recent' | 'faces' | 'gestures' | 'hearts' | 'activity' | 'objects';
+type ChatEmoji = { value: string; label: string };
+type ChatEmojiGroup = { id: Exclude<ChatEmojiCategory, 'recent'>; label: string; icon: string; emojis: ChatEmoji[] };
 type PendingChatMessage = { message: ChatMessage; awaiting: Set<string>; attempts: number; firstAttemptAt: number; lastAttemptAt: number; fallbackAccepted: boolean };
 type Resolution = 360 | 480 | 720 | 1080;
 type FrameRate = 15 | 30 | 45 | 60;
@@ -82,6 +85,7 @@ const INTERFACE_SOUNDS_KEY = 'screenlink-interface-sounds-v1';
 const INTERFACE_MOTION_KEY = 'screenlink-interface-motion-v1';
 const ONBOARDING_KEY = 'screenlink-onboarding-v1';
 const CHAT_APPEARANCE_KEY = 'screenlink-chat-appearance-v2';
+const CHAT_RECENT_EMOJIS_KEY = 'screenlink-chat-recent-emojis-v1';
 const CHAT_OWN_IDS_PREFIX = 'screenlink-chat-own:';
 const PEER_KEY_PREFIX = 'screenlink-room-peer:';
 const COMPACT_LAYOUT_QUERY = '(max-width: 1240px)';
@@ -106,7 +110,74 @@ const VOICE_SETTING_DETAILS: Record<VoiceSettingKey, { label: string; descriptio
   echoCancellation: { label: 'Controle de eco', description: 'Evita retorno nos alto-falantes' },
   autoGainControl: { label: 'Ganho automático', description: 'Equilibra o volume da sua voz' }
 };
-const CHAT_EMOJIS = ['😀', '😂', '🥹', '😍', '😎', '🤔', '😅', '😭', '😡', '👍', '👎', '👏', '🙌', '🙏', '🤝', '💙', '🔥', '✨', '🎉', '🎮', '👀', '✅', '❌', '🚀'];
+const CHAT_EMOJI_GROUPS: ChatEmojiGroup[] = [
+  {
+    id: 'faces', label: 'Rostos', icon: '😀', emojis: [
+      { value: '😀', label: 'feliz sorriso alegria' }, { value: '😂', label: 'rindo lágrimas engraçado' },
+      { value: '🥹', label: 'emocionado segurando lágrimas' }, { value: '😍', label: 'apaixonado coração olhos' },
+      { value: '🥰', label: 'amor carinho corações' }, { value: '😎', label: 'legal óculos sol' },
+      { value: '🤔', label: 'pensando dúvida' }, { value: '😅', label: 'suor alívio nervoso' },
+      { value: '😭', label: 'chorando triste lágrimas' }, { value: '😡', label: 'bravo raiva' },
+      { value: '🥳', label: 'festa comemoração' }, { value: '🤯', label: 'surpreso cabeça explodindo' },
+      { value: '😴', label: 'sono dormindo' }, { value: '🫠', label: 'derretendo calor' },
+      { value: '🙄', label: 'revirando olhos' }, { value: '🤭', label: 'riso mão boca' }
+    ]
+  },
+  {
+    id: 'gestures', label: 'Gestos', icon: '👋', emojis: [
+      { value: '👋', label: 'oi tchau aceno' }, { value: '👍', label: 'positivo gostei sim' },
+      { value: '👎', label: 'negativo não gostei' }, { value: '👏', label: 'palmas parabéns' },
+      { value: '🙌', label: 'comemoração mãos' }, { value: '🙏', label: 'obrigado por favor oração' },
+      { value: '🤝', label: 'acordo aperto mãos' }, { value: '👌', label: 'ok perfeito' },
+      { value: '✌️', label: 'paz vitória' }, { value: '🤞', label: 'sorte dedos cruzados' },
+      { value: '💪', label: 'força músculo' }, { value: '🫶', label: 'coração mãos carinho' },
+      { value: '👀', label: 'olhos olhando' }, { value: '🫡', label: 'saudação respeito' },
+      { value: '🤌', label: 'gesto italiano' }, { value: '👊', label: 'soco cumprimento' }
+    ]
+  },
+  {
+    id: 'hearts', label: 'Símbolos', icon: '❤️', emojis: [
+      { value: '❤️', label: 'coração vermelho amor' }, { value: '💙', label: 'coração azul amor' },
+      { value: '💜', label: 'coração roxo amor' }, { value: '🖤', label: 'coração preto' },
+      { value: '💔', label: 'coração partido' }, { value: '💕', label: 'dois corações' },
+      { value: '✨', label: 'brilho estrelas' }, { value: '🔥', label: 'fogo incrível' },
+      { value: '✅', label: 'certo concluído confirmação' }, { value: '❌', label: 'errado cancelar não' },
+      { value: '⚠️', label: 'aviso atenção' }, { value: '💯', label: 'cem perfeito' },
+      { value: '💬', label: 'mensagem conversa' }, { value: '💤', label: 'sono zzz' },
+      { value: '❓', label: 'pergunta dúvida' }, { value: '‼️', label: 'exclamação importante' }
+    ]
+  },
+  {
+    id: 'activity', label: 'Atividades', icon: '🎉', emojis: [
+      { value: '🎉', label: 'festa confete comemoração' }, { value: '🎮', label: 'jogo controle videogame' },
+      { value: '⚽', label: 'futebol bola esporte' }, { value: '🏀', label: 'basquete bola esporte' },
+      { value: '🎵', label: 'música nota' }, { value: '🎧', label: 'fone música áudio' },
+      { value: '🎬', label: 'filme cinema claquete' }, { value: '🏆', label: 'troféu vitória' },
+      { value: '🎯', label: 'alvo objetivo' }, { value: '🚀', label: 'foguete lançamento' },
+      { value: '🎁', label: 'presente caixa' }, { value: '🎨', label: 'arte pintura' },
+      { value: '📸', label: 'foto câmera' }, { value: '🎤', label: 'microfone cantar' },
+      { value: '💻', label: 'computador notebook' }, { value: '📱', label: 'celular telefone' }
+    ]
+  },
+  {
+    id: 'objects', label: 'Objetos', icon: '💡', emojis: [
+      { value: '💡', label: 'ideia lâmpada' }, { value: '📌', label: 'alfinete marcar' },
+      { value: '📎', label: 'clipe anexo' }, { value: '🔗', label: 'link corrente' },
+      { value: '🔒', label: 'cadeado seguro privado' }, { value: '🔔', label: 'sino notificação' },
+      { value: '⏰', label: 'relógio alarme' }, { value: '📅', label: 'calendário data' },
+      { value: '📝', label: 'anotação escrever' }, { value: '🔍', label: 'buscar lupa' },
+      { value: '🛠️', label: 'ferramentas ajuste' }, { value: '⚙️', label: 'configuração engrenagem' },
+      { value: '🔋', label: 'bateria energia' }, { value: '📶', label: 'sinal conexão' },
+      { value: '🎲', label: 'dado jogo sorte' }, { value: '☕', label: 'café bebida' }
+    ]
+  }
+];
+const ALL_CHAT_EMOJIS = CHAT_EMOJI_GROUPS.flatMap(group => group.emojis);
+const DEFAULT_RECENT_EMOJIS = ['😂', '❤️', '👍', '😭', '🔥', '👏', '🥹', '✨'];
+const CHAT_EMOJI_CATEGORIES: Array<{ id: ChatEmojiCategory; label: string; icon: string }> = [
+  { id: 'recent', label: 'Recentes', icon: '◷' },
+  ...CHAT_EMOJI_GROUPS.map(({ id, label, icon }) => ({ id, label, icon }))
+];
 const PREMIUM_PARTICLES = [
   ['11%', '26%', '.8px', '15.2s', '-2.6s', '.55px'],
   ['23%', '67%', '1.1px', '17.8s', '-11.4s', '.8px'],
@@ -174,6 +245,22 @@ function writeStorage(storageName: WebStorageName, key: string, value: string) {
   }
 }
 
+function normalizeEmojiSearch(value: string) {
+  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLocaleLowerCase('pt-BR');
+}
+
+function loadRecentChatEmojis() {
+  try {
+    const stored = JSON.parse(readStorage('localStorage', CHAT_RECENT_EMOJIS_KEY) || '[]');
+    if (!Array.isArray(stored)) return DEFAULT_RECENT_EMOJIS;
+    const available = new Set(ALL_CHAT_EMOJIS.map(emoji => emoji.value));
+    const recent = stored.filter((value): value is string => typeof value === 'string' && available.has(value)).slice(0, 24);
+    return recent.length ? recent : DEFAULT_RECENT_EMOJIS;
+  } catch {
+    return DEFAULT_RECENT_EMOJIS;
+  }
+}
+
 function removeStorage(storageName: WebStorageName, key: string) {
   try {
     window[storageName].removeItem(key);
@@ -233,6 +320,8 @@ function Icon({ name }: { name: IconName }) {
     chevron: <path d="m9 6 6 6-6 6"/>,
     chevronDown: <path d="m6 9 6 6 6-6"/>,
     smile: <><circle cx="12" cy="12" r="9"/><path d="M8.5 14.5c2 2 5 2 7 0M9 9.5h.01M15 9.5h.01"/></>,
+    keyboard: <><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M6.5 9h.01M10.2 9h.01M13.8 9h.01M17.5 9h.01M6.5 12.5h.01M10.2 12.5h.01M13.8 12.5h.01M17.5 12.5h.01M8 16h8"/></>,
+    search: <><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 4.2 4.2"/></>,
     qr: <><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM18 14h3M21 14v3M14 19h3v2M19 18h2v3"/></>,
     more: <><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none"/></>,
     expand: <><path d="M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5"/></>,
@@ -915,7 +1004,11 @@ export default function RoomApp() {
   const [unreadMessages, setUnreadMessages] = useState(0);
   const [newMessagesBelow, setNewMessagesBelow] = useState(0);
   const [chatValue, setChatValue] = useState('');
+  const [chatInputFocused, setChatInputFocused] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
+  const [emojiCategory, setEmojiCategory] = useState<ChatEmojiCategory>('recent');
+  const [emojiSearch, setEmojiSearch] = useState('');
+  const [recentEmojis, setRecentEmojis] = useState(loadRecentChatEmojis);
   const [chatSettingsOpen, setChatSettingsOpen] = useState(false);
   const [chatAppearance, setChatAppearance] = useState<ChatAppearance>(loadChatAppearance);
   const [profileOpen, setProfileOpen] = useState(false);
@@ -984,9 +1077,11 @@ export default function RoomApp() {
   const profileBarRef = useRef<HTMLButtonElement>(null);
   const profilePopoverRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLElement>(null);
+  const roomAppRef = useRef<HTMLDivElement>(null);
   const chatLogRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const emojiPickerRef = useRef<HTMLDivElement>(null);
+  const emojiPanelRef = useRef<HTMLElement>(null);
   const chatSettingsRef = useRef<HTMLDivElement>(null);
   const onboardingDialogRef = useRef<HTMLElement>(null);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -1165,6 +1260,32 @@ export default function RoomApp() {
   }, []);
 
   useEffect(() => {
+    const app = roomAppRef.current;
+    if (!phone || !app) {
+      setChatInputFocused(false);
+      return;
+    }
+    const viewport = window.visualViewport;
+    const syncVisualViewport = () => {
+      const height = Math.max(1, Math.round(viewport?.height ?? window.innerHeight));
+      const offsetTop = Math.max(0, Math.round(viewport?.offsetTop ?? 0));
+      app.style.setProperty('--room-visual-viewport-height', `${height}px`);
+      app.style.setProperty('--room-visual-viewport-top', `${offsetTop}px`);
+    };
+    syncVisualViewport();
+    viewport?.addEventListener('resize', syncVisualViewport);
+    viewport?.addEventListener('scroll', syncVisualViewport);
+    window.addEventListener('resize', syncVisualViewport);
+    return () => {
+      viewport?.removeEventListener('resize', syncVisualViewport);
+      viewport?.removeEventListener('scroll', syncVisualViewport);
+      window.removeEventListener('resize', syncVisualViewport);
+      app.style.removeProperty('--room-visual-viewport-height');
+      app.style.removeProperty('--room-visual-viewport-top');
+    };
+  }, [phone]);
+
+  useEffect(() => {
     if (!mobile) setControlsOpen(false);
   }, [mobile]);
 
@@ -1225,7 +1346,8 @@ export default function RoomApp() {
   useEffect(() => {
     if (!emojiOpen) return;
     const dismiss = (event: PointerEvent) => {
-      if (!emojiPickerRef.current?.contains(event.target as Node)) setEmojiOpen(false);
+      const target = event.target as Node;
+      if (!emojiPickerRef.current?.contains(target) && !emojiPanelRef.current?.contains(target)) setEmojiOpen(false);
     };
     document.addEventListener('pointerdown', dismiss);
     return () => document.removeEventListener('pointerdown', dismiss);
@@ -2768,13 +2890,30 @@ export default function RoomApp() {
     const end = input?.selectionEnd ?? start;
     const next = `${chatValue.slice(0, start)}${emoji}${chatValue.slice(end)}`.slice(0, 1_000);
     setChatValue(next);
-    setEmojiOpen(false);
+    setRecentEmojis(current => {
+      const updated = [emoji, ...current.filter(value => value !== emoji)].slice(0, 24);
+      writeStorage('localStorage', CHAT_RECENT_EMOJIS_KEY, JSON.stringify(updated));
+      return updated;
+    });
+    if (!phone) setEmojiOpen(false);
     window.requestAnimationFrame(() => {
-      input?.focus();
       const cursor = Math.min(start + emoji.length, next.length);
       input?.setSelectionRange(cursor, cursor);
       resizeChatInput(input ?? null);
+      if (!phone) input?.focus();
     });
+  }
+
+  function toggleEmojiPicker() {
+    if (emojiOpen) {
+      setEmojiOpen(false);
+      if (phone) chatInputRef.current?.focus();
+      return;
+    }
+    setEmojiSearch('');
+    setEmojiCategory('recent');
+    if (phone) chatInputRef.current?.blur();
+    setEmojiOpen(true);
   }
 
   function toggleChatSidebar() {
@@ -2899,6 +3038,14 @@ export default function RoomApp() {
         : mode === 'connecting'
           ? 'Reconectando — as mensagens ficam na fila…'
           : 'Escrever mensagem…';
+  const emojiSearchTerm = normalizeEmojiSearch(emojiSearch);
+  const emojiOptions: ChatEmoji[] = emojiSearchTerm
+    ? ALL_CHAT_EMOJIS.filter(emoji => normalizeEmojiSearch(emoji.label).includes(emojiSearchTerm))
+    : emojiCategory === 'recent'
+      ? recentEmojis
+        .map(value => ALL_CHAT_EMOJIS.find(emoji => emoji.value === value))
+        .filter((emoji): emoji is ChatEmoji => Boolean(emoji))
+      : CHAT_EMOJI_GROUPS.find(group => group.id === emojiCategory)?.emojis || [];
   void peerVersion;
 
   const closeDockSheets = useCallback(() => {
@@ -2935,6 +3082,7 @@ export default function RoomApp() {
   const controlsSheetGesture = useBottomSheetGesture(phone && controlsOpen, () => setControlsOpen(false));
   const profileSheetGesture = useBottomSheetGesture(phone && profileOpen, closeProfileSheet);
   const chatSettingsSheetGesture = useBottomSheetGesture(phone && chatSettingsOpen, () => setChatSettingsOpen(false));
+  const emojiSheetGesture = useBottomSheetGesture(phone && emojiOpen, () => setEmojiOpen(false));
   const qrSheetGesture = useBottomSheetGesture(phone && qrOpen, () => setQrOpen(false));
   dismissMobileOverlayRef.current = () => {
     if (mobileOverlayKey === 'qr') setQrOpen(false);
@@ -2987,7 +3135,7 @@ export default function RoomApp() {
   }, [mobileOverlayKey, mobileOverlayMarker, phone]);
 
   const chatPanel = (
-    <div className="chat-panel unified-chat-panel" style={{ '--chat-own-bubble': chatAppearance.ownBubble, '--chat-other-bubble': chatAppearance.otherBubble, '--chat-name-color': chatAppearance.nameColor } as React.CSSProperties}>
+    <div className={`chat-panel unified-chat-panel ${emojiOpen ? 'is-emoji-open' : ''}`} style={{ '--chat-own-bubble': chatAppearance.ownBubble, '--chat-other-bubble': chatAppearance.otherBubble, '--chat-name-color': chatAppearance.nameColor } as React.CSSProperties}>
       <div className="chat-log" ref={chatLogRef} role="log" aria-live="polite" aria-relevant="additions text" aria-label="Mensagens da chamada" tabIndex={0} onScroll={event => {
         const log = event.currentTarget;
         const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight <= 48;
@@ -3011,17 +3159,28 @@ export default function RoomApp() {
               </div>
             </article>
           );
-        }) : <div className="chat-empty"><Icon name="chat"/><strong>A conversa começa aqui</strong><span>As mensagens são temporárias e ficam somente nesta chamada.</span></div>}
+        }) : <div className="chat-empty"><Icon name="chat"/><strong>A conversa começa aqui</strong></div>}
       </div>
       {newMessagesBelow > 0 && <button className="chat-jump-latest" type="button" onClick={() => scrollChatToLatest(true)}>{newMessagesBelow === 1 ? 'Nova mensagem' : `${newMessagesBelow} novas mensagens`} <span aria-hidden="true">↓</span></button>}
       <form className="chat-composer" onSubmit={sendChat}>
         <div className="emoji-picker-anchor" ref={emojiPickerRef}>
-          <button className={emojiOpen ? 'is-open' : ''} type="button" onClick={() => setEmojiOpen(open => !open)} disabled={!chatCanSend} aria-expanded={emojiOpen} aria-label="Escolher emoji"><Icon name="smile"/></button>
-          {emojiOpen && <div className="emoji-picker" role="listbox" aria-label="Emojis">{CHAT_EMOJIS.map(emoji => <button key={emoji} type="button" role="option" aria-label={`Emoji ${emoji}`} onClick={() => insertEmoji(emoji)}>{emoji}</button>)}</div>}
+          <button className={emojiOpen ? 'is-open' : ''} type="button" onClick={toggleEmojiPicker} disabled={!chatCanSend} aria-expanded={emojiOpen} aria-controls="chat-emoji-picker" aria-label={emojiOpen ? 'Voltar ao teclado' : 'Escolher emoji'}><Icon name={emojiOpen && phone ? 'keyboard' : 'smile'}/></button>
         </div>
-        <textarea ref={chatInputRef} aria-label="Escrever mensagem" title="Enter envia · Shift+Enter quebra a linha" rows={1} value={chatValue} onChange={event => { setChatValue(event.target.value); resizeChatInput(event.currentTarget); }} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={chatPlaceholder} maxLength={1000} disabled={!chatCanSend}/>
-        <button type="submit" disabled={!normalizeChatText(chatValue) || !chatCanSend} aria-label="Enviar mensagem"><Icon name="send"/></button>
+        <textarea ref={chatInputRef} aria-label="Escrever mensagem" title={phone ? 'Enter quebra a linha' : 'Enter envia · Shift+Enter quebra a linha'} enterKeyHint={phone ? 'enter' : 'send'} rows={1} value={chatValue} onFocus={() => setChatInputFocused(true)} onBlur={() => window.setTimeout(() => setChatInputFocused(document.activeElement === chatInputRef.current), 0)} onChange={event => { setChatValue(event.target.value); resizeChatInput(event.currentTarget); }} onKeyDown={event => { if (!phone && event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={chatPlaceholder} maxLength={1000} disabled={!chatCanSend}/>
+        <button type="submit" onPointerDown={event => { if (phone) event.preventDefault(); }} disabled={!normalizeChatText(chatValue) || !chatCanSend} aria-label="Enviar mensagem"><Icon name="send"/></button>
       </form>
+      {emojiOpen && <section ref={emojiPanelRef} id="chat-emoji-picker" className="emoji-picker" aria-label="Seletor de emojis" {...emojiSheetGesture}>
+        <div className="emoji-picker-handle" aria-hidden="true"/>
+        <label className="emoji-picker-search"><Icon name="search"/><input type="search" value={emojiSearch} onChange={event => setEmojiSearch(event.currentTarget.value)} placeholder="Buscar emoji" aria-label="Buscar emoji"/></label>
+        <nav className="emoji-picker-categories" role="tablist" aria-label="Categorias de emojis">
+          {CHAT_EMOJI_CATEGORIES.map(category => <button className={!emojiSearchTerm && emojiCategory === category.id ? 'is-active' : ''} key={category.id} type="button" role="tab" aria-selected={!emojiSearchTerm && emojiCategory === category.id} aria-label={category.label} title={category.label} onClick={() => { setEmojiSearch(''); setEmojiCategory(category.id); }}>{category.icon}</button>)}
+        </nav>
+        <div className="emoji-picker-heading"><strong>{emojiSearchTerm ? 'Resultados' : CHAT_EMOJI_CATEGORIES.find(category => category.id === emojiCategory)?.label}</strong><small>{emojiOptions.length}</small></div>
+        <div className="emoji-picker-grid" role="listbox" aria-label={emojiSearchTerm ? 'Resultados da busca' : 'Emojis disponíveis'}>
+          {emojiOptions.map(emoji => <button key={emoji.value} type="button" role="option" aria-label={emoji.label} title={emoji.label} onClick={() => insertEmoji(emoji.value)}>{emoji.value}</button>)}
+          {!emojiOptions.length && <p className="emoji-picker-empty">Nenhum emoji encontrado.</p>}
+        </div>
+      </section>}
     </div>
   );
 
@@ -3248,7 +3407,7 @@ export default function RoomApp() {
   );
 
   return (
-    <div className={`app room-app unified-room-app ${desktopApp ? 'is-electron-shell' : ''} ${mobile ? 'viewer-mode is-mobile-room' : ''} ${phone ? 'is-phone-room' : ''} ${activeChat ? 'is-chat-open' : ''} ${controlsOpen ? 'is-controls-open' : ''} ${mobilePresentationOpen ? 'has-mobile-overlay' : ''} ${animationsEnabled ? '' : 'animations-disabled'}`}>
+    <div ref={roomAppRef} className={`app room-app unified-room-app ${desktopApp ? 'is-electron-shell' : ''} ${mobile ? 'viewer-mode is-mobile-room' : ''} ${phone ? 'is-phone-room' : ''} ${activeChat ? 'is-chat-open' : ''} ${chatInputFocused ? 'is-chat-input-focused' : ''} ${emojiOpen ? 'is-emoji-open' : ''} ${controlsOpen ? 'is-controls-open' : ''} ${mobilePresentationOpen ? 'has-mobile-overlay' : ''} ${animationsEnabled ? '' : 'animations-disabled'}`}>
       {desktopApp && !phone && <div className="electron-drag-region" aria-hidden="true"/>}
       <main className="host-main unified-room-main">
           <aside className={`unified-chat-sidebar ${activeChat ? 'is-open' : 'is-closed'}`} aria-label="Navegação e chat da chamada">

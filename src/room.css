@@ -442,7 +442,7 @@
 
 .unified-chat-sidebar .unified-chat-panel { grid-template-rows: minmax(0, 1fr) auto; padding: .35rem .72rem .72rem; overflow: hidden; }
 .unified-chat-panel .chat-log { padding: .45rem .08rem 1rem; }
-.unified-chat-panel .chat-message { max-width: 84%; margin: .42rem 0; }
+.unified-chat-panel .chat-message { max-width: 84%; margin: .26rem 0; }
 .unified-chat-panel .chat-message.is-own { margin-right: 0; margin-left: auto; }
 .unified-chat-panel .chat-message p { font-size: .8125rem; }
 .chat-delivery { width: 1rem; height: .72rem; display: inline-grid; place-items: center; flex: 0 0 auto; color: #899194; }
@@ -605,9 +605,51 @@
 .emoji-picker-anchor { position: relative; display: grid; place-items: center; }
 .chat-composer .emoji-picker-anchor > button { color: #94999b; background: transparent; }
 .chat-composer .emoji-picker-anchor > button:hover, .chat-composer .emoji-picker-anchor > button.is-open { color: #f0f3f4; background: #303334; }
-.emoji-picker { position: absolute; z-index: 35; left: 0; bottom: calc(100% + .72rem); width: 15.5rem; padding: .55rem; border: 1px solid #323638; border-radius: .82rem; display: grid; grid-template-columns: repeat(6, 1fr); gap: .18rem; background: rgba(14,16,17,.98); box-shadow: 0 1rem 3rem rgba(0,0,0,.48); animation: submenu-enter 200ms var(--ease-out) both; }
-.chat-composer .emoji-picker button { width: 2.2rem; height: 2.2rem; border-radius: .5rem; color: inherit; background: transparent; font-family: "Segoe UI Emoji", sans-serif; font-size: 1.05rem; }
-.chat-composer .emoji-picker button:hover { background: #2a2e30; transform: translateY(-.08rem); }
+.unified-chat-panel .chat-composer > button { width: 2.15rem; height: 2.15rem; color: #0d0f10; background: #f1f3f3; box-shadow: 0 .2rem .65rem rgba(0,0,0,.22); }
+.unified-chat-panel .chat-composer > button:not(:disabled),
+.unified-chat-panel .chat-composer:focus-within > button { color: #0d0f10; background: #f1f3f3; }
+.unified-chat-panel .chat-composer > button:not(:disabled):hover { background: #fff; }
+.unified-chat-panel .chat-composer > button:not(:disabled):active { transform: scale(.93); }
+.unified-chat-panel .chat-composer:not(:focus-within) > button:disabled { color: #777d7f; background: #2a2d2e; box-shadow: none; }
+.unified-chat-panel .chat-composer > button .icon { width: 1.08rem; height: 1.08rem; stroke-width: 2; }
+
+.emoji-picker {
+  position: absolute;
+  z-index: 35;
+  left: .35rem;
+  bottom: 3.65rem;
+  width: 18rem;
+  height: min(21rem, calc(100% - 1rem));
+  min-height: 15rem;
+  padding: .65rem;
+  border: 1px solid #323638;
+  border-radius: 1rem;
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  gap: .48rem;
+  color: #dce1e2;
+  background: rgba(14,16,17,.985);
+  box-shadow: 0 1rem 3rem rgba(0,0,0,.48);
+  animation: submenu-enter 200ms var(--ease-out) both;
+}
+.emoji-picker-handle { display: none; }
+.emoji-picker-search { min-width: 0; min-height: 2.35rem; padding: 0 .68rem; border-radius: .7rem; display: grid; grid-template-columns: 1rem minmax(0, 1fr); align-items: center; gap: .55rem; color: #848c8f; background: #202425; }
+.emoji-picker-search .icon { width: .92rem; height: .92rem; }
+.emoji-picker-search input { min-width: 0; width: 100%; border: 0; outline: 0; color: #edf1f2; background: transparent; font: inherit; font-size: .7rem; }
+.emoji-picker-search input::placeholder { color: #798184; }
+.emoji-picker-categories { min-width: 0; padding-bottom: .42rem; border-bottom: 1px solid #282c2e; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: .16rem; }
+.emoji-picker-categories button { min-width: 0; height: 2.1rem; border: 0; border-radius: .55rem; display: grid; place-items: center; color: #8f979a; background: transparent; font-family: "Segoe UI Emoji", sans-serif; font-size: .95rem; transition: color 160ms ease, background 190ms ease, transform 160ms ease; }
+.emoji-picker-categories button:hover { color: #eef2f3; background: #252a2c; }
+.emoji-picker-categories button:active { transform: scale(.92); }
+.emoji-picker-categories button.is-active { color: #fff; background: #303638; box-shadow: inset 0 -2px #70c9d8; }
+.emoji-picker-heading { min-width: 0; padding: 0 .15rem; display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.emoji-picker-heading strong { overflow: hidden; color: #cbd1d3; font-size: .66rem; font-weight: 640; text-overflow: ellipsis; white-space: nowrap; }
+.emoji-picker-heading small { color: #747d80; font-size: .56rem; font-variant-numeric: tabular-nums; }
+.emoji-picker-grid { min-height: 0; padding: .05rem .08rem .2rem 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); grid-auto-rows: 2.3rem; align-content: start; gap: .14rem; scrollbar-width: thin; scrollbar-color: #3a4143 transparent; contain: content; }
+.emoji-picker-grid > button { min-width: 0; width: 100%; height: 2.3rem; border: 0; border-radius: .52rem; display: grid; place-items: center; color: inherit; background: transparent; font-family: "Segoe UI Emoji", sans-serif; font-size: 1.18rem; transition: background 160ms ease, transform 160ms ease; }
+.emoji-picker-grid > button:hover { background: #292e30; transform: translateY(-.06rem); }
+.emoji-picker-grid > button:active { transform: scale(.88); }
+.emoji-picker-empty { grid-column: 1 / -1; align-self: center; margin: 1.2rem .4rem; color: #7e878a; font-size: .66rem; text-align: center; }
 
 .mobile-panel-close, .mobile-control-profile { display: none; }
 .qr-loading { min-height: 12rem; display: grid; place-items: center; color: #858d90; font-size: .72rem; }
@@ -775,8 +817,8 @@
   .unified-call-dock > .dock-divider { margin: 0; }
   .unified-audio-popover, .unified-screen-popover, .viewing-popover { left: 50%; width: min(20rem, calc(100vw - 1rem)); transform: translateX(-50%); }
   .exit-popover { right: 0; left: auto; transform: none; }
-  .emoji-picker { left: -.3rem; width: min(15.5rem, calc(100vw - 2.5rem)); grid-template-columns: repeat(6, minmax(0, 1fr)); }
-  .chat-composer .emoji-picker button { width: 100%; }
+  .emoji-picker { left: .2rem; width: min(18rem, calc(100vw - 2.5rem)); }
+  .emoji-picker-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
   .stage-identities { max-width: calc(100vw - 2rem); overflow-x: auto; justify-content: flex-start; padding: 0 .5rem .3rem; scrollbar-width: none; }
   .stage-identities::-webkit-scrollbar { display: none; }
   .stage-identity { min-width: 4.8rem; }
@@ -913,7 +955,12 @@
 
 /* Phone UI: full-screen destinations for chat and native bottom sheets for transient controls. */
 @media (max-width: 760px), (pointer: coarse) and (max-width: 980px) {
-  .unified-room-app.is-phone-room { overscroll-behavior: none; }
+  .unified-room-app.is-phone-room {
+    --mobile-chat-gutter: .8rem;
+    --mobile-chat-inline-start: max(var(--mobile-chat-gutter), env(safe-area-inset-left));
+    --mobile-chat-inline-end: max(var(--mobile-chat-gutter), env(safe-area-inset-right));
+    overscroll-behavior: none;
+  }
   .unified-room-app.is-phone-room .stage-room-pill { top: max(.6rem, env(safe-area-inset-top)); }
 
   .unified-room-app.is-phone-room .unified-stage-empty { inset: 0 0 5rem; width: min(100%, 27rem); padding: 1.35rem 1rem; }
@@ -983,24 +1030,68 @@
   }
   .unified-room-app.is-phone-room .unified-sidebar-brand, .unified-room-app.is-phone-room .unified-rail-chat { display: none; }
   .unified-room-app.is-phone-room .unified-chat-sidebar.is-closed { animation: none; transform: translateX(100%); }
-  .unified-room-app.is-phone-room .unified-sidebar-header { padding: env(safe-area-inset-top) max(.75rem, env(safe-area-inset-right)) 0 max(.9rem, env(safe-area-inset-left)); }
+  .unified-room-app.is-phone-room .unified-sidebar-header { padding: env(safe-area-inset-top) var(--mobile-chat-inline-end) 0 var(--mobile-chat-inline-start); }
+  .unified-room-app.is-phone-room .unified-sidebar-title { flex: 1 1 auto; display: grid; grid-template-columns: 2.5rem minmax(0, 1fr); align-items: center; gap: .28rem; }
+  .unified-room-app.is-phone-room .unified-sidebar-title > .icon { justify-self: center; }
   .unified-room-app.is-phone-room .unified-sidebar-actions .chat-settings-trigger,
-  .unified-room-app.is-phone-room .unified-sidebar-close { width: 2.75rem; height: 2.75rem; border-radius: .75rem; }
-  .unified-room-app.is-phone-room .unified-chat-sidebar .unified-chat-panel { padding: .25rem .72rem .65rem; }
-  .unified-room-app.is-phone-room .unified-chat-panel .chat-log { padding: .35rem .12rem .85rem; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
-  .unified-room-app.is-phone-room .unified-chat-panel .chat-message { max-width: 82%; margin: .44rem 0; }
+  .unified-room-app.is-phone-room .unified-sidebar-close { width: 2.5rem; height: 2.5rem; border-radius: .72rem; }
+  .unified-room-app.is-phone-room .unified-chat-sidebar .unified-chat-panel { padding: .25rem var(--mobile-chat-inline-end) .2rem var(--mobile-chat-inline-start); }
+  .unified-room-app.is-phone-room .unified-chat-panel .chat-log { padding: .35rem .08rem .62rem; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+  .unified-room-app.is-phone-room .unified-chat-panel .chat-message { max-width: 84%; margin: .24rem 0; }
   .unified-room-app.is-phone-room .unified-chat-panel .chat-message.is-own { margin-right: 0; margin-left: auto; }
-  .unified-room-app.is-phone-room .unified-chat-panel .chat-bubble { padding: .48rem .65rem .4rem; border-radius: .92rem .92rem .92rem .22rem; }
-  .unified-room-app.is-phone-room .unified-chat-panel .chat-message.is-own .chat-bubble { border-radius: .92rem .92rem .22rem .92rem; }
+  .unified-room-app.is-phone-room .unified-chat-panel .chat-bubble { padding: .48rem .65rem .4rem; border-radius: .2rem .92rem .92rem .92rem; }
+  .unified-room-app.is-phone-room .unified-chat-panel .chat-message.is-own .chat-bubble { border-radius: .92rem .2rem .92rem .92rem; }
   .unified-room-app.is-phone-room .unified-chat-panel .chat-message p { font-size: .875rem; line-height: 1.4; }
   .unified-room-app.is-phone-room .unified-chat-panel .chat-message-sender { font-size: .73rem; }
   .unified-room-app.is-phone-room .unified-chat-panel .chat-message-meta { font-size: .62rem; }
-  .unified-room-app.is-phone-room .unified-chat-panel .chat-composer { min-height: 3rem; padding: .28rem .32rem; grid-template-columns: 2.35rem minmax(0, 1fr) 2.4rem; }
+  .unified-room-app.is-phone-room .unified-chat-panel .chat-composer { min-height: 3rem; padding: .24rem .08rem; grid-template-columns: 2.5rem minmax(0, 1fr) 2.5rem; gap: .28rem; }
   .unified-room-app.is-phone-room .chat-composer .emoji-picker-anchor > button,
-  .unified-room-app.is-phone-room .unified-chat-panel .chat-composer > button { width: 2.4rem; height: 2.4rem; }
-  .unified-room-app.is-phone-room .unified-chat-panel .chat-composer textarea { min-height: 2.4rem; padding-top: .62rem; padding-bottom: .5rem; font-size: .875rem; }
-  .unified-room-app.is-phone-room .unified-profile-bar { min-height: max(3.15rem, calc(2.9rem + env(safe-area-inset-bottom))); padding: .35rem max(.8rem, env(safe-area-inset-right)) max(.35rem, env(safe-area-inset-bottom)) max(.8rem, env(safe-area-inset-left)); grid-template-columns: 1.9rem minmax(0, 1fr) 2.5rem; }
-  .unified-room-app.is-phone-room .unified-profile-bar .preset-avatar { width: 1.9rem; height: 1.9rem; }
+  .unified-room-app.is-phone-room .unified-chat-panel .chat-composer > button { width: 2.5rem; height: 2.5rem; }
+  .unified-room-app.is-phone-room .unified-chat-panel .chat-composer > button .icon { width: 1.12rem; height: 1.12rem; }
+  .unified-room-app.is-phone-room .unified-chat-panel .chat-composer textarea { min-height: 2.4rem; padding: .62rem 0 .5rem; font-size: .875rem; }
+  .unified-room-app.is-phone-room.is-chat-input-focused .unified-chat-sidebar {
+    top: var(--room-visual-viewport-top, 0px);
+    bottom: auto;
+    height: var(--room-visual-viewport-height, 100dvh);
+  }
+  .unified-room-app.is-phone-room.is-chat-input-focused .unified-chat-sidebar,
+  .unified-room-app.is-phone-room.is-emoji-open .unified-chat-sidebar { grid-template-rows: max(3.55rem, calc(3rem + env(safe-area-inset-top))) minmax(0, 1fr); }
+  .unified-room-app.is-phone-room.is-chat-input-focused .unified-profile-bar,
+  .unified-room-app.is-phone-room.is-emoji-open .unified-profile-bar { display: none; }
+  .unified-room-app.is-phone-room.is-chat-input-focused .unified-chat-panel { padding-bottom: .12rem; }
+  .unified-room-app.is-phone-room .unified-chat-panel.is-emoji-open { grid-template-rows: minmax(0, 1fr) auto minmax(13rem, min(42dvh, 21rem)); padding-bottom: 0; }
+  .unified-room-app.is-phone-room .emoji-picker {
+    position: relative;
+    z-index: 2;
+    inset: auto;
+    width: calc(100% + var(--mobile-chat-inline-start) + var(--mobile-chat-inline-end));
+    height: 100%;
+    min-height: 0;
+    margin: .42rem calc(-1 * var(--mobile-chat-inline-end)) 0 calc(-1 * var(--mobile-chat-inline-start));
+    padding: .82rem max(.68rem, env(safe-area-inset-right)) max(.68rem, env(safe-area-inset-bottom)) max(.68rem, env(safe-area-inset-left));
+    border-width: 1px 0 0;
+    border-radius: 1.15rem 1.15rem 0 0;
+    grid-template-rows: auto auto auto auto minmax(0, 1fr);
+    gap: .5rem;
+    background: #111516;
+    box-shadow: 0 -.8rem 2.2rem rgba(0,0,0,.42);
+    transform-origin: 50% 100%;
+    animation: mobile-sheet-enter 260ms var(--ease-out) both;
+    backface-visibility: hidden;
+    contain: layout paint;
+    touch-action: pan-y;
+  }
+  .unified-room-app.is-phone-room .emoji-picker-handle { justify-self: center; width: 2.4rem; height: .24rem; margin: -.34rem 0 0; border-radius: 999px; display: block; background: #596164; }
+  .unified-room-app.is-phone-room .emoji-picker-search { min-height: 2.55rem; border-radius: .78rem; }
+  .unified-room-app.is-phone-room .emoji-picker-search input { font-size: .8rem; }
+  .unified-room-app.is-phone-room .emoji-picker-categories { gap: .2rem; }
+  .unified-room-app.is-phone-room .emoji-picker-categories button { height: 2.25rem; border-radius: .62rem; font-size: 1.05rem; }
+  .unified-room-app.is-phone-room .emoji-picker-heading strong { font-size: .7rem; }
+  .unified-room-app.is-phone-room .emoji-picker-grid { grid-template-columns: repeat(7, minmax(0, 1fr)); grid-auto-rows: 2.75rem; gap: .12rem; scrollbar-width: none; touch-action: pan-y; -webkit-overflow-scrolling: touch; }
+  .unified-room-app.is-phone-room .emoji-picker-grid::-webkit-scrollbar { display: none; }
+  .unified-room-app.is-phone-room .emoji-picker-grid > button { height: 2.75rem; border-radius: .62rem; font-size: 1.4rem; }
+  .unified-room-app.is-phone-room .unified-profile-bar { min-height: max(3.15rem, calc(2.9rem + env(safe-area-inset-bottom))); padding: .35rem var(--mobile-chat-inline-end) max(.35rem, env(safe-area-inset-bottom)) var(--mobile-chat-inline-start); border-top: 0; grid-template-columns: 2.5rem minmax(0, 1fr) 2.5rem; gap: .28rem; }
+  .unified-room-app.is-phone-room .unified-profile-bar .preset-avatar { width: 1.9rem; height: 1.9rem; justify-self: center; }
   .unified-room-app.is-phone-room .unified-profile-bar > .icon { justify-self: center; }
 
   .unified-room-app.is-phone-room .unified-chat-settings-anchor .chat-settings-popover {
