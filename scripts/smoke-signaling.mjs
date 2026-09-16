@@ -134,6 +134,18 @@ try {
   assert.match(page.headers.get('content-security-policy') || '', /script-src 'self'/);
   assert.match(await page.text(), /<div id="root"><\/div>/);
 
+  const identityPage = await fetch(HTTP_URL, { headers: { 'accept-encoding': 'identity' } });
+  const brotliPage = await fetch(HTTP_URL, { headers: { 'accept-encoding': 'br' } });
+  const gzipPage = await fetch(HTTP_URL, { headers: { 'accept-encoding': 'br;q=0, gzip;q=1' } });
+  assert.equal(identityPage.headers.get('content-encoding'), null);
+  assert.equal(brotliPage.headers.get('content-encoding'), 'br');
+  assert.equal(gzipPage.headers.get('content-encoding'), 'gzip');
+  assert.match(brotliPage.headers.get('vary') || '', /Accept-Encoding/i);
+  assert.ok(Number(brotliPage.headers.get('content-length')) < Number(identityPage.headers.get('content-length')), 'Brotli response should be smaller than the original HTML.');
+  assert.match(await brotliPage.text(), /<div id="root"><\/div>/);
+  await identityPage.body?.cancel();
+  await gzipPage.body?.cancel();
+
   const runtimeConfig = await (await fetch(`${HTTP_URL}/runtime-config`)).json();
   assert.equal(runtimeConfig.viewerOrigin, 'https://screenlink.example.test');
   assert.equal(runtimeConfig.mode, 'p2p-mesh');

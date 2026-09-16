@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent as ReactAnimationEvent, type FormEvent, type TouchEvent as ReactTouchEvent } from 'react';
 import QRCode from 'qrcode';
 import { playInterfaceSound as playCallSound, setInterfaceSoundOutputDevice, unlockInterfaceSounds, type InterfaceSoundName } from './callSounds';
-import GradientWaves from './GradientWaves';
 import { createPrivateRoom, parseInvite, signalUrl, type IceServerConfig, type Invite, type RoomParticipant, type RoomProfile, type SessionDescription } from './protocol';
 import { loadStoredProfile, prepareAvatar, profileStorageKind, saveStoredProfile, type DesktopUpdateState } from './profileStore';
 
@@ -1107,6 +1106,26 @@ function adaptiveTargetBitrateMbps(resolution: Resolution, fps: FrameRate, peerC
   return Math.max(MIN_BITRATE_MBPS, Math.min(recommendedBitrateMbps(resolution, fps), perPeerBudget) * profile.bitrateFactor);
 }
 
+/**
+ * Chromium's "detail" screen-content encoder becomes disproportionately
+ * expensive when one captured track is fanned out to several peer
+ * connections. Keep it for the one place where it helps (a healthy,
+ * low-framerate, one-to-one share) and favour the real-time encoder whenever
+ * latency or fan-out matters more than preserving tiny static text.
+ */
+function preferredScreenContentHint(fps: FrameRate, peerCount: number, networkLevel = 0): 'detail' | 'motion' {
+  return fps >= 45 || peerCount > 1 || networkLevel > 0 ? 'motion' : 'detail';
+}
+
+function setScreenContentHint(track: MediaStreamTrack | null | undefined, fps: FrameRate, peerCount: number, networkLevel = 0) {
+  if (!track) return;
+  try {
+    track.contentHint = preferredScreenContentHint(fps, peerCount, networkLevel);
+  } catch {
+    // contentHint is advisory and is not implemented by every WebRTC engine.
+  }
+}
+
 function formatBitrate(value: number) {
   return `${value < 10 && value % 1 ? value.toFixed(1) : Math.round(value)} Mb/s`;
 }
@@ -2135,6 +2154,10 @@ export default function RoomApp() {
       record.screenVideoReceiver.track.onunmute = null;
     }
     record.pc.close();
+    const remainingPeerCount = Math.max(1, [...peersRef.current.values()].filter(peer => peer.pc.connectionState !== 'closed' && peer.pc.connectionState !== 'failed').length);
+    const activeFps = automaticQualityRef.current ? 30 : fpsRef.current;
+    const worstNetworkLevel = Math.max(0, ...[...peersRef.current.values()].map(peer => peer.networkLevel));
+    setScreenContentHint(localScreenStreamRef.current?.getVideoTracks()[0], activeFps, remainingPeerCount, adaptiveBitrateRef.current ? worstNetworkLevel : 0);
     setPeerVersion(version => version + 1);
   }, []);
 
@@ -2195,7 +2218,9 @@ export default function RoomApp() {
     ]);
     const activeResolution = automaticQualityRef.current ? 720 : resolutionRef.current;
     const activeFps = automaticQualityRef.current ? 30 : fpsRef.current;
-    const peerCount = Math.max(1, peersRef.current.size);
+    const peerCount = Math.max(1, [...peersRef.current.values()].filter(peer => peer.pc.connectionState !== 'closed' && peer.pc.connectionState !== 'failed').length);
+    const worstNetworkLevel = Math.max(0, ...[...peersRef.current.values()].map(peer => peer.networkLevel));
+    setScreenContentHint(localScreenStreamRef.current?.getVideoTracks()[0], activeFps, peerCount, adaptiveBitrateRef.current ? worstNetworkLevel : 0);
     await configureScreenSender(screenVideo.sender, activeResolution, activeFps, adaptiveBitrateRef.current, bitrateMbpsRef.current, peerCount, record.networkLevel);
     record.configuredPeerCount = peerCount;
     const callTrack = call.receiver.track;
@@ -2650,7 +2675,9 @@ export default function RoomApp() {
         await configureScreenSender(record.screenVideoSender, activeResolution, activeFps, true, bitrateMbpsRef.current, peerCount, record.networkLevel);
         record.configuredPeerCount = peerCount;
       }));
-      setAdaptiveNetworkLevel(Math.max(0, ...connected.map(record => record.networkLevel)));
+      const worstNetworkLevel = Math.max(0, ...connected.map(record => record.networkLevel));
+      setScreenContentHint(localScreenStreamRef.current?.getVideoTracks()[0], activeFps, peerCount, worstNetworkLevel);
+      setAdaptiveNetworkLevel(worstNetworkLevel);
     };
     void sample();
     const timer = window.setInterval(() => void sample(), 2_000);
@@ -2889,6 +2916,8 @@ export default function RoomApp() {
   const applyScreenEncoding = useCallback(async (nextResolution: Resolution, nextFps: FrameRate, adaptive = adaptiveBitrateRef.current, manualMbps = bitrateMbpsRef.current) => {
     const peers = [...peersRef.current.values()];
     const peerCount = Math.max(1, peers.filter(peer => peer.pc.connectionState !== 'closed' && peer.pc.connectionState !== 'failed').length);
+    const worstNetworkLevel = adaptive ? Math.max(0, ...peers.map(peer => peer.networkLevel)) : 0;
+    setScreenContentHint(localScreenStreamRef.current?.getVideoTracks()[0], nextFps, peerCount, worstNetworkLevel);
     await Promise.all(peers.map(async peer => {
       await configureScreenSender(peer.screenVideoSender, nextResolution, nextFps, adaptive, manualMbps, peerCount, adaptive ? peer.networkLevel : 0);
       peer.configuredPeerCount = peerCount;
@@ -2971,7 +3000,9 @@ export default function RoomApp() {
         return;
       }
       localScreenStreamRef.current = stream;
-      video.contentHint = activeFps >= 45 ? 'motion' : 'detail';
+      const peerCount = Math.max(1, [...peersRef.current.values()].filter(peer => peer.pc.connectionState !== 'closed' && peer.pc.connectionState !== 'failed').length);
+      const worstNetworkLevel = adaptiveBitrateRef.current ? Math.max(0, ...[...peersRef.current.values()].map(peer => peer.networkLevel)) : 0;
+      setScreenContentHint(video, activeFps, peerCount, worstNetworkLevel);
       const screenAudio = stream.getAudioTracks()[0] ?? null;
       await Promise.all([...peersRef.current.values()].flatMap(peer => [
         peer.screenVideoSender?.replaceTrack(video).catch(() => undefined),
@@ -3006,7 +3037,9 @@ export default function RoomApp() {
     const track = localScreenStreamRef.current?.getVideoTracks()[0];
     if (!track) return;
     const preset = VIDEO_PRESETS[nextResolution];
-    track.contentHint = nextFps >= 45 ? 'motion' : 'detail';
+    const activePeers = [...peersRef.current.values()].filter(peer => peer.pc.connectionState !== 'closed' && peer.pc.connectionState !== 'failed');
+    const worstNetworkLevel = adaptiveBitrateRef.current ? Math.max(0, ...activePeers.map(peer => peer.networkLevel)) : 0;
+    setScreenContentHint(track, nextFps, Math.max(1, activePeers.length), worstNetworkLevel);
     await track.applyConstraints({ width: { ideal: preset.width, max: preset.width }, height: { ideal: preset.height, max: preset.height }, frameRate: { ideal: nextFps, max: nextFps } }).catch(() => undefined);
     await applyScreenEncoding(nextResolution, nextFps);
   }, [applyScreenEncoding]);
@@ -4182,30 +4215,7 @@ export default function RoomApp() {
             </button>
           </aside>
         <section ref={stageRef} className={`share-stage unified-room-stage ${sharingParticipants.length ? 'has-screens' : ''}`}>
-          <GradientWaves
-            className="room-gradient-waves"
-            horizonColor="#00c4ff"
-            waveColor="#ffffff"
-            crestColor="#ffffff"
-            speed={0.1}
-            amplitude={2.5}
-            waveScale={0.5}
-            waveRatio={0.9}
-            swell={35}
-            turbulence={20}
-            tilt={1.11}
-            zoom={1}
-            height={5.5}
-            fogDepth={15}
-            detail={mobile ? 'low' : 'medium'}
-            brightness={1}
-            opacity={1}
-            mouseInteraction={false}
-            parallaxStrength={0}
-            grain={false}
-            grainIntensity={0.05}
-            animated={false}
-          />
+          <div className="room-static-background" aria-hidden="true"/>
           {session && sharingParticipants.length === 0 && <div className="stage-room-pill" aria-label={`Sala ${roomLabel}`}><span>Sala</span><strong>{roomLabel}</strong></div>}
           {stageContent}
           {session && sharingParticipants.length > 0 && mode === 'connected' && (

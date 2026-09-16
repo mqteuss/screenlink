@@ -26,7 +26,9 @@ O ScreenLink usa uma única interface para criar uma sala ou entrar com um códi
 - nome, status, avatar ou foto personalizada ficam salvos somente no armazenamento local deste dispositivo;
 - a interface compacta para celular mantém voz, visualização, participantes e chat, sem expor o controle de compartilhar tela.
 - tela cheia, miniplayer e bloqueio de suspensão ficam reunidos em **Mais opções** durante a chamada.
-- o fundo Gradient Waves é estático para não disputar GPU com a codificação de tela; **Interface > Animações e movimento** controla somente o mascote e as transições, respeitando `prefers-reduced-motion` no primeiro acesso.
+- o fundo da chamada é composto por gradientes CSS estáticos e não inicializa WebGL, preservando GPU para a codificação de tela; **Interface > Animações e movimento** controla somente o mascote e as transições, respeitando `prefers-reduced-motion` no primeiro acesso.
+- no compartilhamento P2P, o encoder prioriza detalhe em uma conversa 1:1 saudável e muda automaticamente para baixa latência quando há múltiplos peers ou degradação de rede.
+- o build gera versões Brotli e gzip dos arquivos textuais; o servidor negocia a melhor delas via `Accept-Encoding` e mantém fallback sem compressão.
 
 A sala em grupo usa uma malha WebRTC: cada participante mantém uma conexão direta com cada um dos demais. É adequada para grupos pequenos, mas várias telas simultâneas multiplicam upload, CPU e consumo de bateria. Para grupos grandes, a evolução indicada é usar uma SFU.
 

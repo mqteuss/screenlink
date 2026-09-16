@@ -39,6 +39,62 @@ const MIME_TYPES = new Map([
   ['.ico', 'image/x-icon'],
   ['.woff2', 'font/woff2']
 ]);
+const PRECOMPRESSED_EXTENSIONS = new Set(['.html', '.js', '.css', '.json', '.svg']);
+const STATIC_ASSET_CACHE_LIMIT = 64;
+const STATIC_ASSET_MAX_BYTES = 1024 * 1024;
+const staticAssetCache = new Map();
+
+function encodingQuality(header, target) {
+  let wildcardQuality = 0;
+  for (const item of String(header || '').toLowerCase().split(',')) {
+    const [rawName, ...parameters] = item.trim().split(';');
+    if (!rawName) continue;
+    const qualityParameter = parameters.find(parameter => parameter.trim().startsWith('q='));
+    const parsedQuality = qualityParameter ? Number(qualityParameter.trim().slice(2)) : 1;
+    const quality = Number.isFinite(parsedQuality) ? Math.max(0, Math.min(1, parsedQuality)) : 0;
+    if (rawName === target) return quality;
+    if (rawName === '*') wildcardQuality = quality;
+  }
+  return wildcardQuality;
+}
+
+function staticFileCandidates(filePath, acceptEncoding) {
+  if (!PRECOMPRESSED_EXTENSIONS.has(path.extname(filePath).toLowerCase())) return [{ filePath, encoding: '' }];
+  return [
+    { encoding: 'br', quality: encodingQuality(acceptEncoding, 'br'), filePath: `${filePath}.br` },
+    { encoding: 'gzip', quality: encodingQuality(acceptEncoding, 'gzip'), filePath: `${filePath}.gz` }
+  ].filter(candidate => candidate.quality > 0)
+    .sort((left, right) => right.quality - left.quality || (left.encoding === 'br' ? -1 : 1))
+    .map(({ filePath: candidatePath, encoding }) => ({ filePath: candidatePath, encoding }))
+    .concat({ filePath, encoding: '' });
+}
+
+async function readStaticFile(filePath, cacheable) {
+  if (!cacheable) return readFile(filePath);
+  const cached = staticAssetCache.get(filePath);
+  if (cached) return cached;
+  if (staticAssetCache.size >= STATIC_ASSET_CACHE_LIMIT) return readFile(filePath);
+  const pending = readFile(filePath).then(content => {
+    if (content.byteLength > STATIC_ASSET_MAX_BYTES) staticAssetCache.delete(filePath);
+    return content;
+  }).catch(error => {
+    staticAssetCache.delete(filePath);
+    throw error;
+  });
+  staticAssetCache.set(filePath, pending);
+  return pending;
+}
+
+async function readNegotiatedStaticFile(filePath, acceptEncoding, cacheable) {
+  for (const candidate of staticFileCandidates(filePath, acceptEncoding)) {
+    try {
+      return { ...candidate, content: await readStaticFile(candidate.filePath, cacheable) };
+    } catch {
+      // A development build may not have generated precompressed companions.
+    }
+  }
+  throw new Error('Static file unavailable');
+}
 
 function splitUrls(value, fallback = '') {
   return String(value || fallback).split(',').map(item => item.trim()).filter(Boolean);
@@ -529,13 +585,18 @@ async function serveFile(request, response) {
   }
 
   try {
-    const content = await readFile(filePath);
     const extension = path.extname(filePath).toLowerCase();
     const isAsset = filePath.includes(`${path.sep}assets${path.sep}`);
-    response.writeHead(200, {
+    const selected = await readNegotiatedStaticFile(filePath, request.headers['accept-encoding'], isAsset);
+    const content = selected.content;
+    const headers = {
       'Content-Type': MIME_TYPES.get(extension) || 'application/octet-stream',
-      'Cache-Control': isAsset ? 'public, max-age=31536000, immutable' : 'no-cache'
-    });
+      'Content-Length': String(content.byteLength),
+      'Cache-Control': isAsset ? 'public, max-age=31536000, immutable' : 'no-cache',
+      ...(PRECOMPRESSED_EXTENSIONS.has(extension) ? { Vary: 'Accept-Encoding' } : {}),
+      ...(selected.encoding ? { 'Content-Encoding': selected.encoding } : {})
+    };
+    response.writeHead(200, headers);
     if (request.method === 'HEAD') response.end();
     else response.end(content);
   } catch {

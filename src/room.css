@@ -247,8 +247,29 @@
 .unified-room-main { flex: 1 1 auto; height: 100dvh; min-height: 0; }
 .electron-drag-region { position: fixed; z-index: 90; top: 0; right: 0; left: 0; height: .42rem; -webkit-app-region: drag; user-select: none; }
 .unified-room-app .unified-room-stage { isolation: isolate; border-radius: 0 1rem 0 0; background: #010609; }
-.unified-room-stage .room-gradient-waves { z-index: 0; }
-.unified-room-stage.has-screens .room-gradient-waves { opacity: .42; }
+.unified-room-stage .room-static-background {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  contain: strict;
+  background:
+    radial-gradient(ellipse 74% 22% at 58% 103%, rgba(138, 230, 240, .72) 0%, rgba(47, 177, 204, .48) 24%, rgba(14, 83, 105, .24) 52%, transparent 76%),
+    radial-gradient(ellipse 116% 44% at 48% 112%, rgba(0, 193, 235, .46) 0%, rgba(7, 86, 110, .26) 43%, transparent 72%),
+    radial-gradient(ellipse 92% 37% at 60% 118%, rgba(225, 249, 252, .28) 0%, rgba(65, 188, 211, .18) 29%, transparent 62%),
+    linear-gradient(165deg, #010507 10%, #061116 58%, #0b3540 100%);
+}
+.unified-room-stage .room-static-background::before {
+  content: "";
+  position: absolute;
+  inset: 48% -12% -13%;
+  opacity: .3;
+  background:
+    radial-gradient(ellipse 43% 15% at 34% 63%, transparent 58%, rgba(196, 242, 248, .42) 60%, transparent 63%),
+    radial-gradient(ellipse 51% 18% at 77% 78%, transparent 57%, rgba(111, 219, 233, .34) 59%, transparent 62%);
+}
+.unified-room-stage.has-screens .room-static-background { opacity: .42; }
 .unified-room-app .unified-room-stage::after { border-left: 1px solid #2b2e30; border-radius: inherit; }
 .unified-room-stage.has-screens { align-items: stretch; }
 .unified-stage-empty { inset: 0 0 4.8rem; width: min(31rem, calc(100% - 3rem)); }
@@ -1276,7 +1297,7 @@
   .mobile-sheet-backdrop.is-sheet-backdrop-dismissing,
   .mobile-overlay-backdrop.is-sheet-backdrop-dismissing,
   .unified-room-app.is-phone-room .modal-backdrop.is-sheet-backdrop-dismissing { pointer-events: none; opacity: 0; animation: none !important; transition: opacity var(--panel-close-dur) ease-in !important; }
-  .unified-room-app.is-phone-room.has-mobile-overlay .room-gradient-waves { pointer-events: none; }
+  .unified-room-app.is-phone-room.has-mobile-overlay .room-static-background { pointer-events: none; }
   .unified-room-app.is-phone-room.has-mobile-overlay .unified-call-dock { backdrop-filter: none; }
 
   .unified-room-app.is-phone-room button,
