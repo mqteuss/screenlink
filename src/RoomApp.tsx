@@ -3739,6 +3739,7 @@ export default function RoomApp() {
         .map(value => ALL_CHAT_EMOJIS.find(emoji => emoji.value === value))
         .filter((emoji): emoji is ChatEmoji => Boolean(emoji))
       : CHAT_EMOJI_GROUPS.find(group => group.id === emojiCategory)?.emojis || [];
+  const activeEmojiCategoryIndex = Math.max(0, CHAT_EMOJI_CATEGORIES.findIndex(category => category.id === emojiCategory));
   const audioMenuPresence = useMotionPresence(!mobile && audioMenuOpen, '--dropdown-close-dur', 150, animationsEnabled);
   const screenMenuPresence = useMotionPresence(!mobile && screenMenuOpen, '--dropdown-close-dur', 150, animationsEnabled);
   const moreMenuPresence = useMotionPresence(!mobile && moreMenuOpen, '--dropdown-close-dur', 150, animationsEnabled);
@@ -3947,7 +3948,8 @@ export default function RoomApp() {
       {emojiOpen && <section ref={emojiPanelRef} id="chat-emoji-picker" className="emoji-picker" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-label="Seletor de emojis" {...emojiSheetGesture}>
         <div className="emoji-picker-handle" aria-hidden="true"/>
         <label className="emoji-picker-search"><Icon name="search"/><input type="search" value={emojiSearch} onChange={event => setEmojiSearch(event.currentTarget.value)} placeholder="Buscar emoji" aria-label="Buscar emoji"/></label>
-        <nav className="emoji-picker-categories" role="tablist" aria-label="Categorias de emojis">
+        <nav className={`emoji-picker-categories ${emojiSearchTerm ? 'is-searching' : ''}`} role="tablist" aria-label="Categorias de emojis">
+          <span className="emoji-category-indicator" style={{ transform: `translate3d(calc(${activeEmojiCategoryIndex * 100}% + ${activeEmojiCategoryIndex * .2}rem), 0, 0)` }} aria-hidden="true"/>
           {CHAT_EMOJI_CATEGORIES.map(category => <button className={!emojiSearchTerm && emojiCategory === category.id ? 'is-active' : ''} key={category.id} type="button" role="tab" aria-selected={!emojiSearchTerm && emojiCategory === category.id} aria-label={category.label} title={category.label} onClick={() => { setEmojiSearch(''); setEmojiCategory(category.id); }}>{category.icon}</button>)}
         </nav>
         <div className="emoji-picker-heading"><strong>{emojiSearchTerm ? 'Resultados' : CHAT_EMOJI_CATEGORIES.find(category => category.id === emojiCategory)?.label}</strong><small>{emojiOptions.length}</small></div>
@@ -4216,7 +4218,7 @@ export default function RoomApp() {
           </aside>
         <section ref={stageRef} className={`share-stage unified-room-stage ${sharingParticipants.length ? 'has-screens' : ''}`}>
           <div className="room-static-background" aria-hidden="true"/>
-          {session && sharingParticipants.length === 0 && <div className="stage-room-pill" aria-label={`Sala ${roomLabel}`}><span>Sala</span><strong>{roomLabel}</strong></div>}
+          {session && sharingParticipants.length === 0 && <button className={`stage-room-pill ${copied === 'code' ? 'is-copied' : ''}`} type="button" onClick={() => void copyValue('code')} disabled={!session.joinCode} aria-label={copied === 'code' ? `Código ${roomLabel} copiado` : `Copiar código da sala ${roomLabel}`} title="Copiar código da sala"><MotionIcon active={copied === 'code'} activeIcon="check" inactiveIcon="copy"/><span>{copied === 'code' ? 'Copiado' : 'Sala'}</span><strong>{roomLabel}</strong></button>}
           {stageContent}
           {session && sharingParticipants.length > 0 && mode === 'connected' && (
             <div className="participant-rail">{connectedParticipants.map(participant => <div key={participant.id} className={speakingIds.has(participant.id) ? 'is-speaking' : ''}><Avatar avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} leader={participant.id === leaderId} size="small"/><span><strong>{participant.name}</strong><small>{participant.status}</small></span></div>)}</div>

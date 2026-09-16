@@ -124,7 +124,7 @@ h1, h2, p { margin-top: 0; }
 .dock-connection-indicator .connection-tooltip { top: auto; bottom: calc(100% + .65rem); left: 0; transform: translateY(.3rem) scale(.98); transform-origin: 0 100%; }
 .dock-connection-indicator:hover .connection-tooltip, .dock-connection-indicator:focus-visible .connection-tooltip { opacity: 1; transform: translateY(0) scale(1); }
 .dock-unread { position: absolute; top: -.28rem; right: -.28rem; min-width: 1.05rem; height: 1.05rem; padding: 0 .22rem; border: 2px solid #151515; border-radius: 999px; display: grid; place-items: center; color: #061116; background: #70ccdf; font-size: .58rem; font-weight: 700; line-height: 1; }
-.dock-popover { position: absolute; left: 50%; bottom: calc(100% + .65rem); z-index: 12; width: min(20rem, calc(100vw - 1rem)); max-height: min(34rem, calc(100dvh - 9.25rem)); padding: .5rem; border: 1px solid rgba(255,255,255,.1); border-radius: .8rem; overflow: visible; color: #e7e7e7; text-align: left; background: rgba(15, 15, 15, .98); box-shadow: 0 1.25rem 4rem rgba(0,0,0,.55); backdrop-filter: blur(1.25rem) saturate(125%); transform-origin: 50% 100%; animation: popover-enter 220ms var(--ease-out) both; }
+.dock-popover { position: absolute; left: 50%; bottom: calc(100% + .65rem); z-index: 12; width: min(20rem, calc(100vw - 1rem)); max-height: min(34rem, calc(100dvh - 9.25rem)); padding: .5rem; border: 1px solid rgba(255,255,255,.1); border-radius: .8rem; overflow: visible; color: #e7e7e7; text-align: left; background: #101314; box-shadow: 0 1.25rem 4rem rgba(0,0,0,.55); backdrop-filter: none; transform-origin: 50% 100%; animation: popover-enter 220ms var(--ease-out) both; }
 .dock-popover > header { min-height: 2.05rem; padding: .25rem .55rem .55rem; display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
 .dock-popover > header strong { font-size: .83rem; font-weight: 610; }
 .dock-popover > header small { color: #777b7e; font-size: .56rem; font-weight: 620; letter-spacing: .05em; }
@@ -397,7 +397,7 @@ h1, h2, p { margin-top: 0; }
 .chat-composer button:disabled { cursor: default; opacity: 1; }
 .chat-composer button .icon { width: .95rem; height: .95rem; }
 
-.modal-backdrop { position: fixed; inset: 0; z-index: 20; padding: 1.25rem; display: grid; place-items: center; background: rgba(0,0,0,.72); backdrop-filter: blur(.7rem); animation: modal-fade 220ms var(--ease-out) both; }
+.modal-backdrop { position: fixed; inset: 0; z-index: 20; padding: 1.25rem; display: grid; place-items: center; background: rgba(0,0,0,.72); backdrop-filter: none; animation: modal-fade 220ms var(--ease-out) both; }
 .qr-modal { width: min(25rem, 100%); padding: 1.5rem; border: 1px solid #2b2b2b; border-radius: 1.1rem; text-align: center; background: #111; box-shadow: 0 2rem 6rem rgba(0,0,0,.58); animation: modal-enter 320ms var(--ease-out) both; }
 .qr-modal .eyebrow { margin-bottom: .9rem; }
 .qr-modal h2 { margin-bottom: .45rem; font-size: 1.45rem; }

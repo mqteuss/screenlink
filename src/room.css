@@ -10,6 +10,8 @@
   --room-accent: #69ccd9;
   --room-accent-dark: #1a6877;
   --room-danger: #df4d53;
+  --room-sheet: #101314;
+  --room-sheet-elevated: #1f2426;
 }
 
 .room-app, .room-app * { box-sizing: border-box; }
@@ -162,7 +164,7 @@
 .room-chat-panel form button:disabled { color: #6b7477; background: #242a2c; cursor: default; }
 .room-chat-panel form .room-icon { width: 1rem; }
 
-.room-popover { position: fixed; z-index: 40; border: 1px solid var(--room-line-strong); border-radius: 1rem; color: var(--room-text); background: rgba(13,16,18,.96); box-shadow: 0 1.4rem 4rem rgba(0,0,0,.48); backdrop-filter: blur(22px); }
+.room-popover { position: fixed; z-index: 40; border: 1px solid var(--room-line-strong); border-radius: 1rem; color: var(--room-text); background: var(--room-sheet); box-shadow: 0 1.4rem 4rem rgba(0,0,0,.48); backdrop-filter: none; }
 .room-popover > header { padding: .9rem 1rem .75rem; display: flex; align-items: center; justify-content: space-between; }
 .invite-popover { top: 4.1rem; left: 50%; width: min(25rem, calc(100vw - 2rem)); transform: translateX(-50%); padding: .15rem .2rem .85rem; }
 .invite-popover > p { margin: 0 1rem 1rem; color: #7f8b8e; font-size: .7rem; line-height: 1.5; }
@@ -285,8 +287,16 @@
 .unified-stage-empty .stage-echo:hover .echo-owl-beak { transform: scale(1.08) rotate(-3deg); }
 .unified-stage-empty .eyebrow { margin-bottom: .75rem; color: #9ca8ac; }
 .unified-stage-empty .stage-note { margin-top: 1rem; color: #667075; }
-.stage-room-pill { position: absolute; z-index: 8; top: .72rem; left: 50%; min-height: 2rem; padding: 0 .72rem; border: 1px solid rgba(255,255,255,.09); border-radius: 999px; display: inline-flex; align-items: center; gap: .42rem; color: #d8dfe1; background: rgba(9,13,15,.64); box-shadow: 0 .55rem 1.7rem rgba(0,0,0,.2); backdrop-filter: blur(16px) saturate(130%); transform: translateX(-50%); pointer-events: none; animation: room-pill-enter 260ms var(--ease-out) both; }
-.stage-room-pill span { color: #818b8e; font-size: .56rem; font-weight: 590; letter-spacing: .075em; text-transform: uppercase; }
+.stage-room-pill { position: absolute; z-index: 8; top: .72rem; left: 50%; min-height: 2rem; padding: 0 .72rem; border: 0; border-radius: 999px; display: inline-flex; align-items: center; gap: .42rem; color: #d8dfe1; background: #111617; box-shadow: 0 .55rem 1.7rem rgba(0,0,0,.2); transform: translateX(-50%); cursor: pointer; animation: room-pill-enter 260ms var(--ease-out) both; transition: color 180ms ease, background 200ms ease, transform 180ms var(--ease-smooth-out); }
+.stage-room-pill:hover { color: #fff; background: #1b2224; transform: translateX(-50%) translateY(-1px); }
+.stage-room-pill:active { transform: translateX(-50%) scale(.97); }
+.stage-room-pill:focus-visible { outline: 2px solid #78cfda; outline-offset: 2px; }
+.stage-room-pill:disabled { cursor: wait; opacity: .6; transform: translateX(-50%); }
+.stage-room-pill.is-copied { color: #d9f8ed; background: #163029; }
+.stage-room-pill > .t-icon-swap { width: .78rem; height: .78rem; }
+.stage-room-pill .room-icon { width: .78rem; height: .78rem; }
+.stage-room-pill > span:not(.t-icon-swap) { color: #818b8e; font-size: .56rem; font-weight: 590; letter-spacing: .075em; text-transform: uppercase; }
+.stage-room-pill.is-copied > span:not(.t-icon-swap) { color: #91d8c0; }
 .stage-room-pill strong { max-width: 9rem; overflow: hidden; font-family: "Cascadia Code", ui-monospace, monospace; font-size: .65rem; font-weight: 650; letter-spacing: .09em; text-overflow: ellipsis; white-space: nowrap; }
 .unified-screens-grid { position: absolute; z-index: 2; inset: .75rem .75rem 5.3rem; display: grid; gap: .55rem; }
 .unified-screens-grid.count-1 { grid-template-columns: minmax(0, 1fr); }
@@ -656,7 +666,7 @@
   grid-template-rows: auto auto auto minmax(0, 1fr);
   gap: .48rem;
   color: #dce1e2;
-  background: rgba(14,16,17,.985);
+  background: var(--room-sheet);
   box-shadow: 0 1rem 3rem rgba(0,0,0,.48);
   animation: submenu-enter 200ms var(--ease-out) both;
 }
@@ -665,11 +675,13 @@
 .emoji-picker-search .icon { width: .92rem; height: .92rem; }
 .emoji-picker-search input { min-width: 0; width: 100%; border: 0; outline: 0; color: #edf1f2; background: transparent; font: inherit; font-size: .7rem; }
 .emoji-picker-search input::placeholder { color: #798184; }
-.emoji-picker-categories { min-width: 0; padding-bottom: .42rem; border-bottom: 1px solid #282c2e; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: .16rem; }
-.emoji-picker-categories button { min-width: 0; height: 2.1rem; border: 0; border-radius: .55rem; display: grid; place-items: center; color: #8f979a; background: transparent; font-family: "Segoe UI Emoji", sans-serif; font-size: .95rem; transition: color 160ms ease, background 190ms ease, transform 160ms ease; }
-.emoji-picker-categories button:hover { color: #eef2f3; background: #252a2c; }
+.emoji-picker-categories { position: relative; isolation: isolate; min-width: 0; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: .2rem; }
+.emoji-category-indicator { position: absolute; z-index: 0; top: 0; bottom: 0; left: 0; width: calc((100% - 1rem) / 6); border-radius: .55rem; background: var(--room-sheet-elevated); pointer-events: none; transition: transform var(--toggle-dur) var(--toggle-ease), opacity var(--duration-quick) ease; will-change: transform; }
+.emoji-picker-categories.is-searching .emoji-category-indicator { opacity: 0; }
+.emoji-picker-categories button { position: relative; z-index: 1; min-width: 0; height: 2.1rem; border: 0; border-radius: .55rem; display: grid; place-items: center; color: #8f979a; background: transparent; font-family: "Segoe UI Emoji", sans-serif; font-size: .95rem; transition: color 180ms ease, transform 160ms ease; }
+.emoji-picker-categories button:hover { color: #eef2f3; }
 .emoji-picker-categories button:active { transform: scale(.92); }
-.emoji-picker-categories button.is-active { color: #fff; background: #303638; box-shadow: inset 0 -2px #70c9d8; }
+.emoji-picker-categories button.is-active { color: #fff; }
 .emoji-picker-heading { min-width: 0; padding: 0 .15rem; display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
 .emoji-picker-heading strong { overflow: hidden; color: #cbd1d3; font-size: .66rem; font-weight: 640; text-overflow: ellipsis; white-space: nowrap; }
 .emoji-picker-heading small { color: #747d80; font-size: .56rem; font-variant-numeric: tabular-nums; }
@@ -683,7 +695,7 @@
 .qr-loading { min-height: 12rem; display: grid; place-items: center; color: #858d90; font-size: .72rem; }
 .unified-room-app .modal-backdrop { z-index: 80; }
 
-.desktop-update-card { position: fixed; z-index: 92; top: 1rem; right: calc(var(--room-sidebar-width) + 1rem); width: min(22rem, calc(100vw - 2rem)); padding: .82rem; border: 1px solid rgba(129,205,218,.2); border-radius: .9rem; display: grid; grid-template-columns: 2.35rem minmax(0, 1fr); gap: .72rem; color: #e8edef; background: rgba(16,20,22,.96); box-shadow: 0 1.2rem 3.5rem rgba(0,0,0,.46); backdrop-filter: blur(22px) saturate(125%); animation: update-card-enter 300ms var(--ease-out) both; }
+.desktop-update-card { position: fixed; z-index: 92; top: 1rem; right: calc(var(--room-sidebar-width) + 1rem); width: min(22rem, calc(100vw - 2rem)); padding: .82rem; border: 1px solid rgba(129,205,218,.2); border-radius: .9rem; display: grid; grid-template-columns: 2.35rem minmax(0, 1fr); gap: .72rem; color: #e8edef; background: #101416; box-shadow: 0 1.2rem 3.5rem rgba(0,0,0,.46); backdrop-filter: none; animation: update-card-enter 300ms var(--ease-out) both; }
 .desktop-update-icon { width: 2.35rem; height: 2.35rem; border-radius: .7rem; display: grid; place-items: center; color: #9be0e9; background: linear-gradient(145deg, rgba(89,187,207,.24), rgba(48,107,124,.12)); }
 .desktop-update-icon .icon { width: 1.05rem; }
 .desktop-update-card.is-checking .desktop-update-icon .icon, .desktop-update-card.is-installing .desktop-update-icon .icon { animation: update-spin 1.1s linear infinite; }
@@ -700,7 +712,7 @@
 .desktop-update-actions button.is-primary:hover { background: #b1edf3; }
 .desktop-update-actions .icon { width: .78rem; }
 
-.onboarding-backdrop { position: fixed; z-index: 110; inset: 0; padding: 1.25rem; display: grid; place-items: center; background: rgba(2,4,5,.78); backdrop-filter: blur(7px); animation: onboarding-backdrop-enter 180ms ease both; }
+.onboarding-backdrop { position: fixed; z-index: 110; inset: 0; padding: 1.25rem; display: grid; place-items: center; background: rgba(2,4,5,.78); backdrop-filter: none; animation: onboarding-backdrop-enter 180ms ease both; }
 .onboarding-dialog { width: min(46rem, 100%); height: min(31rem, calc(100dvh - 2.5rem)); min-height: 27rem; padding: 0; border: 1px solid #2a2e30; border-radius: .9rem; display: grid; grid-template: 3.25rem minmax(0, 1fr) auto 3.7rem / minmax(20rem, 1.08fr) minmax(18rem, .92fr); color: #edf1f2; background: #0d1011; box-shadow: 0 1.8rem 5rem rgba(0,0,0,.62); overflow: hidden; animation: onboarding-dialog-enter 260ms var(--ease-out) both; }
 .onboarding-dialog > header { grid-column: 1 / -1; min-width: 0; padding: 0 .75rem 0 .9rem; border-bottom: 1px solid #25292a; display: grid; grid-template-columns: minmax(0, 1fr) auto 2rem; align-items: center; gap: .65rem; background: #101314; }
 .onboarding-brand { min-width: 0; display: inline-flex; align-items: center; gap: .5rem; color: #e9edee; }
@@ -808,7 +820,7 @@
   .unified-room-app.is-mobile-room:not(.is-controls-open) .unified-control-panel, .unified-room-app.is-chat-open .unified-control-panel { display: none; }
   .unified-room-app .unified-room-stage, .unified-room-app.is-chat-open .unified-room-stage { grid-column: auto; width: 100%; height: 100%; min-height: 0; border-radius: 0; border-bottom: 0; }
   .unified-room-app .unified-room-stage::after { border-right: 0; border-radius: 0; }
-  .unified-chat-sidebar { position: fixed; z-index: 30; top: .55rem; right: .55rem; bottom: 5.25rem; left: .55rem; grid-template-rows: 3.5rem 3.45rem minmax(0, 1fr) 2.9rem; border: 1px solid #303436; border-radius: .9rem; background: rgba(9,11,12,.98); box-shadow: 0 1.2rem 3.8rem rgba(0,0,0,.55); backdrop-filter: blur(18px); transform: translateX(0); transition: opacity var(--duration-fast) ease, transform var(--duration-slow) var(--ease-smooth-out), visibility 0s linear; }
+  .unified-chat-sidebar { position: fixed; z-index: 30; top: .55rem; right: .55rem; bottom: 5.25rem; left: .55rem; grid-template-rows: 3.5rem 3.45rem minmax(0, 1fr) 2.9rem; border: 1px solid #303436; border-radius: .9rem; background: #090b0c; box-shadow: 0 1.2rem 3.8rem rgba(0,0,0,.55); backdrop-filter: none; transform: translateX(0); transition: opacity var(--duration-fast) ease, transform var(--duration-slow) var(--ease-smooth-out), visibility 0s linear; }
   .unified-chat-sidebar.is-closed { pointer-events: none; opacity: 0; visibility: hidden; transform: translateX(calc(-100% - 1.1rem)); transition: opacity var(--duration-fast) ease, transform var(--duration-medium) var(--ease-smooth-out), visibility 0s linear var(--duration-medium); }
   .unified-chat-sidebar.is-closed .unified-sidebar-header { display: flex; }
   .unified-chat-sidebar.is-closed .unified-chat-panel { display: grid; }
@@ -821,7 +833,7 @@
   .unified-chat-panel { padding-right: .68rem; padding-left: .68rem; }
   .unified-room-app .unified-profile-popover { right: 1rem; bottom: 9.1rem; left: 1rem; width: auto; max-height: calc(100dvh - 13.5rem); transform: none; }
   .stage-entry-actions { flex-direction: column; }
-  .unified-room-app.is-controls-open .unified-control-panel { position: fixed; z-index: 31; top: .55rem; right: .55rem; bottom: 4.9rem; left: .55rem; width: auto; min-height: 0; padding: .7rem .85rem .6rem; border: 1px solid #303436; border-radius: .9rem; display: flex; overflow: hidden; background: rgba(9,11,12,.985); box-shadow: 0 1.2rem 3.8rem rgba(0,0,0,.52); backdrop-filter: blur(18px); animation: mobile-controls-enter var(--panel-open-dur) var(--panel-ease) both; }
+  .unified-room-app.is-controls-open .unified-control-panel { position: fixed; z-index: 31; top: .55rem; right: .55rem; bottom: 4.9rem; left: .55rem; width: auto; min-height: 0; padding: .7rem .85rem .6rem; border: 1px solid #303436; border-radius: .9rem; display: flex; overflow: hidden; background: #090b0c; box-shadow: 0 1.2rem 3.8rem rgba(0,0,0,.52); backdrop-filter: none; animation: mobile-controls-enter var(--panel-open-dur) var(--panel-ease) both; }
   .unified-room-app.is-controls-open .unified-control-panel .panel-header { display: grid; grid-template-columns: minmax(0, 1fr) auto 2rem; }
   .unified-room-app.is-controls-open .unified-control-panel .panel-view { min-height: 0; width: 100%; height: 100%; overflow: hidden; }
   .unified-room-app.is-controls-open .unified-call-page { min-height: 0; height: 100%; padding-right: .12rem; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; }
@@ -965,8 +977,8 @@
 }
 
 @keyframes mobile-sheet-enter {
-  from { opacity: .72; transform: translateY(100%); }
-  to { opacity: 1; transform: translateY(0); }
+  from { transform: translate3d(0, 100%, 0); }
+  to { transform: translate3d(0, 0, 0); }
 }
 
 @keyframes mobile-view-enter {
@@ -987,6 +999,8 @@
     --mobile-chat-gutter: .8rem;
     --mobile-chat-inline-start: max(var(--mobile-chat-gutter), env(safe-area-inset-left));
     --mobile-chat-inline-end: max(var(--mobile-chat-gutter), env(safe-area-inset-right));
+    --panel-open-dur: 300ms;
+    --panel-close-dur: 220ms;
     overscroll-behavior: none;
   }
   .unified-room-app.is-phone-room .stage-room-pill { top: max(.6rem, env(safe-area-inset-top)); }
@@ -1008,8 +1022,8 @@
   .unified-room-app.is-phone-room .screen-tile-focus span { display: none; }
   .unified-room-app.is-phone-room .unified-screen-strip .screen-tile-focus > .t-icon-swap { opacity: 1; }
   .desktop-update-card { top: max(.55rem, env(safe-area-inset-top)); right: .55rem; left: .55rem; width: auto; }
-  .onboarding-backdrop { padding: 0; place-items: end center; backdrop-filter: blur(5px); }
-  .onboarding-dialog { width: 100%; height: min(43rem, calc(100dvh - max(.35rem, env(safe-area-inset-top)))); min-height: 0; max-height: none; border-width: 1px 0 0; border-radius: 1.1rem 1.1rem 0 0; grid-template: 3.25rem minmax(10rem, 29dvh) minmax(0, 1fr) 2.4rem max(3.7rem, calc(3.3rem + env(safe-area-inset-bottom))) / minmax(0, 1fr); }
+  .onboarding-backdrop { padding: 0; place-items: end center; backdrop-filter: none; }
+  .onboarding-dialog { width: 100%; height: min(43rem, calc(100dvh - max(.35rem, env(safe-area-inset-top)))); min-height: 0; max-height: none; border: 0; border-radius: 1.1rem 1.1rem 0 0; grid-template: 3.25rem minmax(10rem, 29dvh) minmax(0, 1fr) 2.4rem max(3.7rem, calc(3.3rem + env(safe-area-inset-bottom))) / minmax(0, 1fr); }
   .onboarding-dialog > header { grid-column: 1; grid-row: 1; padding-right: .7rem; padding-left: .8rem; }
   .onboarding-preview { grid-column: 1; grid-row: 2; margin: .65rem .65rem 0; }
   .onboarding-preview-app { grid-template-columns: 3.6rem minmax(0, 1fr) 4.6rem; }
@@ -1099,11 +1113,11 @@
     min-height: 0;
     margin: .42rem calc(-1 * var(--mobile-chat-inline-end)) 0 calc(-1 * var(--mobile-chat-inline-start));
     padding: .82rem max(.68rem, env(safe-area-inset-right)) max(.68rem, env(safe-area-inset-bottom)) max(.68rem, env(safe-area-inset-left));
-    border-width: 1px 0 0;
+    border: 0;
     border-radius: 1.15rem 1.15rem 0 0;
     grid-template-rows: auto auto auto auto minmax(0, 1fr);
     gap: .5rem;
-    background: #111516;
+    background: var(--room-sheet);
     box-shadow: none;
     transform-origin: 50% 100%;
     animation: mobile-sheet-enter var(--panel-open-dur) var(--panel-ease) both;
@@ -1135,9 +1149,11 @@
     max-height: min(72dvh, 32rem);
     padding: 1.15rem .65rem max(.8rem, env(safe-area-inset-bottom));
     overflow-y: auto;
-    border-width: 1px 0 0;
+    border: 0;
     border-radius: 1.3rem 1.3rem 0 0;
+    background: var(--room-sheet);
     box-shadow: none;
+    backdrop-filter: none;
     transform-origin: 50% 100%;
     animation: mobile-sheet-enter var(--panel-open-dur) var(--panel-ease) both;
   }
@@ -1167,9 +1183,9 @@
     height: min(86dvh, 45rem);
     max-height: calc(100dvh - 1.25rem);
     padding: 1rem .9rem max(.7rem, env(safe-area-inset-bottom));
-    border-width: 1px 0 0;
+    border: 0;
     border-radius: 1.35rem 1.35rem 0 0;
-    background: rgba(10,12,13,.985);
+    background: var(--room-sheet);
     box-shadow: none;
     backdrop-filter: none;
     animation: mobile-sheet-enter var(--panel-open-dur) var(--panel-ease) both;
@@ -1196,8 +1212,9 @@
     max-height: min(86dvh, 42rem);
     padding: 1rem .35rem max(.85rem, env(safe-area-inset-bottom));
     overflow-y: auto;
-    border-width: 1px 0 0;
+    border: 0;
     border-radius: 1.35rem 1.35rem 0 0;
+    background: var(--room-sheet);
     box-shadow: none;
     backdrop-filter: none;
     animation: mobile-sheet-enter var(--panel-open-dur) var(--panel-ease) both;
@@ -1223,10 +1240,10 @@
     max-height: min(86dvh, 46rem);
     padding: 1.05rem .65rem max(.75rem, env(safe-area-inset-bottom));
     overflow: hidden;
-    border-width: 1px 0 0;
+    border: 0;
     border-radius: 1.35rem 1.35rem 0 0;
     pointer-events: auto;
-    background: rgba(13,14,15,.99);
+    background: var(--room-sheet);
     box-shadow: none;
     backdrop-filter: none;
     transform: none;
@@ -1279,7 +1296,7 @@
   .mobile-sheet-host .room-device-options-list > button { min-height: 3.25rem; padding: .48rem .62rem; border-radius: .7rem; }
 
   .unified-room-app.is-phone-room .modal-backdrop { align-items: end; padding: 0; backdrop-filter: none; }
-  .unified-room-app.is-phone-room .qr-modal { width: 100%; max-height: calc(100dvh - 1rem); padding: 1.5rem 1rem max(1rem, env(safe-area-inset-bottom)); overflow-y: auto; border-width: 1px 0 0; border-radius: 1.35rem 1.35rem 0 0; box-shadow: none; animation: mobile-sheet-enter var(--panel-open-dur) var(--panel-ease) both; }
+  .unified-room-app.is-phone-room .qr-modal { width: 100%; max-height: calc(100dvh - 1rem); padding: 1.5rem 1rem max(1rem, env(safe-area-inset-bottom)); overflow-y: auto; border: 0; border-radius: 1.35rem 1.35rem 0 0; background: var(--room-sheet); box-shadow: none; animation: mobile-sheet-enter var(--panel-open-dur) var(--panel-ease) both; }
   .unified-room-app.is-phone-room .qr-modal img { width: min(15.5rem, 62dvh); }
   .unified-room-app.is-phone-room .qr-modal > button { width: 100%; min-height: 3rem; }
 
