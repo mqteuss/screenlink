@@ -19,6 +19,12 @@ const MAX_ACTIVE_ROOMS = Number.isSafeInteger(configuredRoomLimit) && configured
 const configuredConnectionLimit = Number(process.env.MAX_CONNECTIONS || 10_000);
 const MAX_CONNECTIONS = Number.isSafeInteger(configuredConnectionLimit) && configuredConnectionLimit >= 10 ? configuredConnectionLimit : 10_000;
 const SIGNAL_GRACE_MS = 5 * 60_000;
+const configuredParticipantReconnectGrace = Number(process.env.PARTICIPANT_RECONNECT_GRACE_MS || 12_000);
+const PARTICIPANT_RECONNECT_GRACE_MS = Number.isSafeInteger(configuredParticipantReconnectGrace)
+  && configuredParticipantReconnectGrace >= 100
+  && configuredParticipantReconnectGrace <= 60_000
+  ? configuredParticipantReconnectGrace
+  : 12_000;
 
 const MIME_TYPES = new Map([
   ['.html', 'text/html; charset=utf-8'],
@@ -108,7 +114,7 @@ const turnEnabled = iceServers.some(server => {
 });
 
 /**
- * @typedef {{id: string, socket: WebSocket | null, expiryTimer: NodeJS.Timeout | null}} Viewer
+ * @typedef {{id: string, socket: WebSocket | null, expiryTimer: NodeJS.Timeout | null, resumeTokenHash: Buffer}} Viewer
  * @typedef {{tokenHash: Buffer, host: WebSocket | null, hostExpiryTimer: NodeJS.Timeout | null, viewers: Map<string, Viewer>, maxViewers: number}} Room
  */
 /** @type {Map<string, Room>} */
@@ -118,7 +124,7 @@ const clients = new WeakMap();
 
 /**
  * @typedef {{name: string, avatar: string, status: string, device: 'desktop' | 'mobile'}} GroupProfile
- * @typedef {{id: string, socket: WebSocket | null, profile: GroupProfile, joinedAt: number, sharing: boolean, microphoneEnabled: boolean, isOwner: boolean, expiryTimer: NodeJS.Timeout | null}} GroupParticipant
+ * @typedef {{id: string, socket: WebSocket | null, profile: GroupProfile, joinedAt: number, sharing: boolean, microphoneEnabled: boolean, isOwner: boolean, expiryTimer: NodeJS.Timeout | null, resumeTokenHash: Buffer | null, presenceAnnounced: boolean}} GroupParticipant
  * @typedef {{token: string, tokenHash: Buffer, joinCode: string, ownerKeyHash: Buffer, ownerId: string, leaderId: string, participants: Map<string, GroupParticipant>, maxParticipants: number, expiryTimer: NodeJS.Timeout | null}} GroupRoom
  */
 /** @type {Map<string, GroupRoom>} */
@@ -133,6 +139,10 @@ function tokenHash(token) {
 function tokenMatches(expected, candidate) {
   const actual = tokenHash(candidate);
   return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+function randomResumeToken() {
+  return randomBytes(32).toString('base64url');
 }
 
 function sendJson(socket, payload) {
@@ -256,25 +266,35 @@ function detachGroupParticipant(roomId, room, participant, { remove = false } = 
   participant.sharing = false;
   participant.microphoneEnabled = false;
   if (participant.expiryTimer) clearTimeout(participant.expiryTimer);
-  broadcastGroup(room, { type: 'participant-left', peerId: participant.id }, participant.id);
+  participant.expiryTimer = null;
+  if (participant.presenceAnnounced) {
+    participant.presenceAnnounced = false;
+    broadcastGroup(room, { type: 'participant-left', peerId: participant.id }, participant.id);
+  }
   if (remove) {
     room.participants.delete(participant.id);
-  } else {
-    participant.expiryTimer = setTimeout(() => {
-      if (room.participants.get(participant.id) === participant && participant.socket === null && !participant.isOwner) {
-        room.participants.delete(participant.id);
-      }
-    }, SIGNAL_GRACE_MS);
-    participant.expiryTimer.unref?.();
   }
   electGroupLeader(room);
   scheduleGroupRoomExpiry(roomId, room);
 }
 
-function attachGroupParticipant(roomId, room, participant, socket, profile, resumed) {
+function suspendGroupParticipant(roomId, room, participant) {
+  const socket = participant.socket;
+  if (socket) groupClients.delete(socket);
+  participant.socket = null;
+  if (participant.expiryTimer) clearTimeout(participant.expiryTimer);
+  participant.expiryTimer = setTimeout(() => {
+    if (room.participants.get(participant.id) !== participant || participant.socket !== null) return;
+    detachGroupParticipant(roomId, room, participant, { remove: !participant.isOwner });
+  }, PARTICIPANT_RECONNECT_GRACE_MS);
+  participant.expiryTimer.unref?.();
+}
+
+function attachGroupParticipant(roomId, room, participant, socket, profile, resumed, resumeToken = '') {
   clearGroupRoomExpiry(room);
   if (participant.expiryTimer) clearTimeout(participant.expiryTimer);
   participant.expiryTimer = null;
+  const announceJoin = !participant.presenceAnnounced;
   const previousSocket = participant.socket;
   if (previousSocket && previousSocket !== socket) {
     groupClients.delete(previousSocket);
@@ -282,6 +302,7 @@ function attachGroupParticipant(roomId, room, participant, socket, profile, resu
   }
   participant.socket = socket;
   participant.profile = normalizeProfile(profile);
+  participant.presenceAnnounced = true;
   groupClients.set(socket, { roomId, peerId: participant.id });
   const roster = connectedGroupParticipants(room).map(publicParticipant);
   sendJson(socket, {
@@ -294,10 +315,12 @@ function attachGroupParticipant(roomId, room, participant, socket, profile, resu
     maxParticipants: room.maxParticipants,
     isOwner: participant.isOwner,
     resumed,
+    ...(!participant.isOwner && resumeToken ? { resumeToken } : {}),
     iceServers,
     participants: roster
   });
-  broadcastGroup(room, { type: 'participant-joined', participant: publicParticipant(participant) }, participant.id);
+  if (announceJoin) broadcastGroup(room, { type: 'participant-joined', participant: publicParticipant(participant) }, participant.id);
+  else broadcastGroup(room, { type: 'participant-state', participant: publicParticipant(participant) }, participant.id);
   const wasLeader = room.leaderId;
   electGroupLeader(room, { reclaimed: participant.isOwner && wasLeader !== participant.id });
 }
@@ -406,9 +429,14 @@ function relayToViewer(room, peerId, payload) {
 }
 
 function setSecurityHeaders(response) {
+  response.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  response.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  response.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
   response.setHeader('X-Content-Type-Options', 'nosniff');
+  response.setHeader('X-Frame-Options', 'DENY');
+  response.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
   response.setHeader('Referrer-Policy', 'no-referrer');
-  response.setHeader('Permissions-Policy', 'camera=(self), microphone=(self), display-capture=(self)');
+  response.setHeader('Permissions-Policy', 'camera=(), microphone=(self), display-capture=(self)');
   response.setHeader('Content-Security-Policy', "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; media-src 'self' blob:; style-src 'self'; style-src-elem 'self'; style-src-attr 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
 }
 
@@ -600,7 +628,9 @@ websocketServer.on('connection', (socket, request) => {
             sharing: false,
             microphoneEnabled: false,
             isOwner: true,
-            expiryTimer: null
+            expiryTimer: null,
+            resumeTokenHash: null,
+            presenceAnnounced: false
           };
           room.participants.set(owner.id, owner);
         }
@@ -622,7 +652,9 @@ websocketServer.on('connection', (socket, request) => {
         sharing: false,
         microphoneEnabled: false,
         isOwner: true,
-        expiryTimer: null
+        expiryTimer: null,
+        resumeTokenHash: null,
+        presenceAnnounced: false
       };
       room = {
         token: message.token,
@@ -667,12 +699,18 @@ websocketServer.on('connection', (socket, request) => {
       const requestedId = validPeerId(message.participantId) ? message.participantId : '';
       let participant = requestedId ? room.participants.get(requestedId) : null;
       if (participant?.isOwner) participant = null;
+      const suppliedResumeToken = validToken(message.resumeToken) ? message.resumeToken : '';
+      if (participant && (!participant.resumeTokenHash || !suppliedResumeToken || !tokenMatches(participant.resumeTokenHash, suppliedResumeToken))) {
+        participant = null;
+      }
       const resumed = Boolean(participant);
+      let resumeToken = suppliedResumeToken;
       if (!participant) {
         if (connectedGroupParticipants(room).length >= room.maxParticipants) {
           fail(socket, 'ROOM_FULL', `A sala atingiu o limite de ${room.maxParticipants} participantes.`);
           return;
         }
+        resumeToken = randomResumeToken();
         participant = {
           id: randomUUID(),
           socket: null,
@@ -681,11 +719,13 @@ websocketServer.on('connection', (socket, request) => {
           sharing: false,
           microphoneEnabled: false,
           isOwner: false,
-          expiryTimer: null
+          expiryTimer: null,
+          resumeTokenHash: tokenHash(resumeToken),
+          presenceAnnounced: false
         };
         room.participants.set(participant.id, participant);
       }
-      attachGroupParticipant(roomId, room, participant, socket, message.profile, resumed);
+      attachGroupParticipant(roomId, room, participant, socket, message.profile, resumed, resumeToken);
       return;
     }
 
@@ -863,7 +903,13 @@ websocketServer.on('connection', (socket, request) => {
       }
 
       const requestedPeerId = validPeerId(message.peerId) ? message.peerId : '';
-      const resumedViewer = requestedPeerId ? room.viewers.get(requestedPeerId) : null;
+      const requestedResumeToken = validToken(message.resumeToken) ? message.resumeToken : '';
+      const requestedViewer = requestedPeerId ? room.viewers.get(requestedPeerId) : null;
+      const resumedViewer = requestedViewer?.resumeTokenHash
+        && requestedResumeToken
+        && tokenMatches(requestedViewer.resumeTokenHash, requestedResumeToken)
+        ? requestedViewer
+        : null;
       if (resumedViewer) {
         clearExpiry(resumedViewer, 'expiryTimer');
         const previousSocket = resumedViewer.socket;
@@ -875,7 +921,7 @@ websocketServer.on('connection', (socket, request) => {
         }
         resumedViewer.socket = socket;
         clients.set(socket, { role: 'viewer', roomId: message.roomId, peerId: resumedViewer.id });
-        sendJson(socket, { type: 'joined', roomId: message.roomId, peerId: resumedViewer.id, iceServers, resumed: true });
+        sendJson(socket, { type: 'joined', roomId: message.roomId, peerId: resumedViewer.id, resumeToken: requestedResumeToken, iceServers, resumed: true });
         sendJson(room.host, { type: 'viewer-joined', peerId: resumedViewer.id, resumed: true });
         return;
       }
@@ -886,10 +932,11 @@ websocketServer.on('connection', (socket, request) => {
       }
 
       const peerId = randomUUID();
-      const viewer = { id: peerId, socket, expiryTimer: null };
+      const resumeToken = randomResumeToken();
+      const viewer = { id: peerId, socket, expiryTimer: null, resumeTokenHash: tokenHash(resumeToken) };
       room.viewers.set(peerId, viewer);
       clients.set(socket, { role: 'viewer', roomId: message.roomId, peerId });
-      sendJson(socket, { type: 'joined', roomId: message.roomId, peerId, iceServers, resumed: false });
+      sendJson(socket, { type: 'joined', roomId: message.roomId, peerId, resumeToken, iceServers, resumed: false });
       sendJson(room.host, { type: 'viewer-joined', peerId, resumed: false });
       return;
     }
@@ -987,7 +1034,7 @@ websocketServer.on('connection', (socket, request) => {
       groupClients.delete(socket);
       const room = groupRooms.get(groupClient.roomId);
       const participant = room?.participants.get(groupClient.peerId);
-      if (room && participant?.socket === socket) detachGroupParticipant(groupClient.roomId, room, participant);
+      if (room && participant?.socket === socket) suspendGroupParticipant(groupClient.roomId, room, participant);
       return;
     }
     const client = clients.get(socket);

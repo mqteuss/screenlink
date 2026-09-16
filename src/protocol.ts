@@ -11,7 +11,7 @@ export type SessionDescription = {
 
 export type ServerMessage =
   | { type: 'room-created'; roomId: string; iceServers: IceServerConfig[]; maxViewers: number; viewerIds: string[] }
-  | { type: 'joined'; roomId: string; peerId: string; iceServers: IceServerConfig[]; resumed?: boolean }
+  | { type: 'joined'; roomId: string; peerId: string; resumeToken?: string; iceServers: IceServerConfig[]; resumed?: boolean }
   | { type: 'viewer-joined'; peerId: string; resumed?: boolean }
   | { type: 'viewer-left'; peerId: string }
   | { type: 'offer'; peerId: string; sdp: SessionDescription }
@@ -50,6 +50,7 @@ export type RoomServerMessage =
       maxParticipants: number;
       isOwner: boolean;
       resumed: boolean;
+      resumeToken?: string;
       iceServers: IceServerConfig[];
       participants: RoomParticipant[];
     }

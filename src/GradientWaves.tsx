@@ -276,8 +276,15 @@ export default function GradientWaves({
     let frame = 0;
     let intersecting = true;
     let pageVisible = !document.hidden;
+    let lastRenderedAt = -Infinity;
+    const coarsePointer = window.matchMedia?.('(pointer: coarse)').matches ?? false;
+    const maximumFramesPerSecond = coarsePointer ? 30 : detail === 'high' ? 60 : 45;
+    const minimumFrameDuration = 1_000 / maximumFramesPerSecond;
     const startedAt = performance.now();
     const loop = (timestamp: number) => {
+      frame = requestAnimationFrame(loop);
+      if (timestamp - lastRenderedAt < minimumFrameDuration) return;
+      lastRenderedAt = timestamp;
       const targetX = enableMouseRef.current ? targetMouse[0] : 0.5;
       const targetY = enableMouseRef.current ? targetMouse[1] : 0.5;
       currentMouse[0] += 0.05 * (targetX - currentMouse[0]);
@@ -286,7 +293,6 @@ export default function GradientWaves({
       mouse[0] = currentMouse[0];
       mouse[1] = currentMouse[1];
       renderFrame((timestamp - startedAt) * 0.001);
-      frame = requestAnimationFrame(loop);
     };
     const stop = () => {
       if (!frame) return;

@@ -7,7 +7,7 @@ import { loadStoredProfile, prepareAvatar, profileStorageKind, saveStoredProfile
 
 type RoomMode = 'landing' | 'connecting' | 'connected' | 'error';
 type IconName = 'screen' | 'microphone' | 'microphoneOff' | 'volume' | 'volumeOff' | 'chat' | 'send' | 'hangup' | 'link' | 'copy' | 'settings' | 'users' | 'crown' | 'close' | 'chevron' | 'chevronDown' | 'smile' | 'keyboard' | 'search' | 'qr' | 'more' | 'expand' | 'pip' | 'wake' | 'motion' | 'grid' | 'download' | 'refresh' | 'check' | 'guide';
-type Session = { invite: Invite; joinCode?: string; joinByCode?: boolean; ownerKey?: string; participantId?: string; maxParticipants?: number };
+type Session = { invite: Invite; joinCode?: string; joinByCode?: boolean; ownerKey?: string; participantId?: string; resumeToken?: string; maxParticipants?: number };
 type RoomEntry = { kind: 'invite'; invite: Invite } | { kind: 'code'; code: string };
 type ChatDelivery = 'pending' | 'sent' | 'delivered' | 'failed';
 type ChatMessage = { id: string; senderId: string; senderName: string; text: string; sentAt: number; system?: boolean; delivery?: ChatDelivery };
@@ -43,6 +43,9 @@ type SheetDragSession = {
   frame: number | null;
 };
 
+type PeerNetworkSnapshot = { timestamp: number; bytesSent: number; packetsSent: number; packetsLost: number };
+type PeerNetworkMetrics = { rttMs: number | null; packetLoss: number | null; availableOutgoingMbps: number | null; outboundMbps: number | null; bandwidthLimited: boolean };
+
 type PeerRecord = {
   id: string;
   pc: RTCPeerConnection;
@@ -59,13 +62,18 @@ type PeerRecord = {
   screenStream: MediaStream;
   recoveryTimer: number | null;
   recoveryAttempts: number;
+  networkLevel: number;
+  poorNetworkSamples: number;
+  healthyNetworkSamples: number;
+  lastNetworkSnapshot: PeerNetworkSnapshot | null;
+  configuredPeerCount: number;
   makingOffer: boolean;
   ignoreOffer: boolean;
   polite: boolean;
 };
 
 type RoomMessage =
-  | { type: 'room-ready'; roomId: string; joinCode: string; invite: Invite; peerId?: string; selfId: string; leaderId: string; maxParticipants?: number; iceServers: IceServerConfig[]; participants: RoomParticipant[]; resumed?: boolean }
+  | { type: 'room-ready'; roomId: string; joinCode: string; invite: Invite; peerId?: string; selfId: string; leaderId: string; resumeToken?: string; maxParticipants?: number; iceServers: IceServerConfig[]; participants: RoomParticipant[]; resumed?: boolean }
   | { type: 'participant-joined'; participant: RoomParticipant }
   | { type: 'participant-left'; peerId: string }
   | { type: 'participant-state'; participant: RoomParticipant }
@@ -99,6 +107,14 @@ const CHAT_HISTORY_PAYLOAD_LIMIT = 48_000;
 const CHAT_BUFFER_LIMIT = 512_000;
 const CHAT_RETRY_INTERVAL_MS = 1_750;
 const CHAT_FAILURE_TIMEOUT_MS = 12_000;
+const ROOM_RECOVERY_WINDOW_MS = 30_000;
+const P2P_TOTAL_UPLOAD_BUDGET_MBPS = 18;
+const ADAPTIVE_NETWORK_PROFILES = [
+  { bitrateFactor: 1, scaleResolutionDownBy: 1, frameRateFactor: 1 },
+  { bitrateFactor: .72, scaleResolutionDownBy: 1.25, frameRateFactor: .85 },
+  { bitrateFactor: .48, scaleResolutionDownBy: 1.65, frameRateFactor: .67 },
+  { bitrateFactor: .3, scaleResolutionDownBy: 2.25, frameRateFactor: .5 }
+] as const;
 const DEFAULT_CHAT_APPEARANCE: ChatAppearance = { ownBubble: '#383838', otherBubble: '#1c1c1c', nameColor: '#ffffff' };
 const RESOLUTIONS: Resolution[] = [360, 480, 720, 1080];
 const FRAME_RATES: FrameRate[] = [15, 30, 45, 60];
@@ -268,6 +284,24 @@ function removeStorage(storageName: WebStorageName, key: string) {
   } catch {
     // A chamada continua mesmo quando o navegador bloqueia armazenamento local.
   }
+}
+
+function loadPeerResumeCredential(identifier: string) {
+  const stored = readStorage('sessionStorage', `${PEER_KEY_PREFIX}${identifier}`);
+  if (!stored) return null;
+  try {
+    const parsed = JSON.parse(stored) as { participantId?: unknown; resumeToken?: unknown };
+    const participantId = typeof parsed.participantId === 'string' ? parsed.participantId : '';
+    const resumeToken = typeof parsed.resumeToken === 'string' ? parsed.resumeToken : '';
+    return participantId ? { participantId, resumeToken } : null;
+  } catch {
+    // Compatibilidade com versões que armazenavam apenas o UUID do participante.
+    return { participantId: stored, resumeToken: '' };
+  }
+}
+
+function savePeerResumeCredential(roomId: string, participantId: string, resumeToken = '') {
+  writeStorage('sessionStorage', `${PEER_KEY_PREFIX}${roomId}`, JSON.stringify({ participantId, resumeToken }));
 }
 
 function normalizeChatColor(value: unknown, fallback: string) {
@@ -609,9 +643,9 @@ function sendChatChannelPayload(channel: RTCDataChannel | null, payload: ChatCha
   }
 }
 
-function sendChatHistory(channel: RTCDataChannel, messages: ChatMessage[]) {
+function sendChatHistory(channel: RTCDataChannel, messages: ChatMessage[], senderId: string) {
   let history = messages
-    .filter(message => !message.system && message.delivery !== 'pending' && message.delivery !== 'failed')
+    .filter(message => message.senderId === senderId && !message.system && message.delivery !== 'pending' && message.delivery !== 'failed')
     .slice(-CHAT_LIMIT)
     .map(chatWireMessage);
   let serialized = JSON.stringify({ type: 'chat-history', messages: history } satisfies ChatChannelPayload);
@@ -1067,18 +1101,33 @@ function recommendedBitrateMbps(resolution: Resolution, fps: FrameRate) {
   return Math.min(MAX_BITRATE_MBPS, Math.max(MIN_BITRATE_MBPS, VIDEO_PRESETS[resolution].bitrate * (fps / 30) / 1_000_000));
 }
 
+function adaptiveTargetBitrateMbps(resolution: Resolution, fps: FrameRate, peerCount: number, networkLevel: number) {
+  const profile = ADAPTIVE_NETWORK_PROFILES[Math.max(0, Math.min(ADAPTIVE_NETWORK_PROFILES.length - 1, networkLevel))];
+  const perPeerBudget = Math.max(.75, P2P_TOTAL_UPLOAD_BUDGET_MBPS / Math.max(1, peerCount));
+  return Math.max(MIN_BITRATE_MBPS, Math.min(recommendedBitrateMbps(resolution, fps), perPeerBudget) * profile.bitrateFactor);
+}
+
 function formatBitrate(value: number) {
   return `${value < 10 && value % 1 ? value.toFixed(1) : Math.round(value)} Mb/s`;
 }
 
-async function configureScreenSender(sender: RTCRtpSender | null, resolution: Resolution, fps: FrameRate, adaptive: boolean, manualMbps: number) {
+async function configureScreenSender(sender: RTCRtpSender | null, resolution: Resolution, fps: FrameRate, adaptive: boolean, manualMbps: number, peerCount = 1, networkLevel = 0) {
   if (!sender?.track) return;
   const parameters = sender.getParameters();
   parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
-  parameters.encodings[0]!.maxBitrate = Math.round((adaptive ? recommendedBitrateMbps(resolution, fps) : manualMbps) * 1_000_000);
-  parameters.encodings[0]!.maxFramerate = fps;
+  const profile = ADAPTIVE_NETWORK_PROFILES[Math.max(0, Math.min(ADAPTIVE_NETWORK_PROFILES.length - 1, networkLevel))];
+  parameters.encodings[0]!.maxBitrate = Math.round((adaptive ? adaptiveTargetBitrateMbps(resolution, fps, peerCount, networkLevel) : manualMbps) * 1_000_000);
+  parameters.encodings[0]!.maxFramerate = adaptive ? Math.max(12, Math.round(fps * profile.frameRateFactor)) : fps;
+  parameters.encodings[0]!.scaleResolutionDownBy = adaptive ? profile.scaleResolutionDownBy : 1;
   parameters.degradationPreference = adaptive ? 'balanced' : 'maintain-resolution';
-  await sender.setParameters(parameters).catch(() => undefined);
+  try {
+    await sender.setParameters(parameters);
+  } catch {
+    // Alguns motores não aceitam escala por encoding para captura de tela. O limite
+    // de bitrate e FPS ainda é útil nesses casos.
+    delete parameters.encodings[0]!.scaleResolutionDownBy;
+    await sender.setParameters(parameters).catch(() => undefined);
+  }
 }
 
 function loadProfile(): RoomProfile {
@@ -1160,11 +1209,21 @@ function mediaStreamWith(...tracks: Array<MediaStreamTrack | null | undefined>) 
   return new MediaStream(tracks.filter((track): track is MediaStreamTrack => Boolean(track)));
 }
 
-async function readPeerRttMs(pc: RTCPeerConnection): Promise<number | null> {
-  const report = await pc.getStats();
+function hasRenderableVideo(stream: MediaStream | null | undefined) {
+  return Boolean(stream?.getVideoTracks().some(track => track.readyState === 'live' && !track.muted));
+}
+
+async function readPeerNetworkMetrics(record: PeerRecord): Promise<PeerNetworkMetrics> {
+  const report = await record.pc.getStats();
   let selectedPairId = '';
   let candidatePairRtt: number | null = null;
   let remoteInboundRtt: number | null = null;
+  let availableOutgoingMbps: number | null = null;
+  let bytesSent = 0;
+  let packetsSent = 0;
+  let packetsLost = 0;
+  let outboundTimestamp = 0;
+  let bandwidthLimited = false;
 
   report.forEach(stat => {
     if (stat.type === 'transport' && stat.selectedCandidatePairId) selectedPairId = String(stat.selectedCandidatePairId);
@@ -1176,15 +1235,79 @@ async function readPeerRttMs(pc: RTCPeerConnection): Promise<number | null> {
     if (isSelectedPair) {
       const rtt = Number(stat.currentRoundTripTime);
       if (Number.isFinite(rtt) && rtt >= 0) candidatePairRtt = Math.max(candidatePairRtt ?? 0, rtt * 1_000);
+      const available = Number(stat.availableOutgoingBitrate);
+      if (Number.isFinite(available) && available >= 0) availableOutgoingMbps = available / 1_000_000;
     }
-    if (stat.type === 'remote-inbound-rtp') {
+    if (stat.type === 'remote-inbound-rtp' && (stat.kind === 'video' || stat.mediaType === 'video')) {
       const rtt = Number(stat.roundTripTime);
       if (Number.isFinite(rtt) && rtt >= 0) remoteInboundRtt = Math.max(remoteInboundRtt ?? 0, rtt * 1_000);
+      const lost = Number(stat.packetsLost);
+      if (Number.isFinite(lost) && lost >= 0) packetsLost = Math.max(packetsLost, lost);
+    }
+    if (stat.type === 'outbound-rtp' && !stat.isRemote && (stat.kind === 'video' || stat.mediaType === 'video')) {
+      const sentBytes = Number(stat.bytesSent);
+      const sentPackets = Number(stat.packetsSent);
+      const timestamp = Number(stat.timestamp);
+      if (Number.isFinite(sentBytes) && sentBytes >= 0) bytesSent = Math.max(bytesSent, sentBytes);
+      if (Number.isFinite(sentPackets) && sentPackets >= 0) packetsSent = Math.max(packetsSent, sentPackets);
+      if (Number.isFinite(timestamp) && timestamp >= 0) outboundTimestamp = Math.max(outboundTimestamp, timestamp);
+      bandwidthLimited ||= stat.qualityLimitationReason === 'bandwidth';
     }
   });
 
   const rtt = candidatePairRtt ?? remoteInboundRtt;
-  return rtt === null ? null : Math.round(rtt);
+  const previous = record.lastNetworkSnapshot;
+  const current = { timestamp: outboundTimestamp || performance.now(), bytesSent, packetsSent, packetsLost };
+  record.lastNetworkSnapshot = current;
+  const elapsedSeconds = previous ? Math.max(0, current.timestamp - previous.timestamp) / 1_000 : 0;
+  const sentDelta = previous ? Math.max(0, current.packetsSent - previous.packetsSent) : 0;
+  const lostDelta = previous ? Math.max(0, current.packetsLost - previous.packetsLost) : 0;
+  const packetLoss = sentDelta + lostDelta > 0 ? lostDelta / (sentDelta + lostDelta) : null;
+  const outboundMbps = previous && elapsedSeconds > 0
+    ? Math.max(0, current.bytesSent - previous.bytesSent) * 8 / elapsedSeconds / 1_000_000
+    : null;
+  return {
+    rttMs: rtt === null ? null : Math.round(rtt),
+    packetLoss,
+    availableOutgoingMbps,
+    outboundMbps,
+    bandwidthLimited
+  };
+}
+
+function updateAdaptiveNetworkLevel(record: PeerRecord, metrics: PeerNetworkMetrics, targetMbps: number) {
+  const poor = metrics.bandwidthLimited
+    || (metrics.packetLoss !== null && metrics.packetLoss >= .06)
+    || (metrics.rttMs !== null && metrics.rttMs >= 450)
+    || (metrics.availableOutgoingMbps !== null && metrics.availableOutgoingMbps < targetMbps * .85);
+  const healthy = !metrics.bandwidthLimited
+    && (metrics.packetLoss === null || metrics.packetLoss <= .015)
+    && (metrics.rttMs === null || metrics.rttMs <= 160)
+    && (metrics.availableOutgoingMbps === null || metrics.availableOutgoingMbps >= targetMbps * 1.35);
+
+  if (poor) {
+    record.poorNetworkSamples += 1;
+    record.healthyNetworkSamples = 0;
+    if (record.poorNetworkSamples >= 2 && record.networkLevel < ADAPTIVE_NETWORK_PROFILES.length - 1) {
+      record.networkLevel += 1;
+      record.poorNetworkSamples = 0;
+      return true;
+    }
+    return false;
+  }
+  if (healthy) {
+    record.healthyNetworkSamples += 1;
+    record.poorNetworkSamples = 0;
+    if (record.healthyNetworkSamples >= 5 && record.networkLevel > 0) {
+      record.networkLevel -= 1;
+      record.healthyNetworkSamples = 0;
+      return true;
+    }
+    return false;
+  }
+  record.poorNetworkSamples = 0;
+  record.healthyNetworkSamples = 0;
+  return false;
 }
 
 function ScreenTile({ stream, name, local, focused, thumbnail, focusable, onFocus }: { stream: MediaStream; name: string; local?: boolean; focused?: boolean; thumbnail?: boolean; focusable?: boolean; onFocus?: () => void }) {
@@ -1273,6 +1396,9 @@ export default function RoomApp() {
   const [shareOrigin, setShareOrigin] = useState(window.location.origin);
   const [turnAvailable, setTurnAvailable] = useState(false);
   const [mediaLatency, setMediaLatency] = useState<number | null>(null);
+  const [mediaPacketLoss, setMediaPacketLoss] = useState<number | null>(null);
+  const [adaptiveNetworkLevel, setAdaptiveNetworkLevel] = useState(0);
+  const [signalingConnected, setSignalingConnected] = useState(false);
   const [peerVersion, setPeerVersion] = useState(0);
   const [mobile, setMobile] = useState(usesCompactLayout);
   const [phone, setPhone] = useState(usesPhoneLayout);
@@ -1342,13 +1468,17 @@ export default function RoomApp() {
   const callErrorTextRef = useRef('');
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectNowRef = useRef<(() => void) | null>(null);
+  const hasJoinedRoomRef = useRef(false);
+  const roomRecoveryDeadlineRef = useRef(0);
   const wakeLockRef = useRef<ScreenWakeLock | null>(null);
   const screenSharePendingRef = useRef(false);
   const microphonePendingRef = useRef(false);
   const mediaRequestEpochRef = useRef(0);
   const microphoneRequestIdRef = useRef(0);
+  const microphoneRecoveryRequestedRef = useRef(false);
+  const microphoneRecoveryTimerRef = useRef<number | null>(null);
+  const acquireMicrophoneRef = useRef<(force?: boolean, exactSetting?: VoiceSettingKey) => Promise<boolean>>(async () => false);
   const screenShareRequestIdRef = useRef(0);
-  const disposedRef = useRef(false);
   const mobileOverlayHistoryActiveRef = useRef(false);
   const dismissMobileOverlayRef = useRef<() => void>(() => undefined);
   const staleMobileOverlayCleanedRef = useRef(false);
@@ -1940,7 +2070,7 @@ export default function RoomApp() {
     let receivedWindowStartedAt = Date.now();
     let receivedInWindow = 0;
     const opened = () => {
-      sendChatHistory(channel, chatMessagesRef.current);
+      sendChatHistory(channel, chatMessagesRef.current, selfIdRef.current);
       flushPendingChat();
     };
     channel.onopen = opened;
@@ -1962,8 +2092,10 @@ export default function RoomApp() {
         }
         if (incoming.type === 'chat-history') {
           if (!Array.isArray(incoming.messages)) return;
+          const participant = participantsRef.current[record.id];
           const history = incoming.messages.slice(-CHAT_LIMIT)
-            .map(message => normalizeChatWireMessage(message))
+            .filter(message => normalizeChatId(message?.senderId) === record.id)
+            .map(message => normalizeChatWireMessage(message, { id: record.id, name: participant?.name || 'Participante' }))
             .filter((message): message is ChatMessage => Boolean(message));
           mergeChatHistory(history);
           return;
@@ -2063,7 +2195,9 @@ export default function RoomApp() {
     ]);
     const activeResolution = automaticQualityRef.current ? 720 : resolutionRef.current;
     const activeFps = automaticQualityRef.current ? 30 : fpsRef.current;
-    await configureScreenSender(screenVideo.sender, activeResolution, activeFps, adaptiveBitrateRef.current, bitrateMbpsRef.current);
+    const peerCount = Math.max(1, peersRef.current.size);
+    await configureScreenSender(screenVideo.sender, activeResolution, activeFps, adaptiveBitrateRef.current, bitrateMbpsRef.current, peerCount, record.networkLevel);
+    record.configuredPeerCount = peerCount;
     const callTrack = call.receiver.track;
     if (!record.callAudio || !(record.callAudio.srcObject instanceof MediaStream) || record.callAudio.srcObject.getAudioTracks()[0]?.id !== callTrack.id) {
       record.callAudio?.remove();
@@ -2106,7 +2240,7 @@ export default function RoomApp() {
     const existing = peersRef.current.get(peerId);
     if (existing && existing.pc.connectionState !== 'closed' && existing.pc.connectionState !== 'failed') return existing;
     if (existing) destroyPeer(peerId);
-    const pc = new RTCPeerConnection({ iceServers: iceServersRef.current as RTCIceServer[], bundlePolicy: 'max-bundle', iceCandidatePoolSize: 4 });
+    const pc = new RTCPeerConnection({ iceServers: iceServersRef.current as RTCIceServer[], bundlePolicy: 'max-bundle', iceCandidatePoolSize: 2 });
     const record: PeerRecord = {
       id: peerId,
       pc,
@@ -2123,6 +2257,11 @@ export default function RoomApp() {
       screenStream: new MediaStream(),
       recoveryTimer: null,
       recoveryAttempts: 0,
+      networkLevel: 0,
+      poorNetworkSamples: 0,
+      healthyNetworkSamples: 0,
+      lastNetworkSnapshot: null,
+      configuredPeerCount: 0,
       makingOffer: false,
       ignoreOffer: false,
       polite: selfIdRef.current.localeCompare(peerId) > 0
@@ -2185,10 +2324,14 @@ export default function RoomApp() {
       iceServersRef.current = message.iceServers;
       setTurnAvailable(hasTurnServer(message.iceServers));
       if (message.resumed) {
-        for (const peerId of [...peersRef.current.keys()]) destroyPeer(peerId);
+        const currentPeerIds = new Set(message.participants.filter(participant => participant.id !== message.selfId && participant.connected).map(participant => participant.id));
+        for (const peerId of [...peersRef.current.keys()]) if (!currentPeerIds.has(peerId)) destroyPeer(peerId);
       }
       selfIdRef.current = message.selfId;
       setSelfId(message.selfId);
+      hasJoinedRoomRef.current = true;
+      roomRecoveryDeadlineRef.current = 0;
+      setSignalingConnected(true);
       ownChatMessageIdsRef.current = new Set([
         ...ownChatMessageIdsRef.current,
         ...loadOwnChatMessageIds(message.roomId)
@@ -2208,18 +2351,22 @@ export default function RoomApp() {
       }
       const activeSession = sessionRef.current;
       if (activeSession) {
-        const nextSession = { ...activeSession, invite: message.invite, joinCode: message.joinCode, joinByCode: false, participantId: message.selfId };
+        const nextSession = { ...activeSession, invite: message.invite, joinCode: message.joinCode, joinByCode: false, participantId: message.selfId, resumeToken: message.resumeToken };
         sessionRef.current = nextSession;
         setSession(nextSession);
         if (nextSession.ownerKey) writeStorage('localStorage', OWNER_ROOM_KEY, JSON.stringify(nextSession));
         else {
-          writeStorage('sessionStorage', `${PEER_KEY_PREFIX}${message.roomId}`, message.selfId);
-          history.replaceState(null, '', `${location.pathname}#${new URLSearchParams({ room: message.invite.roomId, key: message.invite.token })}`);
+          savePeerResumeCredential(message.roomId, message.selfId, message.resumeToken);
+          const currentHistoryState = history.state && typeof history.state === 'object' ? history.state : {};
+          history.replaceState(currentHistoryState, '', `${location.pathname}#${new URLSearchParams({ room: message.invite.roomId, key: message.invite.token })}`);
         }
       }
       await Promise.all(message.participants
         .filter(participant => participant.id !== message.selfId && participant.connected)
-        .map(participant => createPeer(participant.id, true)));
+        .map(async participant => {
+          const peer = await createPeer(participant.id, true);
+          if (message.resumed && peer.pc.connectionState === 'disconnected') await restartPeerIce(peer);
+        }));
       updateSelfMediaState();
       flushPendingChat();
       return;
@@ -2319,6 +2466,9 @@ export default function RoomApp() {
     }
     if (message.type === 'pong') return;
     if (message.type === 'room-closed') {
+      setSignalingConnected(false);
+      hasJoinedRoomRef.current = false;
+      roomRecoveryDeadlineRef.current = 0;
       if (sessionRef.current?.ownerKey) removeStorage('localStorage', OWNER_ROOM_KEY);
       if (sessionRef.current?.invite.roomId) removeStorage('sessionStorage', `${CHAT_OWN_IDS_PREFIX}${sessionRef.current.invite.roomId}`);
       failPendingChat();
@@ -2329,9 +2479,21 @@ export default function RoomApp() {
       return;
     }
     if (message.type === 'error') {
+      if (message.code === 'ROOM_NOT_FOUND' && hasJoinedRoomRef.current && !sessionRef.current?.ownerKey) {
+        if (!roomRecoveryDeadlineRef.current) roomRecoveryDeadlineRef.current = Date.now() + ROOM_RECOVERY_WINDOW_MS;
+        if (Date.now() < roomRecoveryDeadlineRef.current) {
+          setSignalingConnected(false);
+          setError('');
+          if (socketRef.current?.readyState === WebSocket.OPEN) socketRef.current.close(4103, 'Waiting for room recovery');
+          return;
+        }
+      }
       setError(message.message);
       const fatalBeforeJoining = !selfIdRef.current;
       if (fatalBeforeJoining || message.code === 'ROOM_NOT_FOUND' || message.code === 'HOST_OFFLINE') {
+        setSignalingConnected(false);
+        hasJoinedRoomRef.current = false;
+        roomRecoveryDeadlineRef.current = 0;
         setMode('error');
         if (sessionRef.current?.ownerKey) removeStorage('localStorage', OWNER_ROOM_KEY);
         if (message.code === 'ROOM_NOT_FOUND' && sessionRef.current?.invite.roomId) {
@@ -2339,39 +2501,48 @@ export default function RoomApp() {
         }
       }
     }
-  }, [acknowledgeChatDelivery, appendMessage, createPeer, destroyPeer, failPendingChat, flushPendingChat, playSound, settleDepartedChatRecipient, syncPeerMedia, systemMessage, updateParticipant, updateSelfMediaState]);
+  }, [acknowledgeChatDelivery, appendMessage, createPeer, destroyPeer, failPendingChat, flushPendingChat, playSound, restartPeerIce, settleDepartedChatRecipient, syncPeerMedia, systemMessage, updateParticipant, updateSelfMediaState]);
 
   useEffect(() => {
-    if (!session) return;
-    disposedRef.current = false;
+    if (!session || !profileStorageReady) return;
+    let disposed = false;
     let currentSocket: WebSocket | null = null;
     let attempts = 0;
     let pingTimer: number | null = null;
 
     const connect = () => {
-      if (disposedRef.current) return;
+      if (disposed) return;
       if (currentSocket && (currentSocket.readyState === WebSocket.OPEN || currentSocket.readyState === WebSocket.CONNECTING)) return;
       setMode(current => current === 'connected' ? current : 'connecting');
       const socket = new WebSocket(signalUrl());
       currentSocket = socket;
       socketRef.current = socket;
       socket.onopen = () => {
-        attempts = 0;
+        if (disposed || currentSocket !== socket) {
+          socket.close(1000, 'Stale session');
+          return;
+        }
+        setSignalingConnected(false);
         const current = sessionRef.current;
         if (!current) return;
         if (current.ownerKey) {
           send(socket, { type: 'create-group-room', ...current.invite, ownerKey: current.ownerKey, participantId: current.participantId, profile: profileRef.current, maxParticipants: current.maxParticipants ?? maxParticipants });
         } else if (current.joinByCode && current.joinCode) {
-          const participantId = current.participantId || readStorage('sessionStorage', `${PEER_KEY_PREFIX}${current.joinCode}`) || undefined;
-          send(socket, { type: 'join-group-room-code', code: current.joinCode, participantId, profile: profileRef.current });
+          const stored = loadPeerResumeCredential(current.joinCode);
+          const participantId = current.participantId || stored?.participantId || undefined;
+          const resumeToken = current.resumeToken || (stored?.participantId === participantId ? stored?.resumeToken : '') || undefined;
+          send(socket, { type: 'join-group-room-code', code: current.joinCode, participantId, resumeToken, profile: profileRef.current });
         } else {
-          const participantId = current.participantId || readStorage('sessionStorage', `${PEER_KEY_PREFIX}${current.invite.roomId}`) || undefined;
-          send(socket, { type: 'join-group-room', ...current.invite, participantId, profile: profileRef.current });
+          const stored = loadPeerResumeCredential(current.invite.roomId);
+          const participantId = current.participantId || stored?.participantId || undefined;
+          const resumeToken = current.resumeToken || (stored?.participantId === participantId ? stored?.resumeToken : '') || undefined;
+          send(socket, { type: 'join-group-room', ...current.invite, participantId, resumeToken, profile: profileRef.current });
         }
         if (pingTimer !== null) window.clearInterval(pingTimer);
         pingTimer = window.setInterval(() => send(socket, { type: 'ping', at: Date.now() }), 3_000);
       };
       socket.onmessage = event => {
+        if (disposed || currentSocket !== socket) return;
         let message: RoomMessage;
         try {
           message = JSON.parse(String(event.data)) as RoomMessage;
@@ -2379,18 +2550,24 @@ export default function RoomApp() {
           setError('A sala enviou uma resposta inválida.');
           return;
         }
+        if (message.type === 'room-ready') attempts = 0;
         void handleRoomMessage(message).catch(() => {
           setError('Não foi possível sincronizar a chamada. A conexão será refeita automaticamente.');
           if (socket.readyState === WebSocket.OPEN) socket.close(4102, 'Room synchronization failed');
         });
       };
-      socket.onerror = () => setError('O servidor está demorando para responder…');
+      socket.onerror = () => {
+        if (disposed || currentSocket !== socket) return;
+        setSignalingConnected(false);
+        if (!hasJoinedRoomRef.current) setError('O servidor está demorando para responder…');
+      };
       socket.onclose = event => {
         if (pingTimer !== null) window.clearInterval(pingTimer);
         if (socketRef.current === socket) socketRef.current = null;
         if (currentSocket === socket) currentSocket = null;
-        if (disposedRef.current || event.code === 1000) return;
-        setMode('connecting');
+        if (disposed || event.code === 1000) return;
+        setSignalingConnected(false);
+        setMode(currentMode => currentMode === 'connected' && hasJoinedRoomRef.current ? currentMode : 'connecting');
         reconnectTimerRef.current = window.setTimeout(connect, Math.min(7_000, 600 * 2 ** Math.min(attempts++, 4)));
       };
     };
@@ -2401,7 +2578,7 @@ export default function RoomApp() {
     };
     connect();
     return () => {
-      disposedRef.current = true;
+      disposed = true;
       reconnectNowRef.current = null;
       if (pingTimer !== null) window.clearInterval(pingTimer);
       if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
@@ -2410,7 +2587,7 @@ export default function RoomApp() {
     };
   // Os dados da sessão podem ser enriquecidos após entrar por código curto. A conexão
   // deve sobreviver a essa atualização; ela só nasce ou termina com a própria sessão.
-  }, [handleRoomMessage, Boolean(session)]);
+  }, [handleRoomMessage, Boolean(session), profileStorageReady]);
 
   useEffect(() => {
     if (!session) return;
@@ -2432,18 +2609,48 @@ export default function RoomApp() {
   useEffect(() => {
     if (!session || mode !== 'connected') {
       setMediaLatency(null);
+      setMediaPacketLoss(null);
+      setAdaptiveNetworkLevel(0);
       return;
     }
     let cancelled = false;
     const sample = async () => {
       const connected = [...peersRef.current.values()].filter(peer => peer.pc.connectionState === 'connected');
       if (!connected.length) {
-        if (!cancelled) setMediaLatency(null);
+        if (!cancelled) {
+          setMediaLatency(null);
+          setMediaPacketLoss(null);
+          setAdaptiveNetworkLevel(0);
+        }
         return;
       }
-      const values = await Promise.all(connected.map(peer => readPeerRttMs(peer.pc).catch(() => null)));
-      const valid = values.filter((value): value is number => value !== null);
-      if (!cancelled) setMediaLatency(valid.length ? Math.max(...valid) : null);
+      const samples = await Promise.all(connected.map(async record => ({
+        record,
+        metrics: await readPeerNetworkMetrics(record).catch(() => null)
+      })));
+      if (cancelled) return;
+      const metrics = samples.map(sampleEntry => sampleEntry.metrics).filter((value): value is PeerNetworkMetrics => Boolean(value));
+      const latencies = metrics.map(value => value.rttMs).filter((value): value is number => value !== null);
+      const losses = metrics.map(value => value.packetLoss).filter((value): value is number => value !== null);
+      setMediaLatency(latencies.length ? Math.max(...latencies) : null);
+      setMediaPacketLoss(losses.length ? Math.max(...losses) : null);
+
+      if (!adaptiveBitrateRef.current || !sharingRef.current) {
+        setAdaptiveNetworkLevel(0);
+        return;
+      }
+      const activeResolution = automaticQualityRef.current ? 720 : resolutionRef.current;
+      const activeFps = automaticQualityRef.current ? 30 : fpsRef.current;
+      const peerCount = Math.max(1, connected.length);
+      await Promise.all(samples.map(async ({ record, metrics: peerMetrics }) => {
+        if (!peerMetrics || !record.screenVideoSender?.track) return;
+        const currentTarget = adaptiveTargetBitrateMbps(activeResolution, activeFps, peerCount, record.networkLevel);
+        const changed = updateAdaptiveNetworkLevel(record, peerMetrics, currentTarget);
+        if (!changed && record.configuredPeerCount === peerCount) return;
+        await configureScreenSender(record.screenVideoSender, activeResolution, activeFps, true, bitrateMbpsRef.current, peerCount, record.networkLevel);
+        record.configuredPeerCount = peerCount;
+      }));
+      setAdaptiveNetworkLevel(Math.max(0, ...connected.map(record => record.networkLevel)));
     };
     void sample();
     const timer = window.setInterval(() => void sample(), 2_000);
@@ -2524,13 +2731,20 @@ export default function RoomApp() {
         const context = new AudioContext();
         const source = context.createMediaStreamSource(sourceStream);
         const gain = context.createGain();
+        const limiter = context.createDynamicsCompressor();
         const destination = context.createMediaStreamDestination();
         const analyser = context.createAnalyser();
         analyser.fftSize = 256;
         gain.gain.value = settings.inputVolume / 100;
+        limiter.threshold.value = -3;
+        limiter.knee.value = 4;
+        limiter.ratio.value = 12;
+        limiter.attack.value = .003;
+        limiter.release.value = .16;
         source.connect(gain);
-        gain.connect(destination);
-        gain.connect(analyser);
+        gain.connect(limiter);
+        limiter.connect(destination);
+        limiter.connect(analyser);
         audioContextRef.current = context;
         microphoneGainRef.current = gain;
         analyserRef.current = analyser;
@@ -2541,6 +2755,7 @@ export default function RoomApp() {
       }
       localMicrophoneTrackRef.current = outboundTrack;
       outboundTrack.enabled = true;
+      microphoneRecoveryRequestedRef.current = false;
       setMicrophoneEnabled(true);
       microphoneEnabledRef.current = true;
       await Promise.all([...peersRef.current.values()].map(peer => peer.callAudioSender?.replaceTrack(outboundTrack).catch(() => undefined)));
@@ -2554,7 +2769,32 @@ export default function RoomApp() {
         microphoneEnabledRef.current = false;
         setMicrophoneEnabled(false);
         updateSelfMediaState({ microphoneEnabled: false });
-        if (wasEnabled && !endingCallRef.current) playSound('microphoneMuted');
+        if (wasEnabled && !endingCallRef.current && sessionRef.current) {
+          microphoneRecoveryRequestedRef.current = true;
+          playSound('microphoneMuted');
+          if (microphoneRecoveryTimerRef.current !== null) window.clearTimeout(microphoneRecoveryTimerRef.current);
+          microphoneRecoveryTimerRef.current = window.setTimeout(() => {
+            microphoneRecoveryTimerRef.current = null;
+            if (!microphoneRecoveryRequestedRef.current || endingCallRef.current || !sessionRef.current) return;
+            void navigator.mediaDevices.enumerateDevices().catch(() => [] as MediaDeviceInfo[]).then(devices => {
+              if (!microphoneRecoveryRequestedRef.current || endingCallRef.current || !sessionRef.current) return;
+              const settings = audioSettingsRef.current;
+              const selectedInputMissing = Boolean(settings.inputDeviceId)
+                && !devices.some(device => device.kind === 'audioinput' && device.deviceId === settings.inputDeviceId);
+              if (selectedInputMissing) {
+                const next = { ...settings, inputDeviceId: '' };
+                audioSettingsRef.current = next;
+                setAudioSettings(next);
+              }
+              microphoneRecoveryRequestedRef.current = false;
+              void acquireMicrophoneRef.current(true).then(recovered => {
+                setVoiceSettingFeedback(recovered
+                  ? 'O microfone foi reconectado ao dispositivo de entrada disponível.'
+                  : 'O microfone foi desconectado. Selecione um dispositivo de entrada para reativá-lo.');
+              });
+            });
+          }, 400);
+        }
       }, { once: true });
       return true;
     } catch {
@@ -2571,6 +2811,8 @@ export default function RoomApp() {
     }
   }, [disposeMicrophonePipeline, playSound, updateSelfMediaState, voiceSettingSupport]);
 
+  acquireMicrophoneRef.current = acquireMicrophone;
+
   const toggleMicrophone = useCallback(async () => {
     if (!localMicrophoneTrackRef.current || localMicrophoneTrackRef.current.readyState !== 'live') {
       const enabled = await acquireMicrophone();
@@ -2585,8 +2827,72 @@ export default function RoomApp() {
     playSound(next ? 'microphoneEnabled' : 'microphoneMuted');
   }, [acquireMicrophone, playSound, updateSelfMediaState]);
 
+  useEffect(() => {
+    const mediaDevices = navigator.mediaDevices;
+    if (!mediaDevices?.addEventListener || !mediaDevices.enumerateDevices) return undefined;
+    let timer: number | null = null;
+    let disposed = false;
+    const synchronizeDevices = async () => {
+      const recoverActiveMicrophone = (microphoneEnabledRef.current && Boolean(localMicrophoneTrackRef.current)) || microphoneRecoveryRequestedRef.current;
+      const devices = await mediaDevices.enumerateDevices().catch(() => [] as MediaDeviceInfo[]);
+      if (disposed) return;
+      setAudioDevices(devices);
+      const settings = audioSettingsRef.current;
+      const inputMissing = Boolean(settings.inputDeviceId) && !devices.some(device => device.kind === 'audioinput' && device.deviceId === settings.inputDeviceId);
+      const outputMissing = Boolean(settings.outputDeviceId) && !devices.some(device => device.kind === 'audiooutput' && device.deviceId === settings.outputDeviceId);
+      const needsInputRecovery = inputMissing || microphoneRecoveryRequestedRef.current;
+      if (!needsInputRecovery && !outputMissing) return;
+
+      const next = {
+        ...settings,
+        inputDeviceId: inputMissing ? '' : settings.inputDeviceId,
+        outputDeviceId: outputMissing ? '' : settings.outputDeviceId
+      };
+      audioSettingsRef.current = next;
+      setAudioSettings(next);
+      if (outputMissing) {
+        void setInterfaceSoundOutputDevice('');
+        for (const peer of peersRef.current.values()) {
+          for (const audioElement of [peer.callAudio, peer.screenAudio]) {
+            const sinkable = audioElement as (HTMLAudioElement & { setSinkId?: (deviceId: string) => Promise<void> }) | null;
+            if (sinkable?.setSinkId) void sinkable.setSinkId('').catch(() => undefined);
+          }
+        }
+      }
+      if (needsInputRecovery && recoverActiveMicrophone) {
+        microphoneRecoveryRequestedRef.current = false;
+        if (microphoneRecoveryTimerRef.current !== null) {
+          window.clearTimeout(microphoneRecoveryTimerRef.current);
+          microphoneRecoveryTimerRef.current = null;
+        }
+        void acquireMicrophone(true).then(recovered => {
+          if (recovered) setVoiceSettingFeedback('O microfone foi reconectado ao dispositivo de entrada disponível.');
+        });
+      }
+      setVoiceSettingFeedback('Um dispositivo de áudio foi removido; o ScreenLink selecionou o dispositivo padrão disponível.');
+    };
+    const handleDeviceChange = () => {
+      if (timer !== null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        timer = null;
+        void synchronizeDevices();
+      }, 250);
+    };
+    mediaDevices.addEventListener('devicechange', handleDeviceChange);
+    return () => {
+      disposed = true;
+      if (timer !== null) window.clearTimeout(timer);
+      mediaDevices.removeEventListener('devicechange', handleDeviceChange);
+    };
+  }, [acquireMicrophone]);
+
   const applyScreenEncoding = useCallback(async (nextResolution: Resolution, nextFps: FrameRate, adaptive = adaptiveBitrateRef.current, manualMbps = bitrateMbpsRef.current) => {
-    await Promise.all([...peersRef.current.values()].map(peer => configureScreenSender(peer.screenVideoSender, nextResolution, nextFps, adaptive, manualMbps)));
+    const peers = [...peersRef.current.values()];
+    const peerCount = Math.max(1, peers.filter(peer => peer.pc.connectionState !== 'closed' && peer.pc.connectionState !== 'failed').length);
+    await Promise.all(peers.map(async peer => {
+      await configureScreenSender(peer.screenVideoSender, nextResolution, nextFps, adaptive, manualMbps, peerCount, adaptive ? peer.networkLevel : 0);
+      peer.configuredPeerCount = peerCount;
+    }));
   }, []);
 
   const stopScreenShare = useCallback(() => {
@@ -2607,6 +2913,11 @@ export default function RoomApp() {
   useEffect(() => {
     if (mode !== 'error') return;
     mediaRequestEpochRef.current += 1;
+    microphoneRecoveryRequestedRef.current = false;
+    if (microphoneRecoveryTimerRef.current !== null) {
+      window.clearTimeout(microphoneRecoveryTimerRef.current);
+      microphoneRecoveryTimerRef.current = null;
+    }
     microphoneRequestIdRef.current += 1;
     screenShareRequestIdRef.current += 1;
     microphonePendingRef.current = false;
@@ -2672,6 +2983,10 @@ export default function RoomApp() {
       updateSelfMediaState({ sharing: true });
       playSound('screenStarted');
       video.addEventListener('ended', stopScreenShare, { once: true });
+      screenAudio?.addEventListener('ended', () => {
+        if (localScreenStreamRef.current !== stream) return;
+        for (const peer of peersRef.current.values()) void peer.screenAudioSender?.replaceTrack(null).catch(() => undefined);
+      }, { once: true });
     } catch (screenError) {
       if (screenError instanceof DOMException && screenError.name === 'NotAllowedError') return;
       setError('Não foi possível iniciar o compartilhamento. Tente escolher novamente a tela, janela ou aba.');
@@ -2726,6 +3041,8 @@ export default function RoomApp() {
   }, []);
 
   useEffect(() => () => {
+    microphoneRecoveryRequestedRef.current = false;
+    if (microphoneRecoveryTimerRef.current !== null) window.clearTimeout(microphoneRecoveryTimerRef.current);
     for (const peerId of [...peersRef.current.keys()]) destroyPeer(peerId);
     pendingChatMessagesRef.current.clear();
     localScreenStreamRef.current?.getTracks().forEach(track => track.stop());
@@ -2783,6 +3100,9 @@ export default function RoomApp() {
     void unlockInterfaceSounds();
     const invite = createPrivateRoom();
     const next: Session = { invite, ownerKey: randomSecret(), maxParticipants };
+    hasJoinedRoomRef.current = false;
+    roomRecoveryDeadlineRef.current = 0;
+    setSignalingConnected(false);
     mediaRequestEpochRef.current += 1;
     sessionRef.current = next;
     writeStorage('localStorage', OWNER_ROOM_KEY, JSON.stringify(next));
@@ -2803,6 +3123,9 @@ export default function RoomApp() {
       return;
     }
     setError('');
+    hasJoinedRoomRef.current = false;
+    roomRecoveryDeadlineRef.current = 0;
+    setSignalingConnected(false);
     let nextSession: Session;
     if (entry.kind === 'invite') {
       history.replaceState(null, '', `${location.pathname}#${new URLSearchParams({ room: entry.invite.roomId, key: entry.invite.token })}`);
@@ -2820,6 +3143,11 @@ export default function RoomApp() {
 
   function exitRoom(closeRequested: boolean) {
     mediaRequestEpochRef.current += 1;
+    microphoneRecoveryRequestedRef.current = false;
+    if (microphoneRecoveryTimerRef.current !== null) {
+      window.clearTimeout(microphoneRecoveryTimerRef.current);
+      microphoneRecoveryTimerRef.current = null;
+    }
     microphoneRequestIdRef.current += 1;
     screenShareRequestIdRef.current += 1;
     microphonePendingRef.current = false;
@@ -2832,9 +3160,12 @@ export default function RoomApp() {
     const connectedCount = Object.values(participantsRef.current).filter(participant => participant.connected).length;
     const closeForEveryone = closeRequested || (Boolean(sessionRef.current?.ownerKey) && connectedCount <= 1);
     const activeRoomId = sessionRef.current?.invite.roomId;
+    const activeJoinCode = sessionRef.current?.joinCode;
     send(socketRef.current, { type: closeForEveryone ? 'close-group-room' : 'leave-group-room' });
     if (closeForEveryone) removeStorage('localStorage', OWNER_ROOM_KEY);
     if (closeForEveryone && activeRoomId) removeStorage('sessionStorage', `${CHAT_OWN_IDS_PREFIX}${activeRoomId}`);
+    if (activeRoomId) removeStorage('sessionStorage', `${PEER_KEY_PREFIX}${activeRoomId}`);
+    if (activeJoinCode) removeStorage('sessionStorage', `${PEER_KEY_PREFIX}${activeJoinCode}`);
     socketRef.current?.close(1000, closeForEveryone ? 'Room closed' : 'Participant left');
     for (const peerId of [...peersRef.current.keys()]) destroyPeer(peerId);
     stopScreenShare();
@@ -2851,6 +3182,9 @@ export default function RoomApp() {
     setParticipantVolumes({});
     setSelfId('');
     selfIdRef.current = '';
+    hasJoinedRoomRef.current = false;
+    roomRecoveryDeadlineRef.current = 0;
+    setSignalingConnected(false);
     setLeaderId('');
     pendingChatMessagesRef.current.clear();
     seenMessageIdsRef.current.clear();
@@ -2936,6 +3270,13 @@ export default function RoomApp() {
   function changeAdaptiveBitrate(enabled: boolean) {
     adaptiveBitrateRef.current = enabled;
     setAdaptiveBitrate(enabled);
+    for (const peer of peersRef.current.values()) {
+      peer.networkLevel = 0;
+      peer.poorNetworkSamples = 0;
+      peer.healthyNetworkSamples = 0;
+      peer.lastNetworkSnapshot = null;
+    }
+    setAdaptiveNetworkLevel(0);
     const nextResolution = automaticQualityRef.current ? 720 : resolutionRef.current;
     const nextFps = automaticQualityRef.current ? 30 : fpsRef.current;
     void applyScreenEncoding(nextResolution, nextFps, enabled, bitrateMbpsRef.current);
@@ -3324,12 +3665,14 @@ export default function RoomApp() {
   const roomLabel = session ? (session.joinCode?.toUpperCase() || '••••••') : '';
   const remoteParticipantCount = remoteParticipants.length;
   const connectedPeerCount = [...peersRef.current.values()].filter(peer => peer.pc.connectionState === 'connected').length;
-  const connectionQuality = mode !== 'connected' || !connectedPeerCount || mediaLatency === null
+  const connectionQuality = mode !== 'connected' || !signalingConnected || !connectedPeerCount || mediaLatency === null
     ? 'waiting'
-    : mediaLatency > 450 ? 'blocked' : mediaLatency > 180 ? 'limited' : mediaLatency > 90 ? 'good' : 'excellent';
+    : mediaLatency > 450 || (mediaPacketLoss ?? 0) >= .08 ? 'blocked' : mediaLatency > 180 || (mediaPacketLoss ?? 0) >= .03 ? 'limited' : mediaLatency > 90 || (mediaPacketLoss ?? 0) >= .015 ? 'good' : 'excellent';
   const latencyLabel = mediaLatency === null ? '—' : String(mediaLatency);
+  const packetLossLabel = mediaPacketLoss === null ? '—' : `${(mediaPacketLoss * 100).toFixed(mediaPacketLoss >= .1 ? 0 : 1)}%`;
   const connectionStatusLabel = mode !== 'connected'
     ? 'Conectando'
+    : !signalingConnected ? 'Reconectando'
     : connectedPeerCount
       ? mediaLatency === null ? 'P2P' : `${latencyLabel} ms`
       : remoteParticipantCount ? 'Conectando P2P' : 'P2P';
@@ -3343,7 +3686,7 @@ export default function RoomApp() {
   const activeChat = chatOpen;
   const activeResolution = automaticQuality ? 720 : resolution;
   const activeFps = automaticQuality ? 30 : fps;
-  const effectiveBitrateMbps = adaptiveBitrate ? recommendedBitrateMbps(activeResolution, activeFps) : bitrateMbps;
+  const effectiveBitrateMbps = adaptiveBitrate ? adaptiveTargetBitrateMbps(activeResolution, activeFps, Math.max(1, connectedPeerCount), adaptiveNetworkLevel) : bitrateMbps;
   const screenShareSupported = typeof navigator.mediaDevices?.getDisplayMedia === 'function';
   const chatCanSend = Boolean(session && selfId && mode !== 'error');
   const chatPlaceholder = !session
@@ -3461,6 +3804,78 @@ export default function RoomApp() {
     }
   }, [mobileOverlayKey, mobileOverlayMarker, phone]);
 
+  useEffect(() => {
+    if (!phone || !mobileOverlayKey || mobileOverlayKey === 'chat') return undefined;
+    const sheetSelector = {
+      qr: '.qr-modal',
+      profile: '.profile-popover',
+      'chat-settings': '.chat-settings-popover',
+      emoji: '.emoji-picker',
+      dock: '.dock-popover',
+      controls: '.control-panel'
+    }[mobileOverlayKey];
+    const sheet = sheetSelector
+      ? document.querySelector<HTMLElement>(`${sheetSelector}[data-mobile-sheet="true"]`)
+      : null;
+    const app = roomAppRef.current;
+    if (!sheet || !app) return undefined;
+
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const obscured: Array<{ element: HTMLElement; inert: boolean; ariaHidden: string | null }> = [];
+    let branch: HTMLElement | null = sheet;
+    while (branch && branch !== app) {
+      const parentElement: HTMLElement | null = branch.parentElement;
+      if (!parentElement) break;
+      for (const sibling of Array.from(parentElement.children)) {
+        if (!(sibling instanceof HTMLElement) || sibling === branch || sibling.matches('.mobile-sheet-backdrop, .mobile-overlay-backdrop')) continue;
+        obscured.push({ element: sibling, inert: sibling.inert, ariaHidden: sibling.getAttribute('aria-hidden') });
+        sibling.inert = true;
+        sibling.setAttribute('aria-hidden', 'true');
+      }
+      branch = parentElement;
+    }
+
+    const hadTabIndex = sheet.hasAttribute('tabindex');
+    if (!hadTabIndex) sheet.tabIndex = -1;
+    const focusFrame = window.requestAnimationFrame(() => sheet.focus({ preventScroll: true }));
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        dismissMobileOverlayRef.current();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const focusable = [...sheet.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [href], [tabindex]:not([tabindex="-1"])')]
+        .filter(element => !element.inert && element.getClientRects().length > 0);
+      if (!focusable.length) {
+        event.preventDefault();
+        sheet.focus({ preventScroll: true });
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === sheet)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.removeEventListener('keydown', onKeyDown);
+      for (const { element, inert, ariaHidden } of obscured) {
+        element.inert = inert;
+        if (ariaHidden === null) element.removeAttribute('aria-hidden');
+        else element.setAttribute('aria-hidden', ariaHidden);
+      }
+      if (!hadTabIndex) sheet.removeAttribute('tabindex');
+      if (previouslyFocused?.isConnected) previouslyFocused.focus({ preventScroll: true });
+    };
+  }, [mobileOverlayKey, phone]);
+
   const chatPanel = (
     <div className={`chat-panel unified-chat-panel ${emojiOpen ? 'is-emoji-open' : ''}`} style={{ '--chat-own-bubble': chatAppearance.ownBubble, '--chat-other-bubble': chatAppearance.otherBubble, '--chat-name-color': chatAppearance.nameColor } as React.CSSProperties}>
       <div className="chat-log" ref={chatLogRef} role="log" aria-live="polite" aria-relevant="additions text" aria-label="Mensagens da chamada" tabIndex={0} onScroll={event => {
@@ -3496,7 +3911,7 @@ export default function RoomApp() {
         <textarea ref={chatInputRef} aria-label="Escrever mensagem" title={phone ? 'Enter quebra a linha' : 'Enter envia · Shift+Enter quebra a linha'} enterKeyHint={phone ? 'enter' : 'send'} rows={1} value={chatValue} onFocus={() => setChatInputFocused(true)} onBlur={() => window.setTimeout(() => setChatInputFocused(document.activeElement === chatInputRef.current), 0)} onChange={event => { setChatValue(event.target.value); resizeChatInput(event.currentTarget); }} onKeyDown={event => { if (!phone && event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={chatPlaceholder} maxLength={1000} disabled={!chatCanSend}/>
         <button type="submit" onPointerDown={event => { if (phone) event.preventDefault(); }} disabled={!normalizeChatText(chatValue) || !chatCanSend} aria-label="Enviar mensagem"><Icon name="send"/></button>
       </form>
-      {emojiOpen && <section ref={emojiPanelRef} id="chat-emoji-picker" className="emoji-picker" aria-label="Seletor de emojis" {...emojiSheetGesture}>
+      {emojiOpen && <section ref={emojiPanelRef} id="chat-emoji-picker" className="emoji-picker" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-label="Seletor de emojis" {...emojiSheetGesture}>
         <div className="emoji-picker-handle" aria-hidden="true"/>
         <label className="emoji-picker-search"><Icon name="search"/><input type="search" value={emojiSearch} onChange={event => setEmojiSearch(event.currentTarget.value)} placeholder="Buscar emoji" aria-label="Buscar emoji"/></label>
         <nav className="emoji-picker-categories" role="tablist" aria-label="Categorias de emojis">
@@ -3584,7 +3999,7 @@ export default function RoomApp() {
         </section>
         {screenShareSupported && <section className="screen-menu-section bitrate-menu-section">
           <header><strong>Bitrate de envio</strong><small>ATÉ {formatBitrate(effectiveBitrateMbps)}</small></header>
-          <button className={`compact-toggle ${adaptiveBitrate ? 'is-active' : ''}`} type="button" role="switch" aria-checked={adaptiveBitrate} onClick={() => changeAdaptiveBitrate(!adaptiveBitrate)}><span><strong>Bitrate adaptativo</strong><small>Ajusta o limite ao perfil de vídeo</small></span><MotionSwitch on={adaptiveBitrate} compact/></button>
+          <button className={`compact-toggle ${adaptiveBitrate ? 'is-active' : ''}`} type="button" role="switch" aria-checked={adaptiveBitrate} onClick={() => changeAdaptiveBitrate(!adaptiveBitrate)}><span><strong>Bitrate adaptativo</strong><small>Reage à rede e divide o upload entre os pares</small></span><MotionSwitch on={adaptiveBitrate} compact/></button>
           <div className={`bitrate-control ${adaptiveBitrate ? 'is-disabled' : ''}`}><label htmlFor="popover-bitrate"><strong>Limite manual</strong><small>0,5 a 20 Mb/s</small></label><input id="popover-bitrate" aria-label="Bitrate manual do compartilhamento" type="range" min={MIN_BITRATE_MBPS} max={MAX_BITRATE_MBPS} step="0.5" value={bitrateMbps} disabled={adaptiveBitrate} onChange={event => changeBitrate(Number(event.target.value))}/><output>{formatBitrate(bitrateMbps)}</output></div>
         </section>}
       </div>
@@ -3646,13 +4061,13 @@ export default function RoomApp() {
           </div>
           <div className="sidebar-bitrate-settings">
             <div className="subsection-heading"><strong>Transmissão</strong><small>ATÉ {formatBitrate(effectiveBitrateMbps)}</small></div>
-            <button className={`toggle-row bitrate-toggle ${adaptiveBitrate ? 'is-active' : ''}`} type="button" role="switch" aria-checked={adaptiveBitrate} onClick={() => changeAdaptiveBitrate(!adaptiveBitrate)}><Icon name="link"/><span className="toggle-row-copy"><strong>Bitrate adaptativo</strong><small>O WebRTC reduz o envio quando a rede apertar</small></span><MotionSwitch on={adaptiveBitrate}/></button>
+            <button className={`toggle-row bitrate-toggle ${adaptiveBitrate ? 'is-active' : ''}`} type="button" role="switch" aria-checked={adaptiveBitrate} onClick={() => changeAdaptiveBitrate(!adaptiveBitrate)}><Icon name="link"/><span className="toggle-row-copy"><strong>Bitrate adaptativo</strong><small>Ajusta bitrate, escala e FPS conforme perda, latência e participantes</small></span><MotionSwitch on={adaptiveBitrate}/></button>
             <div className={`bitrate-control sidebar-bitrate-control ${adaptiveBitrate ? 'is-disabled' : ''}`}><label htmlFor="sidebar-bitrate"><strong>Limite manual</strong><small>Disponível com o modo adaptativo desligado</small></label><input id="sidebar-bitrate" aria-label="Limite manual de bitrate" type="range" min={MIN_BITRATE_MBPS} max={MAX_BITRATE_MBPS} step="0.5" value={bitrateMbps} disabled={adaptiveBitrate} onChange={event => changeBitrate(Number(event.target.value))}/><output>{formatBitrate(bitrateMbps)}</output></div>
           </div>
         </section>
         <section className="panel-section interface-motion-section">
           <div className="section-heading"><h3>Interface</h3><small>ESTE DISPOSITIVO</small></div>
-          <button className={`toggle-row ${animationsEnabled ? 'is-active' : ''}`} type="button" role="switch" aria-checked={animationsEnabled} onClick={() => setAnimationsEnabled(enabled => !enabled)}><Icon name="motion"/><span className="toggle-row-copy"><strong>Animações e movimento</strong><small>{animationsEnabled ? 'Fundo, mascote e transições suaves' : 'Efeitos visuais pausados'}</small></span><MotionSwitch on={animationsEnabled}/></button>
+          <button className={`toggle-row ${animationsEnabled ? 'is-active' : ''}`} type="button" role="switch" aria-checked={animationsEnabled} onClick={() => setAnimationsEnabled(enabled => !enabled)}><Icon name="motion"/><span className="toggle-row-copy"><strong>Animações e movimento</strong><small>{animationsEnabled ? 'Mascote e transições da interface' : 'Efeitos da interface pausados'}</small></span><MotionSwitch on={animationsEnabled}/></button>
           <button className="interface-action-row" type="button" onClick={reopenOnboarding}><Icon name="guide"/><span><strong>Rever tutorial</strong><small>Conheça chamadas, chat e compartilhamentos</small></span><Icon name="chevron"/></button>
           {desktopApp && desktopUpdate && <div className="desktop-update-settings">
             <div><Icon name={desktopUpdate.status === 'downloaded' ? 'check' : 'refresh'}/><span><strong>Atualizações do aplicativo</strong><small>Versão {desktopUpdate.currentVersion}{desktopUpdate.status === 'portable' ? ' · edição portátil' : ''}</small></span></div>
@@ -3693,7 +4108,7 @@ export default function RoomApp() {
 
   const screenTiles = sharingParticipants.flatMap(participant => {
     const stream = participant.id === selfId ? localScreen : peersRef.current.get(participant.id)?.screenStream;
-    return stream ? [{ participant, stream, local: participant.id === selfId }] : [];
+    return stream && hasRenderableVideo(stream) ? [{ participant, stream, local: participant.id === selfId }] : [];
   });
   const focusedScreen = focusedScreenId ? screenTiles.find(tile => tile.participant.id === focusedScreenId) : undefined;
   const stageContent = screenTiles.length ? (
@@ -3748,7 +4163,7 @@ export default function RoomApp() {
               <div className="unified-sidebar-actions">
                 <div className="unified-chat-settings-anchor" ref={chatSettingsRef}>
                   <button className={`chat-settings-trigger ${chatSettingsOpen ? 'is-open' : ''}`} type="button" aria-label="Personalizar aparência do chat" aria-expanded={chatSettingsOpen} onClick={() => { if (chatSettingsOpen) dismissChatSettingsSheet(); else setChatSettingsOpen(true); }}><Icon name="settings"/></button>
-                  {(phone ? chatSettingsOpen : chatSettingsPresence.present) && <section className={`chat-settings-popover ${phone ? '' : `t-dropdown ${chatSettingsPresence.className}`}`} data-origin="top-right" aria-label="Aparência do chat" {...chatSettingsSheetGesture}>
+                  {(phone ? chatSettingsOpen : chatSettingsPresence.present) && <section className={`chat-settings-popover ${phone ? '' : `t-dropdown ${chatSettingsPresence.className}`}`} data-origin="top-right" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-label="Aparência do chat" {...chatSettingsSheetGesture}>
                     <header><strong>Aparência do chat</strong><small>SÓ NESTE DISPOSITIVO</small></header>
                     <label><span><strong>Seu balão</strong><small>Destaque das suas mensagens</small></span><input type="color" value={chatAppearance.ownBubble} aria-label="Cor do seu balão" onChange={event => setChatAppearance(current => ({ ...current, ownBubble: event.currentTarget.value }))}/></label>
                     <label><span><strong>Outros balões</strong><small>Mensagens dos participantes</small></span><input type="color" value={chatAppearance.otherBubble} aria-label="Cor dos outros balões" onChange={event => setChatAppearance(current => ({ ...current, otherBubble: event.currentTarget.value }))}/></label>
@@ -3785,11 +4200,11 @@ export default function RoomApp() {
             detail={mobile ? 'low' : 'medium'}
             brightness={1}
             opacity={1}
-            mouseInteraction={animationsEnabled && !mobilePresentationOpen}
-            parallaxStrength={0.5}
-            grain={animationsEnabled && !mobilePresentationOpen}
+            mouseInteraction={false}
+            parallaxStrength={0}
+            grain={false}
             grainIntensity={0.05}
-            animated={animationsEnabled && !mobilePresentationOpen}
+            animated={false}
           />
           {session && sharingParticipants.length === 0 && <div className="stage-room-pill" aria-label={`Sala ${roomLabel}`}><span>Sala</span><strong>{roomLabel}</strong></div>}
           {stageContent}
@@ -3799,7 +4214,7 @@ export default function RoomApp() {
           {callDock}
         </section>
         <aside className={`control-panel unified-control-panel ${controlsOpen ? 'is-open' : ''}`} role={phone && controlsOpen ? 'dialog' : undefined} aria-modal={phone && controlsOpen || undefined} aria-hidden={mobile && !controlsOpen} {...controlsSheetGesture}>
-          <div className="panel-header"><div><h2>Controles</h2></div><button className={`sidebar-connection-indicator room-status-${connectionQuality}`} type="button" aria-label={!session ? 'Pronto para iniciar uma chamada' : mediaLatency === null ? 'Conexão P2P aguardando medição' : `Conexão P2P com ${mediaLatency} milissegundos de latência`}><i/><MotionText value={session ? connectionStatusLabel : 'Pronto'} enabled={animationsEnabled}/><span className="connection-tooltip"><strong>{session ? mediaLatency === null ? 'Medindo conexão' : `${latencyLabel} ms` : 'Sem chamada ativa'}</strong><small>{session ? `RTT WebRTC · ${connectedPeerCount} par${connectedPeerCount === 1 ? '' : 'es'} · ${turnAvailable ? 'TURN pronto' : 'STUN'}` : 'O status da rede aparecerá durante a chamada'}</small></span></button>{mobile && <button className="mobile-panel-close" type="button" onClick={() => dismissControlsSheet()} aria-label="Fechar controles"><Icon name="close"/></button>}</div>
+          <div className="panel-header"><div><h2>Controles</h2></div><button className={`sidebar-connection-indicator room-status-${connectionQuality}`} type="button" aria-label={!session ? 'Pronto para iniciar uma chamada' : !signalingConnected ? 'Reconectando a sinalização; a mídia P2P existente foi preservada' : mediaLatency === null ? 'Conexão P2P aguardando medição' : `Conexão P2P com ${mediaLatency} milissegundos de latência e ${packetLossLabel} de perda`}><i/><MotionText value={session ? connectionStatusLabel : 'Pronto'} enabled={animationsEnabled}/><span className="connection-tooltip"><strong>{session ? !signalingConnected ? 'Reconectando sinalização' : mediaLatency === null ? 'Medindo conexão' : `${latencyLabel} ms · ${packetLossLabel} perda` : 'Sem chamada ativa'}</strong><small>{session ? !signalingConnected ? `${connectedPeerCount} par${connectedPeerCount === 1 ? '' : 'es'} P2P preservado${connectedPeerCount === 1 ? '' : 's'}` : `RTT e perda WebRTC · ${connectedPeerCount} par${connectedPeerCount === 1 ? '' : 'es'} · ${turnAvailable ? 'relay disponível' : 'conexão direta'}` : 'O status da rede aparecerá durante a chamada'}</small></span></button>{mobile && <button className="mobile-panel-close" type="button" onClick={() => dismissControlsSheet()} aria-label="Fechar controles"><Icon name="close"/></button>}</div>
           {mobile && <button className="mobile-control-profile" type="button" onClick={() => { setProfileOpen(true); setControlsOpen(false); }}><Avatar avatar={profile.avatar} name={profile.name} leader={Boolean(selfId && selfId === leaderId)} size="small"/><span><strong>{profile.name}</strong><small>{profile.status}</small></span><Icon name="settings"/></button>}
           <div className="panel-view">{callPanel}</div>
         </aside>

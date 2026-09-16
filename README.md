@@ -26,7 +26,7 @@ O ScreenLink usa uma única interface para criar uma sala ou entrar com um códi
 - nome, status, avatar ou foto personalizada ficam salvos somente no armazenamento local deste dispositivo;
 - a interface compacta para celular mantém voz, visualização, participantes e chat, sem expor o controle de compartilhar tela.
 - tela cheia, miniplayer e bloqueio de suspensão ficam reunidos em **Mais opções** durante a chamada.
-- o fundo Gradient Waves adapta o nível de detalhe ao dispositivo e pode ser pausado em **Interface > Animações e movimento**; a preferência fica salva localmente e respeita `prefers-reduced-motion` no primeiro acesso.
+- o fundo Gradient Waves é estático para não disputar GPU com a codificação de tela; **Interface > Animações e movimento** controla somente o mascote e as transições, respeitando `prefers-reduced-motion` no primeiro acesso.
 
 A sala em grupo usa uma malha WebRTC: cada participante mantém uma conexão direta com cada um dos demais. É adequada para grupos pequenos, mas várias telas simultâneas multiplicam upload, CPU e consumo de bateria. Para grupos grandes, a evolução indicada é usar uma SFU.
 
@@ -43,11 +43,11 @@ O vídeo e o áudio viajam diretamente entre os dispositivos por WebRTC P2P. O c
 RTCDataChannel sempre que o canal está disponível e possui o fallback temporário de sinalização
 descrito acima. Confirmações de entrega, fila com reenvio e sincronização entre os participantes
 recuperam mensagens durante reconexões e para quem entra depois, sem banco de dados; nenhuma
-mensagem é persistida. O STUN
-ajuda os navegadores a descobrir esse caminho, e o próprio WebRTC adapta bitrate,
-resolução e quadros conforme a rede. Um servidor TURN pode ser configurado como
-fallback para redes que bloqueiam P2P; ele não é usado quando existe um caminho
-direto melhor. O ScreenLink não grava o conteúdo.
+mensagem é persistida. O STUN ajuda os navegadores a descobrir esse caminho. O modo
+de bitrate adaptativo mede perda, latência e capacidade de saída de cada conexão e
+reduz bitrate, escala e quadros quando a rede aperta; o orçamento de upload também é
+dividido entre os pares. A instalação padrão não depende de SFU nem TURN e, portanto,
+não cria franquia mensal de mídia. O ScreenLink não grava o conteúdo.
 
 Cada conexão pré-negocia três trilhas independentes — voz, vídeo da tela e áudio da
 tela — além de um RTCDataChannel para o chat. A captura de tela usa replaceTrack(),
@@ -132,10 +132,10 @@ GitHub ou automaticamente ao enviar uma tag `v*`.
 ## Uso em redes diferentes
 
 O endereço público HTTPS do Render permite que os dispositivos entrem na mesma sala.
-O WebRTC tenta primeiro um caminho P2P direto com ajuda do STUN. NAT simétrico,
-CGNAT e firewalls restritivos podem impedir essa rota; nesses casos configure
-`TURN_URLS`, `TURN_USERNAME` e `TURN_CREDENTIAL` para oferecer um relay de fallback.
-O relay deve ficar geograficamente próximo dos usuários para evitar RTT desnecessário.
+O WebRTC tenta um caminho P2P direto com ajuda do STUN. NAT simétrico, CGNAT e
+firewalls restritivos podem impedir essa rota. Sem TURN, essas combinações de rede podem
+não conectar; essa é uma limitação conhecida e deliberada para manter a operação sem
+franquia mensal de relay.
 
 Se a sinalização WebSocket cair temporariamente, a sala e os pares são preservados por uma janela de recuperação, e o navegador tenta reassociar a mesma sessão ao voltar do segundo plano. Isso reduz desconexões provocadas por suspensão de abas, mas não pode impedir o próprio sistema operacional de congelar ou encerrar uma página web em segundo plano.
 
@@ -157,7 +157,7 @@ O plano gratuito do Render pode adormecer após um período sem uso. O primeiro 
 - A chave do proprietário é mantida somente como hash SHA-256. A chave de entrada da sala permanece apenas na memória do processo enquanto a sala existe, pois é necessária para transformar o código curto de seis caracteres em um convite completo.
 - A sala é apagada quando o proprietário escolhe **Encerrar sala** ou quando fica vazia após a janela de recuperação; sair sem encerrar permite que outro participante assuma a liderança.
 - O limite de espectadores é definido pelo apresentador antes de iniciar a sala.
-- Cabeçalhos de segurança bloqueiam incorporação em outros sites e carregamento de scripts externos; microfone e captura de tela são permitidos somente para a própria origem.
+- Cabeçalhos de segurança bloqueiam incorporação em outros sites e carregamento de scripts externos; câmera é bloqueada, e microfone e captura de tela são permitidos somente para a própria origem. No Electron, o microfone ainda exige consentimento explícito em uma caixa nativa por execução.
 - O WebSocket valida a origem, limita tentativas de código, frequência de mensagens e conexões simultâneas; o servidor também limita a quantidade total de salas. Use `ALLOWED_ORIGINS` apenas quando frontend e backend realmente estiverem em origens diferentes.
 
 ## Comandos

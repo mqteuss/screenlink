@@ -21,7 +21,8 @@ const child = spawn(process.execPath, ['server.mjs'], {
     STUN_URLS: 'stun:stun.cloudflare.com:3478',
     TURN_URLS: 'turn:turn.example.test:3478?transport=udp',
     TURN_USERNAME: 'screenlink-test',
-    TURN_CREDENTIAL: 'screenlink-secret'
+    TURN_CREDENTIAL: 'screenlink-secret',
+    PARTICIPANT_RECONNECT_GRACE_MS: '250'
   },
   stdio: ['ignore', 'pipe', 'pipe']
 });
@@ -123,7 +124,12 @@ try {
 
   const page = await fetch(HTTP_URL);
   assert.equal(page.status, 200);
-  assert.equal(page.headers.get('permissions-policy'), 'camera=(self), microphone=(self), display-capture=(self)');
+  assert.equal(page.headers.get('permissions-policy'), 'camera=(), microphone=(self), display-capture=(self)');
+  assert.equal(page.headers.get('strict-transport-security'), 'max-age=31536000; includeSubDomains');
+  assert.equal(page.headers.get('cross-origin-opener-policy'), 'same-origin');
+  assert.equal(page.headers.get('cross-origin-resource-policy'), 'same-origin');
+  assert.equal(page.headers.get('x-frame-options'), 'DENY');
+  assert.equal(page.headers.get('x-permitted-cross-domain-policies'), 'none');
   assert.match(page.headers.get('content-security-policy') || '', /style-src-attr 'unsafe-inline'/);
   assert.match(page.headers.get('content-security-policy') || '', /script-src 'self'/);
   assert.match(await page.text(), /<div id="root"><\/div>/);
@@ -156,6 +162,7 @@ try {
   const hostSawViewer = nextMessage(host, 'viewer-joined');
   send(viewer, { type: 'join-room', roomId, token });
   const joined = await viewerJoined;
+  assert.match(joined.resumeToken, /^[A-Za-z0-9_-]{32,128}$/);
   const hostJoin = await hostSawViewer;
   assert.equal(hostJoin.peerId, joined.peerId);
 
@@ -211,8 +218,10 @@ try {
   const viewerTwoReconnect = await connect();
   sockets.push(viewerTwoReconnect);
   const viewerTwoRejoined = nextMessage(viewerTwoReconnect, 'joined');
-  send(viewerTwoReconnect, { type: 'join-room', roomId, token, peerId: reconnectId });
-  assert.equal((await viewerTwoRejoined).peerId, reconnectId);
+  send(viewerTwoReconnect, { type: 'join-room', roomId, token, peerId: reconnectId, resumeToken: joinedTwo.resumeToken });
+  const rejoinedViewerTwo = await viewerTwoRejoined;
+  assert.equal(rejoinedViewerTwo.peerId, reconnectId);
+  assert.equal(rejoinedViewerTwo.resumed, true);
 
   const viewerLeft = nextMessage(host, 'viewer-left');
   send(viewer, { type: 'leave-room' });
@@ -238,7 +247,7 @@ try {
 
   let roomOwner = await connect();
   const roomMember = await connect();
-  const roomMemberTwo = await connect();
+  let roomMemberTwo = await connect();
   sockets.push(roomOwner, roomMember, roomMemberTwo);
   const ownerKey = 'owner_1234567890_abcdefghijklmnopqrstuvwxyz';
   const ownerReady = nextMessage(roomOwner, 'room-ready');
@@ -268,6 +277,7 @@ try {
   const memberSession = await memberReady;
   assert.equal((await ownerSawMember).participant.id, memberSession.selfId);
   assert.equal(memberSession.leaderId, ownerSession.selfId);
+  assert.match(memberSession.resumeToken, /^[A-Za-z0-9_-]{32,128}$/);
 
   const memberTwoReady = nextMessage(roomMemberTwo, 'room-ready');
   const ownerSawMemberTwo = nextMessage(roomOwner, 'participant-joined');
@@ -279,6 +289,46 @@ try {
   const memberTwoSession = await memberTwoReady;
   assert.equal((await ownerSawMemberTwo).participant.id, memberTwoSession.selfId);
   assert.deepEqual(memberTwoSession.invite, { roomId, token });
+  assert.match(memberTwoSession.resumeToken, /^[A-Za-z0-9_-]{32,128}$/);
+
+  roomMemberTwo.terminate();
+  await delay(50);
+  const roomMemberTwoReconnect = await connect();
+  sockets.push(roomMemberTwoReconnect);
+  const memberTwoResumed = nextMessage(roomMemberTwoReconnect, 'room-ready');
+  const ownerSawMemberTwoResume = nextMessage(roomOwner, 'participant-state');
+  send(roomMemberTwoReconnect, {
+    type: 'join-group-room-code',
+    code: ownerSession.joinCode,
+    participantId: memberTwoSession.selfId,
+    resumeToken: memberTwoSession.resumeToken,
+    profile: { name: 'Membro 2', avatar: 'pixel', status: 'Reconectado', device: 'mobile' }
+  });
+  const resumedMemberTwoSession = await memberTwoResumed;
+  assert.equal(resumedMemberTwoSession.selfId, memberTwoSession.selfId);
+  assert.equal(resumedMemberTwoSession.resumed, true);
+  assert.equal((await ownerSawMemberTwoResume).participant.id, memberTwoSession.selfId);
+  roomMemberTwo = roomMemberTwoReconnect;
+
+  const impersonator = await connect();
+  sockets.push(impersonator);
+  const impersonatorReady = nextMessage(impersonator, 'room-ready');
+  const ownerSawImpersonator = nextMessage(roomOwner, 'participant-joined');
+  send(impersonator, {
+    type: 'join-group-room-code',
+    code: ownerSession.joinCode,
+    participantId: memberSession.selfId,
+    resumeToken: 'invalid_resume_token_that_cannot_match_1234567890',
+    profile: { name: 'Impostor', avatar: 'orbit', status: 'Teste de segurança', device: 'desktop' }
+  });
+  const impersonatorSession = await impersonatorReady;
+  assert.notEqual(impersonatorSession.selfId, memberSession.selfId);
+  assert.equal(impersonatorSession.resumed, false);
+  assert.equal((await ownerSawImpersonator).participant.id, impersonatorSession.selfId);
+  assert.equal(roomMember.readyState, WebSocket.OPEN);
+  const ownerSawImpersonatorLeave = nextMessage(roomOwner, 'participant-left');
+  send(impersonator, { type: 'leave-group-room' });
+  assert.equal((await ownerSawImpersonatorLeave).peerId, impersonatorSession.selfId);
 
   const memberSignal = nextMessage(roomMember, 'peer-signal');
   send(roomMemberTwo, { type: 'peer-signal', targetId: memberSession.selfId, kind: 'offer', sdp: { type: 'offer', sdp: 'v=0\r\n' } });
@@ -352,7 +402,7 @@ try {
   const finalHealth = await (await fetch(`${HTTP_URL}/health`)).json();
   assert.equal(finalHealth.rooms, 0);
 
-  console.log('PASS: security headers/origin checks, validated signaling, mesh presence/chat delivery/screen state, leader migration, owner reclaim, STUN/TURN fallback, and shutdown flow.');
+  console.log('PASS: security headers/origin checks, authenticated session resume, validated signaling, mesh presence/chat delivery/screen state, reconnect grace, leader migration, owner reclaim, optional ICE fallback, and shutdown flow.');
 } finally {
   for (const socket of sockets) {
     if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) socket.close();

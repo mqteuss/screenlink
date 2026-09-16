@@ -24,6 +24,8 @@ let appUrlToLoad = '';
 let disposeProfileIpc = null;
 let disposeDisplayMedia = null;
 let updateManager = null;
+let microphonePermissionState = 'prompt';
+let microphonePermissionRequest = null;
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 app.setName('ScreenLink');
@@ -65,6 +67,39 @@ function isSafeExternalUrl(value) {
 function isTrustedSender(event) {
   const frameUrl = event?.senderFrame?.url || event?.sender?.getURL?.() || '';
   return isTrustedUrl(frameUrl);
+}
+
+function requestMicrophonePermission() {
+  if (microphonePermissionState === 'granted') return Promise.resolve(true);
+  if (microphonePermissionState === 'denied') return Promise.resolve(false);
+  if (microphonePermissionRequest) return microphonePermissionRequest;
+
+  const options = {
+    type: 'question',
+    title: 'Permitir microfone',
+    message: 'Permitir que o ScreenLink use seu microfone?',
+    detail: 'O áudio é enviado diretamente aos participantes da chamada. O ScreenLink não grava a conversa.',
+    buttons: ['Permitir', 'Agora não'],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true
+  };
+  const prompt = mainWindow && !mainWindow.isDestroyed()
+    ? dialog.showMessageBox(mainWindow, options)
+    : dialog.showMessageBox(options);
+  microphonePermissionRequest = prompt
+    .then(result => {
+      microphonePermissionState = result.response === 0 ? 'granted' : 'denied';
+      return microphonePermissionState === 'granted';
+    })
+    .catch(() => {
+      microphonePermissionState = 'denied';
+      return false;
+    })
+    .finally(() => {
+      microphonePermissionRequest = null;
+    });
+  return microphonePermissionRequest;
 }
 
 function probePort(port) {
@@ -149,12 +184,28 @@ function configureSession() {
 
   appSession.setPermissionCheckHandler((webContents, permission, requestingOrigin) => {
     const source = requestingOrigin || webContents?.getURL?.() || '';
-    return ALLOWED_PERMISSIONS.has(permission) && isTrustedUrl(source);
+    if (!ALLOWED_PERMISSIONS.has(permission) || !isTrustedUrl(source)) return false;
+    if (permission === 'media') return microphonePermissionState !== 'denied';
+    return true;
   });
 
   appSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
     const source = details?.requestingUrl || webContents?.getURL?.() || '';
-    callback(ALLOWED_PERMISSIONS.has(permission) && isTrustedUrl(source));
+    if (!ALLOWED_PERMISSIONS.has(permission) || !isTrustedUrl(source)) {
+      callback(false);
+      return;
+    }
+    if (permission !== 'media') {
+      callback(true);
+      return;
+    }
+
+    const requestedMedia = Array.isArray(details?.mediaTypes) ? details.mediaTypes : [];
+    if (!requestedMedia.includes('audio') || requestedMedia.includes('video')) {
+      callback(false);
+      return;
+    }
+    void requestMicrophonePermission().then(callback);
   });
 
   disposeDisplayMedia = registerDisplayMedia({
