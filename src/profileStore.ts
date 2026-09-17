@@ -16,7 +16,24 @@ type ScreenLinkDesktopBridge = {
   checkForUpdates: () => Promise<DesktopUpdateState>;
   downloadUpdate: () => Promise<DesktopUpdateState>;
   installUpdate: () => Promise<boolean>;
+  chooseDisplaySource: (sourceId: string) => Promise<boolean>;
+  cancelDisplayPicker: () => Promise<boolean>;
+  onDisplayPickerState: (callback: (state: DesktopDisplayPickerState) => void) => () => void;
   onUpdateState: (callback: (state: DesktopUpdateState) => void) => () => void;
+};
+
+export type DesktopDisplaySource = {
+  id: string;
+  name: string;
+  kind: 'screen' | 'window';
+  thumbnail: string | null;
+  appIcon: string | null;
+};
+
+export type DesktopDisplayPickerState = {
+  open: boolean;
+  sources?: DesktopDisplaySource[];
+  systemAudioAvailable?: boolean;
 };
 
 export type DesktopUpdateStatus = 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'installing' | 'current' | 'error' | 'portable' | 'unsupported' | 'development';

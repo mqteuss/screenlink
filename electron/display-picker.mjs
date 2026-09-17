@@ -1,9 +1,6 @@
-import { BrowserWindow, desktopCapturer, ipcMain } from 'electron';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { desktopCapturer, ipcMain } from 'electron';
 
-const ELECTRON_DIR = path.dirname(fileURLToPath(import.meta.url));
-const LIST_CHANNEL = 'screenlink:display-picker:list';
+const STATE_CHANNEL = 'screenlink:display-picker:state';
 const CHOOSE_CHANNEL = 'screenlink:display-picker:choose';
 const CANCEL_CHANNEL = 'screenlink:display-picker:cancel';
 
@@ -11,25 +8,49 @@ function sourceKind(source) {
   return source.id.startsWith('screen:') ? 'screen' : 'window';
 }
 
+function nativeImageDataUrl(image) {
+  try {
+    return image && !image.isEmpty() ? image.toDataURL() : null;
+  } catch {
+    return null;
+  }
+}
+
 function serializeSource(source) {
   return {
     id: source.id,
     name: source.name,
     kind: sourceKind(source),
-    thumbnail: source.thumbnail.toDataURL(),
-    appIcon: source.appIcon?.isEmpty() ? null : source.appIcon?.toDataURL() || null
+    thumbnail: nativeImageDataUrl(source.thumbnail),
+    appIcon: nativeImageDataUrl(source.appIcon)
   };
 }
 
-export function registerDisplayMedia({ targetSession, getParentWindow, isTrustedRequest }) {
+async function listDesktopSources() {
+  const baseOptions = {
+    types: ['screen', 'window'],
+    thumbnailSize: { width: 384, height: 216 }
+  };
+  try {
+    return await desktopCapturer.getSources({ ...baseOptions, fetchWindowIcons: true });
+  } catch (error) {
+    console.warn('Não foi possível listar fontes com ícones; tentando novamente sem ícones.', error);
+    return desktopCapturer.getSources({ ...baseOptions, fetchWindowIcons: false });
+  }
+}
+
+export function registerDisplayMedia({ targetSession, getParentWindow, isTrustedRequest, isTrustedSender }) {
   let activePicker = null;
 
   function isActivePickerEvent(event) {
+    const senderFrame = event.senderFrame;
     return Boolean(
       activePicker
-      && !activePicker.window.isDestroyed()
-      && event.sender?.id === activePicker.window.webContents.id
-      && event.senderFrame === activePicker.window.webContents.mainFrame
+      && !activePicker.webContents.isDestroyed()
+      && event.sender?.id === activePicker.webContents.id
+      && senderFrame
+      && senderFrame === senderFrame.top
+      && (!isTrustedSender || isTrustedSender(event))
     );
   }
 
@@ -38,15 +59,11 @@ export function registerDisplayMedia({ targetSession, getParentWindow, isTrusted
     if (!picker || picker.settled) return;
     picker.settled = true;
     activePicker = null;
+    picker.webContents.removeListener('destroyed', picker.onDestroyed);
     const source = sourceId ? picker.sources.find(candidate => candidate.id === sourceId) ?? null : null;
+    if (!picker.webContents.isDestroyed()) picker.webContents.send(STATE_CHANNEL, { open: false });
     picker.resolve(source);
-    if (!picker.window.isDestroyed()) picker.window.close();
   }
-
-  ipcMain.handle(LIST_CHANNEL, event => {
-    if (!isActivePickerEvent(event)) throw new Error('Seletor de tela inválido.');
-    return activePicker.sources.map(serializeSource);
-  });
 
   ipcMain.handle(CHOOSE_CHANNEL, (event, sourceId) => {
     if (!isActivePickerEvent(event) || typeof sourceId !== 'string') return false;
@@ -64,44 +81,22 @@ export function registerDisplayMedia({ targetSession, getParentWindow, isTrusted
   async function openPicker() {
     if (activePicker) settlePicker();
 
-    const sources = await desktopCapturer.getSources({
-      types: ['screen', 'window'],
-      thumbnailSize: { width: 384, height: 216 },
-      fetchWindowIcons: true
-    });
+    const sources = await listDesktopSources();
     if (!sources.length) return null;
 
     const parent = getParentWindow?.();
-    return new Promise(resolve => {
-      const pickerWindow = new BrowserWindow({
-        width: 920,
-        height: 680,
-        minWidth: 700,
-        minHeight: 500,
-        parent: parent && !parent.isDestroyed() ? parent : undefined,
-        modal: Boolean(parent && !parent.isDestroyed()),
-        show: false,
-        skipTaskbar: true,
-        title: 'Compartilhar tela',
-        backgroundColor: '#0b0f12',
-        autoHideMenuBar: true,
-        webPreferences: {
-          preload: path.join(ELECTRON_DIR, 'display-picker-preload.cjs'),
-          contextIsolation: true,
-          nodeIntegration: false,
-          sandbox: true,
-          webSecurity: true,
-          devTools: false
-        }
-      });
+    if (!parent || parent.isDestroyed() || parent.webContents.isDestroyed()) return null;
+    const webContents = parent.webContents;
 
-      activePicker = { window: pickerWindow, sources, resolve, settled: false };
-      pickerWindow.webContents.on('preload-error', (_event, preloadPath, error) => {
-        console.error(`Falha ao carregar o preload do seletor ${preloadPath}.`, error);
+    return new Promise(resolve => {
+      const onDestroyed = () => settlePicker();
+      activePicker = { webContents, sources, resolve, settled: false, onDestroyed };
+      webContents.once('destroyed', onDestroyed);
+      webContents.send(STATE_CHANNEL, {
+        open: true,
+        sources: sources.map(serializeSource),
+        systemAudioAvailable: process.platform === 'win32'
       });
-      pickerWindow.once('ready-to-show', () => pickerWindow.show());
-      pickerWindow.on('closed', () => settlePicker());
-      pickerWindow.loadFile(path.join(ELECTRON_DIR, 'display-picker.html')).catch(() => settlePicker());
     });
   }
 
@@ -130,7 +125,6 @@ export function registerDisplayMedia({ targetSession, getParentWindow, isTrusted
   return () => {
     settlePicker();
     targetSession.setDisplayMediaRequestHandler(null);
-    ipcMain.removeHandler(LIST_CHANNEL);
     ipcMain.removeHandler(CHOOSE_CHANNEL);
     ipcMain.removeHandler(CANCEL_CHANNEL);
   };

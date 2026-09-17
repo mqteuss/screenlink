@@ -3,6 +3,7 @@ import { createServer as createNetServer } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { registerDisplayMedia } from './display-picker.mjs';
+import { mediaPermissionKind } from './media-permissions.mjs';
 import { registerProfileIpc } from './profile-store.mjs';
 import { registerAutoUpdates } from './update-manager.mjs';
 
@@ -200,8 +201,12 @@ function configureSession() {
       return;
     }
 
-    const requestedMedia = Array.isArray(details?.mediaTypes) ? details.mediaTypes : [];
-    if (!requestedMedia.includes('audio') || requestedMedia.includes('video')) {
+    const mediaKind = mediaPermissionKind(details);
+    if (mediaKind === 'display') {
+      callback(true);
+      return;
+    }
+    if (mediaKind !== 'microphone') {
       callback(false);
       return;
     }
@@ -211,6 +216,7 @@ function configureSession() {
   disposeDisplayMedia = registerDisplayMedia({
     targetSession: appSession,
     getParentWindow: () => mainWindow,
+    isTrustedSender,
     isTrustedRequest: request => {
       try {
         const isTopFrame = !request.frame || request.frame === request.frame.top;

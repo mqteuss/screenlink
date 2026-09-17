@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { app, BrowserWindow, session } from 'electron';
 import { registerDisplayMedia } from '../electron/display-picker.mjs';
+import { mediaPermissionKind } from '../electron/media-permissions.mjs';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ELECTRON_DIR = path.resolve(SCRIPT_DIR, '../electron');
@@ -43,6 +44,10 @@ function listen(server) {
 }
 
 app.whenReady().then(async () => {
+assert.equal(mediaPermissionKind({ mediaTypes: [] }), 'display');
+assert.equal(mediaPermissionKind({ mediaTypes: ['audio'] }), 'microphone');
+assert.equal(mediaPermissionKind({ mediaTypes: ['video'] }), 'deny');
+assert.equal(mediaPermissionKind({ mediaTypes: ['audio', 'video'] }), 'deny');
 const server = createServer((_request, response) => {
   response.writeHead(200, {
     'Content-Type': 'text/html; charset=utf-8',
@@ -70,12 +75,34 @@ try {
     }
   });
 
-  const isAllowedPermission = permission => permission === 'display-capture' || permission === 'media';
-  session.defaultSession.setPermissionCheckHandler((_webContents, permission) => isAllowedPermission(permission));
-  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => callback(isAllowedPermission(permission)));
+  const isTrustedUrl = value => {
+    try {
+      return new URL(value).origin === origin;
+    } catch {
+      return false;
+    }
+  };
+  const allowedPermissions = new Set(['clipboard-sanitized-write', 'display-capture', 'fullscreen', 'media']);
+  session.defaultSession.setPermissionCheckHandler((webContents, permission, requestingOrigin) => {
+    const source = requestingOrigin || webContents?.getURL?.() || '';
+    const granted = allowedPermissions.has(permission) && isTrustedUrl(source);
+    console.log('INFO permission check', JSON.stringify({ permission, source, granted }));
+    return granted;
+  });
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    const source = details?.requestingUrl || webContents?.getURL?.() || '';
+    const requestedMedia = Array.isArray(details?.mediaTypes) ? details.mediaTypes : [];
+    const mediaKind = mediaPermissionKind(details);
+    const granted = allowedPermissions.has(permission)
+      && isTrustedUrl(source)
+      && (permission !== 'media' || mediaKind === 'display' || mediaKind === 'microphone');
+    console.log('INFO permission request', JSON.stringify({ permission, source, requestedMedia, granted }));
+    callback(granted);
+  });
   disposeDisplayMedia = registerDisplayMedia({
     targetSession: session.defaultSession,
     getParentWindow: () => requester,
+    isTrustedSender: event => isTrustedUrl(event?.senderFrame?.url || event?.sender?.getURL?.() || ''),
     isTrustedRequest: request => {
       console.log('INFO display handler called', JSON.stringify({
         videoRequested: request.videoRequested,
@@ -90,15 +117,18 @@ try {
   const desktopBridge = await requester.webContents.executeJavaScript(`({
     isDesktop: window.screenLinkDesktop?.isDesktop,
     hasProfileLoad: typeof window.screenLinkProfile?.load === 'function',
-    hasProfileSave: typeof window.screenLinkProfile?.save === 'function'
+    hasProfileSave: typeof window.screenLinkProfile?.save === 'function',
+    hasDisplayState: typeof window.screenLinkDesktop?.onDisplayPickerState === 'function',
+    hasDisplayChoose: typeof window.screenLinkDesktop?.chooseDisplaySource === 'function',
+    hasDisplayCancel: typeof window.screenLinkDesktop?.cancelDisplayPicker === 'function'
   })`);
-  assert.deepEqual(desktopBridge, { isDesktop: true, hasProfileLoad: true, hasProfileSave: true });
+  assert.deepEqual(desktopBridge, { isDesktop: true, hasProfileLoad: true, hasProfileSave: true, hasDisplayState: true, hasDisplayChoose: true, hasDisplayCancel: true });
   console.log('INFO desktop bridges ready');
   console.log('INFO requester ready');
   await requester.webContents.executeJavaScript(`
     window.captureFinished = false;
     window.captureError = '';
-    navigator.mediaDevices.getDisplayMedia({ video: true })
+    navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
       .then(stream => {
         window.captureStream = stream;
         window.captureTrackLabel = stream.getVideoTracks()[0]?.label || '';
@@ -119,37 +149,56 @@ try {
     getDisplayMedia: typeof navigator.mediaDevices?.getDisplayMedia
   })`));
 
-  const picker = await waitFor(() => BrowserWindow.getAllWindows().find(window => window !== requester));
-  console.log('INFO picker opened');
-  await waitFor(() => picker.webContents.executeJavaScript("document.readyState === 'complete'"));
   const pickerState = await waitFor(async () => {
-    const state = await picker.webContents.executeJavaScript(`({
-      bridgeReady: typeof window.screenLinkDisplayPicker?.list === 'function',
-      screenCount: Number(document.querySelector('#screen-count')?.textContent || 0),
-      windowCount: Number(document.querySelector('#window-count')?.textContent || 0),
-      cardCount: document.querySelectorAll('.source-card').length,
-      errorText: document.querySelector('#empty-state')?.hidden ? '' : document.querySelector('#empty-state')?.textContent
+    const state = await requester.webContents.executeJavaScript(`({
+      open: document.querySelector('#screenlink-integrated-display-picker')?.dataset.open === 'true',
+      sourceCount: Number(document.querySelector('#screenlink-integrated-display-picker')?.dataset.sourceCount || 0),
+      cardCount: document.querySelector('#screenlink-integrated-display-picker')?.shadowRoot?.querySelectorAll('.source').length || 0,
+      dialogDisplay: getComputedStyle(document.querySelector('#screenlink-integrated-display-picker')?.shadowRoot?.querySelector('.dialog')).display,
+      dialogRadius: getComputedStyle(document.querySelector('#screenlink-integrated-display-picker')?.shadowRoot?.querySelector('.dialog')).borderRadius
     })`);
-    return state.bridgeReady && state.screenCount + state.windowCount > 0 ? state : null;
+    return state.open && state.sourceCount > 0 && state.cardCount > 0 ? state : null;
   });
 
-  assert.equal(pickerState.bridgeReady, true);
-  assert.ok(pickerState.screenCount > 0, 'Nenhuma tela foi enumerada pelo desktopCapturer.');
-  assert.ok(pickerState.cardCount > 0, 'Nenhuma fonte foi renderizada no seletor.');
-  console.log('INFO sources rendered', JSON.stringify(pickerState));
-  await picker.webContents.executeJavaScript("document.querySelector('.source-card')?.click()");
+  assert.ok(pickerState.cardCount > 0, 'Nenhuma tela foi renderizada pelo fallback integrado.');
+  assert.equal(pickerState.dialogDisplay, 'grid');
+  assert.notEqual(pickerState.dialogRadius, '0px');
+  assert.equal(BrowserWindow.getAllWindows().length, 1, 'O seletor abriu uma BrowserWindow secundária.');
+  console.log('INFO integrated sources delivered', JSON.stringify(pickerState));
+  await requester.webContents.executeJavaScript("document.querySelector('#screenlink-integrated-display-picker').shadowRoot.querySelector('.source').click()");
 
   await waitFor(() => requester.webContents.executeJavaScript('window.captureFinished'));
   const captureResult = await requester.webContents.executeJavaScript(`({
     error: window.captureError,
     label: window.captureTrackLabel,
-    hasVideo: Boolean(window.captureStream?.getVideoTracks()[0])
+    hasVideo: Boolean(window.captureStream?.getVideoTracks()[0]),
+    hasAudio: Boolean(window.captureStream?.getAudioTracks()[0])
   })`);
   assert.equal(captureResult.error, '');
   assert.equal(captureResult.hasVideo, true);
-  await requester.webContents.executeJavaScript("window.captureStream?.getTracks().forEach(track => track.stop())");
-
-  console.log('PASS Electron display picker', JSON.stringify({ pickerState, captureResult }));
+  if (process.platform === 'win32') assert.equal(captureResult.hasAudio, true);
+  await requester.webContents.executeJavaScript(`
+    window.captureStream?.getTracks().forEach(track => track.stop());
+    window.captureFinished = false;
+    window.captureError = '';
+    navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
+      .then(stream => {
+        stream.getTracks().forEach(track => track.stop());
+        window.captureFinished = true;
+      })
+      .catch(error => {
+        window.captureError = error?.name + ': ' + error?.message;
+        window.captureFinished = true;
+      });
+    true;
+  `);
+  await waitFor(() => requester.webContents.executeJavaScript("document.querySelector('#screenlink-integrated-display-picker')?.dataset.open === 'true'"));
+  await requester.webContents.executeJavaScript("document.querySelector('#screenlink-integrated-display-picker').shadowRoot.querySelector('[data-cancel]').click()");
+  await waitFor(() => requester.webContents.executeJavaScript('window.captureFinished'));
+  const cancelResult = await requester.webContents.executeJavaScript('window.captureError');
+  assert.match(cancelResult, /NotAllowedError|AbortError/);
+  assert.equal(BrowserWindow.getAllWindows().length, 1, 'Cancelar abriu uma BrowserWindow secundária.');
+  console.log('PASS integrated Electron display picker', JSON.stringify({ pickerState, captureResult, cancelResult, windowCount: BrowserWindow.getAllWindows().length }));
 } catch (error) {
   exitCode = 1;
   console.error('FAIL Electron display picker', error);

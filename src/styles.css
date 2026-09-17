@@ -198,8 +198,8 @@ h1, h2, p { margin-top: 0; }
 .more-popover > button:not(:disabled):active { transform: scale(.985); }
 .more-popover > button:disabled { cursor: default; opacity: .38; }
 .more-popover > button > .icon { width: .95rem; height: .95rem; color: #999da0; }
-.more-popover > button > .icon:last-child { width: 1rem; height: 1rem; transform: rotate(-90deg); transition: transform 240ms var(--ease-out), color var(--standard); }
-.more-popover > button:not(:disabled):hover > .icon:last-child { color: #e8e8e8; transform: translateX(.16rem) rotate(-90deg); }
+.more-popover > button > .icon:last-child { width: 1rem; height: 1rem; transition: transform 240ms var(--ease-out), color var(--standard); }
+.more-popover > button:not(:disabled):hover > .icon:last-child { color: #e8e8e8; transform: translateX(.16rem); }
 .more-popover > button span, .more-popover > button strong, .more-popover > button small { min-width: 0; display: block; }
 .more-popover > button strong { margin-bottom: .12rem; font-size: .72rem; font-weight: 590; }
 .more-popover > button small { overflow: hidden; color: #85898d; font-size: .59rem; text-overflow: ellipsis; white-space: nowrap; }

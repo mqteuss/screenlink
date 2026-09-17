@@ -2,10 +2,10 @@ import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useSta
 import QRCode from 'qrcode';
 import { playInterfaceSound as playCallSound, setInterfaceSoundOutputDevice, unlockInterfaceSounds, type InterfaceSoundName } from './callSounds';
 import { createPrivateRoom, parseInvite, signalUrl, type IceServerConfig, type Invite, type RoomParticipant, type RoomProfile, type SessionDescription } from './protocol';
-import { loadStoredProfile, prepareAvatar, profileStorageKind, saveStoredProfile, type DesktopUpdateState } from './profileStore';
+import { loadStoredProfile, prepareAvatar, profileStorageKind, saveStoredProfile, type DesktopDisplaySource, type DesktopUpdateState } from './profileStore';
 
 type RoomMode = 'landing' | 'connecting' | 'connected' | 'error';
-type IconName = 'screen' | 'microphone' | 'microphoneOff' | 'volume' | 'volumeOff' | 'chat' | 'send' | 'hangup' | 'link' | 'copy' | 'settings' | 'users' | 'crown' | 'close' | 'chevron' | 'chevronDown' | 'smile' | 'keyboard' | 'search' | 'qr' | 'more' | 'expand' | 'pip' | 'wake' | 'motion' | 'grid' | 'download' | 'refresh' | 'check' | 'guide';
+type IconName = 'screen' | 'microphone' | 'microphoneOff' | 'volume' | 'volumeOff' | 'chat' | 'send' | 'hangup' | 'link' | 'copy' | 'settings' | 'users' | 'crown' | 'close' | 'chevron' | 'chevronDown' | 'smile' | 'keyboard' | 'search' | 'qr' | 'more' | 'expand' | 'pip' | 'wake' | 'motion' | 'grid' | 'download' | 'refresh' | 'warning' | 'check' | 'guide';
 type Session = { invite: Invite; joinCode?: string; joinByCode?: boolean; ownerKey?: string; participantId?: string; resumeToken?: string; maxParticipants?: number };
 type RoomEntry = { kind: 'invite'; invite: Invite } | { kind: 'code'; code: string };
 type ChatDelivery = 'pending' | 'sent' | 'delivered' | 'failed';
@@ -224,21 +224,21 @@ const ONBOARDING_STEPS: Array<{ icon: IconName; eyebrow: string; title: string; 
     icon: 'users',
     eyebrow: 'Sala',
     title: 'Comece ou entre em uma chamada',
-    description: 'Crie uma sala pelo botão central ou cole o código recebido em Controles. O convite fica disponível assim que a conexão abrir.',
-    points: ['Código curto para convidar', 'A sidebar pode ser recolhida a qualquer momento']
+    description: 'Crie uma sala pelo botão central ou use Entrar com código. O convite fica disponível assim que a conexão abrir.',
+    points: ['Código curto para convidar', 'O chat pode ser recolhido quando você quiser']
   },
   {
     icon: 'microphone',
     eyebrow: 'Controles',
     title: 'Áudio e tela são independentes',
     description: 'Ligue o microfone ou compartilhe a tela quando precisar. Os chevrons abrem dispositivos, volumes e qualidade.',
-    points: ['Parar a tela mantém a chamada', 'Mais opções reúne tela cheia e miniplayer']
+    points: ['Parar a tela mantém a chamada', 'Mais opções reúne os recursos de exibição']
   },
   {
     icon: 'grid',
     eyebrow: 'Transmissões',
     title: 'Escolha a tela que quer acompanhar',
-    description: 'Com várias pessoas compartilhando, clique em Destacar. A tela escolhida cresce e as outras ficam acessíveis em miniaturas.',
+    description: 'Com várias pessoas compartilhando, use Destacar. A tela escolhida cresce e as outras ficam acessíveis em miniaturas.',
     points: ['Troque de tela sem sair do foco', 'Ver todas retorna à grade']
   }
 ];
@@ -365,6 +365,7 @@ function Icon({ name }: { name: IconName }) {
     ,grid: <><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></>,
     download: <><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 20h16"/></>,
     refresh: <><path d="M20 7v5h-5"/><path d="M4 17v-5h5"/><path d="M6.1 8.5A7 7 0 0 1 18.8 7L20 12M4 12l1.2 5A7 7 0 0 0 17.9 15.5"/></>,
+    warning: <><path d="M10.2 4.2 2.8 17a2 2 0 0 0 1.7 3h15a2 2 0 0 0 1.7-3L13.8 4.2a2 2 0 0 0-3.6 0Z"/><path d="M12 9v4M12 17h.01"/></>,
     check: <path d="m5 12.5 4.2 4.2L19 7"/>,
     guide: <><path d="M4 5.5A3.5 3.5 0 0 1 7.5 2H12v18H7.5A3.5 3.5 0 0 0 4 23V5.5Z"/><path d="M20 5.5A3.5 3.5 0 0 0 16.5 2H12v18h4.5A3.5 3.5 0 0 1 20 23V5.5Z"/></>
   };
@@ -508,7 +509,7 @@ function OnboardingPreview({ step }: { step: number }) {
 
 function SegmentedSelector<T extends number>({ label, suffix, options, value, disabled = false, premium, fullWidth = false, onChange }: { label: string; suffix: string; options: T[]; value: T; disabled?: boolean; premium?: T; fullWidth?: boolean; onChange: (value: T) => void }) {
   const activeIndex = Math.max(0, options.indexOf(value));
-  return <fieldset className={`profile-fieldset ${fullWidth ? 'is-full-width' : ''}`}><legend><span>{label}</span><small>{suffix}</small></legend><div className={`segmented-control ${premium === value ? 'is-premium-selected' : ''}`} style={{ '--active-index': activeIndex, '--option-count': options.length } as React.CSSProperties}>{premium === value && <span className="premium-particles" aria-hidden="true">{PREMIUM_PARTICLES.map(([x, y, size, duration, delay, jitter], index) => <i key={index} style={{ '--particle-x': x, '--particle-y': y, '--particle-size': size, '--particle-duration': duration, '--particle-delay': delay, '--particle-jitter': jitter } as React.CSSProperties}/>)}</span>}{options.map(option => <button key={option} className={`${option === value ? 'is-active' : ''} ${option === premium ? 'is-premium' : ''}`} type="button" disabled={disabled} onClick={() => onChange(option)}>{option}{label === 'Resolução' ? 'p' : ''}</button>)}</div></fieldset>;
+  return <fieldset className={`profile-fieldset ${fullWidth ? 'is-full-width' : ''}`}><legend><span>{label}</span>{suffix && <small>{suffix}</small>}</legend><div className={`segmented-control ${premium === value ? 'is-premium-selected' : ''}`} style={{ '--active-index': activeIndex, '--option-count': options.length } as React.CSSProperties}>{premium === value && <span className="premium-particles" aria-hidden="true">{PREMIUM_PARTICLES.map(([x, y, size, duration, delay, jitter], index) => <i key={index} style={{ '--particle-x': x, '--particle-y': y, '--particle-size': size, '--particle-duration': duration, '--particle-delay': delay, '--particle-jitter': jitter } as React.CSSProperties}/>)}</span>}{options.map(option => <button key={option} className={`${option === value ? 'is-active' : ''} ${option === premium ? 'is-premium' : ''}`} type="button" disabled={disabled} onClick={() => onChange(option)}>{option}{label === 'Resolução' ? 'p' : ''}</button>)}</div></fieldset>;
 }
 
 function Avatar({ avatar, name, speaking = false, leader = false, size = 'normal' }: { avatar: string; name: string; speaking?: boolean; leader?: boolean; size?: 'small' | 'normal' | 'large' }) {
@@ -1389,7 +1390,7 @@ export default function RoomApp() {
   const [playbackEnabled, setPlaybackEnabled] = useState(true);
   const playbackEnabledRef = useRef(true);
   const [speakingIds, setSpeakingIds] = useState<Set<string>>(() => new Set());
-  const [chatOpen, setChatOpen] = useState(() => !usesCompactLayout());
+  const [chatOpen, setChatOpen] = useState(() => Boolean(initialInvite || initialOwner) && !usesCompactLayout());
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const chatMessagesRef = useRef<ChatMessage[]>([]);
   const seenMessageIdsRef = useRef(new Set<string>());
@@ -1437,6 +1438,11 @@ export default function RoomApp() {
   const [animationsEnabled, setAnimationsEnabled] = useState(loadMotionPreference);
   const [microphonePending, setMicrophonePending] = useState(false);
   const [screenSharePending, setScreenSharePending] = useState(false);
+  const [desktopDisplayPickerOpen, setDesktopDisplayPickerOpen] = useState(false);
+  const [desktopDisplaySources, setDesktopDisplaySources] = useState<DesktopDisplaySource[]>([]);
+  const [desktopDisplayFilter, setDesktopDisplayFilter] = useState<'screen' | 'window'>('screen');
+  const [desktopDisplaySelectionPending, setDesktopDisplaySelectionPending] = useState(false);
+  const [desktopSystemAudioAvailable, setDesktopSystemAudioAvailable] = useState(false);
   const [audioSettings, setAudioSettings] = useState<AudioSettings>(() => ({
     inputDeviceId: '',
     outputDeviceId: '',
@@ -1483,6 +1489,7 @@ export default function RoomApp() {
   const emojiPanelRef = useRef<HTMLElement>(null);
   const chatSettingsRef = useRef<HTMLDivElement>(null);
   const onboardingDialogRef = useRef<HTMLElement>(null);
+  const desktopDisplayDialogRef = useRef<HTMLElement>(null);
   const joinInputShellRef = useRef<HTMLDivElement>(null);
   const callErrorTextRef = useRef('');
   const reconnectTimerRef = useRef<number | null>(null);
@@ -1628,6 +1635,55 @@ export default function RoomApp() {
       unsubscribe?.();
     };
   }, []);
+  useEffect(() => {
+    const bridge = window.screenLinkDesktop;
+    if (!bridge?.onDisplayPickerState) return;
+    return bridge.onDisplayPickerState(state => {
+      setDesktopDisplaySelectionPending(false);
+      if (!state.open) {
+        setDesktopDisplayPickerOpen(false);
+        return;
+      }
+      const sources = Array.isArray(state.sources) ? state.sources : [];
+      setDesktopDisplaySources(sources);
+      setDesktopSystemAudioAvailable(Boolean(state.systemAudioAvailable));
+      setDesktopDisplayFilter(sources.some(source => source.kind === 'screen') ? 'screen' : 'window');
+      setDesktopDisplayPickerOpen(true);
+    });
+  }, []);
+  useEffect(() => {
+    if (!desktopDisplayPickerOpen) return;
+    const dialog = desktopDisplayDialogRef.current;
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusFrame = window.requestAnimationFrame(() => {
+      dialog?.querySelector<HTMLElement>('.desktop-display-source')?.focus({ preventScroll: true });
+    });
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        void window.screenLinkDesktop?.cancelDisplayPicker?.();
+        return;
+      }
+      if (event.key !== 'Tab' || !dialog) return;
+      const focusable = [...dialog.querySelectorAll<HTMLElement>('button:not(:disabled), [tabindex]:not([tabindex="-1"])')];
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.removeEventListener('keydown', onKeyDown);
+      previouslyFocused?.focus({ preventScroll: true });
+    };
+  }, [desktopDisplayPickerOpen]);
   useEffect(() => {
     setFocusedScreenId(current => {
       if (!current) return null;
@@ -2970,6 +3026,22 @@ export default function RoomApp() {
     return () => window.clearTimeout(releaseEndingState);
   }, [destroyPeer, disposeMicrophonePipeline, mode, stopScreenShare]);
 
+  const cancelDesktopDisplayPicker = useCallback(async () => {
+    setDesktopDisplayPickerOpen(false);
+    setDesktopDisplaySelectionPending(false);
+    await window.screenLinkDesktop?.cancelDisplayPicker?.().catch(() => false);
+  }, []);
+
+  const chooseDesktopDisplaySource = useCallback(async (sourceId: string) => {
+    if (desktopDisplaySelectionPending) return;
+    setDesktopDisplaySelectionPending(true);
+    const accepted = await window.screenLinkDesktop?.chooseDisplaySource?.(sourceId).catch(() => false);
+    if (!accepted) {
+      setDesktopDisplaySelectionPending(false);
+      setError('Essa tela não está mais disponível. Abra o seletor novamente.');
+    }
+  }, [desktopDisplaySelectionPending]);
+
   const toggleScreenShare = useCallback(async () => {
     if (screenSharePendingRef.current) return;
     if (sharingRef.current) {
@@ -3020,7 +3092,11 @@ export default function RoomApp() {
       }, { once: true });
     } catch (screenError) {
       if (screenError instanceof DOMException && screenError.name === 'NotAllowedError') return;
-      setError('Não foi possível iniciar o compartilhamento. Tente escolher novamente a tela, janela ou aba.');
+      console.error('Falha ao iniciar o compartilhamento de tela.', screenError);
+      const unavailableSource = screenError instanceof DOMException && ['AbortError', 'NotFoundError', 'NotReadableError'].includes(screenError.name);
+      setError(unavailableSource
+        ? 'A tela escolhida não ficou disponível. Feche outros seletores de compartilhamento e tente novamente.'
+        : 'Não foi possível iniciar o compartilhamento. Tente escolher novamente a tela, janela ou aba.');
     } finally {
       if (requestId === screenShareRequestIdRef.current) {
         screenSharePendingRef.current = false;
@@ -3143,6 +3219,7 @@ export default function RoomApp() {
     history.replaceState(null, '', location.pathname);
     setSession(next);
     setMode('connecting');
+    setChatOpen(!usesCompactLayout());
     void acquireMicrophone();
   }
 
@@ -3171,6 +3248,8 @@ export default function RoomApp() {
     sessionRef.current = nextSession;
     setSession(nextSession);
     setMode('connecting');
+    setControlsOpen(false);
+    setChatOpen(!usesCompactLayout());
     void acquireMicrophone();
   }
 
@@ -3231,6 +3310,7 @@ export default function RoomApp() {
     sessionRef.current = null;
     setSession(null);
     setMode('landing');
+    setChatOpen(false);
     setLeaveMenuOpen(false);
     setControlsOpen(false);
     setQrOpen(false);
@@ -3244,6 +3324,12 @@ export default function RoomApp() {
 
   function closeRoom() {
     exitRoom(true);
+  }
+
+  function retryConnection() {
+    setError('');
+    setMode('connecting');
+    reconnectNowRef.current?.();
   }
 
   async function changeInputDevice(deviceId: string) {
@@ -3715,12 +3801,14 @@ export default function RoomApp() {
   const joinEntryError = !session && error === INVALID_ROOM_ENTRY_ERROR;
   const callErrorVisible = Boolean(error && mode !== 'error' && !joinEntryError);
   if (callErrorVisible) callErrorTextRef.current = error;
+  const connectionRetryAvailable = Boolean(session && /servidor|sincronizar|conexão será refeita/i.test(callErrorTextRef.current));
   const onboarding = ONBOARDING_STEPS[onboardingStep];
   const activeChat = chatOpen;
   const activeResolution = automaticQuality ? 720 : resolution;
   const activeFps = automaticQuality ? 30 : fps;
   const effectiveBitrateMbps = adaptiveBitrate ? adaptiveTargetBitrateMbps(activeResolution, activeFps, Math.max(1, connectedPeerCount), adaptiveNetworkLevel) : bitrateMbps;
   const screenShareSupported = typeof navigator.mediaDevices?.getDisplayMedia === 'function';
+  const compactJoinPanel = phone && !session;
   const chatCanSend = Boolean(session && selfId && mode !== 'error');
   const chatPlaceholder = !session
     ? 'Entre em uma chamada para conversar'
@@ -3747,9 +3835,13 @@ export default function RoomApp() {
   const chatSettingsPresence = useMotionPresence(!phone && chatSettingsOpen, '--dropdown-close-dur', 150, animationsEnabled);
   const profilePresence = useMotionPresence(!phone && profileOpen, '--dropdown-close-dur', 150, animationsEnabled);
   const qrPresence = useMotionPresence(!phone && qrOpen, '--modal-close-dur', 150, animationsEnabled);
+  const desktopDisplayPickerPresence = useMotionPresence(desktopDisplayPickerOpen, '--modal-close-dur', 150, animationsEnabled);
   const onboardingPresence = useMotionPresence(onboardingOpen, '--modal-close-dur', 150, animationsEnabled);
   const updatePresence = useMotionPresence(updateNoticeVisible, '--toast-close', 250, animationsEnabled);
   const callErrorPresence = useMotionPresence(callErrorVisible, '--toast-close', 250, animationsEnabled);
+  const desktopScreenSourceCount = desktopDisplaySources.filter(source => source.kind === 'screen').length;
+  const desktopWindowSourceCount = desktopDisplaySources.filter(source => source.kind === 'window').length;
+  const visibleDesktopDisplaySources = desktopDisplaySources.filter(source => source.kind === desktopDisplayFilter);
   void peerVersion;
 
   const closeDockSheets = useCallback(() => {
@@ -4044,6 +4136,7 @@ export default function RoomApp() {
   const morePopover = (mobile ? moreMenuOpen : moreMenuPresence.present) ? (
     <section className={`dock-popover more-popover viewing-popover ${mobile ? '' : `t-dropdown ${moreMenuPresence.className}`}`} data-origin="bottom-center" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="more-sheet-title" {...dockSheetGesture}>
       <header><strong id="more-sheet-title">Mais opções</strong><small>ESTE DISPOSITIVO</small><button className="mobile-sheet-close" type="button" onClick={() => dismissDockSheet()} aria-label="Fechar mais opções"><Icon name="close"/></button></header>
+      {phone && <button type="button" onClick={() => { setMoreMenuOpen(false); setControlsOpen(true); setChatOpen(false); setProfileOpen(false); }}><Icon name="settings"/><span><strong>Controles da sala</strong><small>Convite, participantes e qualidade</small></span><Icon name="chevron"/></button>}
       {mobile && <button type="button" onClick={() => { setMoreMenuOpen(false); setScreenMenuOpen(true); }}><Icon name="screen"/><span><strong>Compartilhamentos</strong><small>{remoteSharingParticipants.length ? `Ajustar áudio de ${remoteSharingParticipants.length} tela${remoteSharingParticipants.length === 1 ? '' : 's'}` : screenShareSupported ? 'Tela, áudio e bitrate' : 'Áudio das telas recebidas'}</small></span><Icon name="chevron"/></button>}
       <button type="button" onClick={() => void toggleFullscreen()}><Icon name="expand"/><span><strong>{document.fullscreenElement ? 'Sair da tela cheia' : 'Tela cheia'}</strong><small>Amplia a área compartilhada</small></span></button>
       <button type="button" onClick={() => void togglePictureInPicture()} disabled={!sharingParticipants.length}><Icon name="pip"/><span><strong>Miniplayer</strong><small>{sharingParticipants.length ? 'Mantém uma tela sobre as outras janelas' : 'Disponível quando alguém compartilhar'}</small></span></button>
@@ -4072,7 +4165,7 @@ export default function RoomApp() {
             <div ref={joinInputShellRef} className={`t-input ${joinEntryError ? 'is-error' : ''}`}><Icon name="link"/><input aria-label="Código ou link da chamada" aria-describedby="join-room-error" aria-invalid={joinEntryError} value={joinValue} onChange={event => { setJoinValue(event.target.value); joinInputShellRef.current?.classList.remove('is-shaking'); if (error) setError(''); }} placeholder="Cole o código da sala" autoComplete="off" autoCapitalize="characters" enterKeyHint="go" spellCheck={false} maxLength={512}/><button type="submit" disabled={!joinValue.trim()}>Entrar</button></div>
             <p id="join-room-error" className="t-error-msg" role="alert">{INVALID_ROOM_ENTRY_ERROR}</p>
           </form>
-          {loadOwnerSession() && <button className="unified-resume" type="button" onClick={() => { setSession(loadOwnerSession()); setMode('connecting'); }}>Retomar sua última sala</button>}
+          {loadOwnerSession() && <button className="unified-resume" type="button" onClick={() => { setSession(loadOwnerSession()); setMode('connecting'); setChatOpen(!usesCompactLayout()); }}>Retomar sua última sala</button>}
         </section>
       ) : (
         <section className="panel-section unified-invite-section">
@@ -4086,21 +4179,21 @@ export default function RoomApp() {
           <div className="unified-participant-list">{connectedParticipants.map(participant => <div key={participant.id}><Avatar avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} size="small"/><span><strong>{participant.name}{participant.id === selfId ? ' · você' : ''}</strong><small>{participant.sharing ? 'Compartilhando tela' : participant.microphoneEnabled ? 'Microfone ativo' : participant.status}</small></span>{participant.id === leaderId && <Icon name="crown"/>}</div>)}</div>
         </section>}
         {session && mobile && !screenShareSupported && <section className="panel-section mobile-screen-capability" role="status"><Icon name="screen"/><span><strong>Compartilhamento pelo celular</strong><small>Este navegador pode assistir à chamada, mas não consegue enviar a tela.</small></span></section>}
-        <section className="panel-section quality-section">
-          <div className="section-heading"><h3>Qualidade do vídeo</h3><small>{automaticQuality ? 'AUTOMÁTICA' : 'MANUAL'}</small></div>
+        {!compactJoinPanel && <section className="panel-section quality-section">
+          <div className="section-heading"><h3>Qualidade do vídeo</h3><small>{automaticQuality ? `${activeResolution}p · ${activeFps} FPS` : 'Manual'}</small></div>
           <button className={`toggle-row ${automaticQuality ? 'is-active' : ''}`} type="button" role="switch" aria-checked={automaticQuality} onClick={() => changeAutomaticQuality(!automaticQuality)}><Icon name="settings"/><span className="toggle-row-copy"><strong>Resolução e fluidez automáticas</strong><small>{activeResolution}p · até {activeFps} FPS</small></span><MotionSwitch on={automaticQuality}/></button>
           <div className="quality-controls">
-            <SegmentedSelector label="Resolução" suffix="resolução" options={RESOLUTIONS} value={resolution} disabled={automaticQuality} premium={1080} onChange={value => { automaticQualityRef.current = false; setAutomaticQuality(false); void applyVideoProfile(value, fpsRef.current); }}/>
-            <SegmentedSelector label="Fluidez" suffix="FPS" options={FRAME_RATES} value={fps} disabled={automaticQuality} premium={60} onChange={value => { automaticQualityRef.current = false; setAutomaticQuality(false); void applyVideoProfile(resolutionRef.current, value); }}/>
-            {!session && <SegmentedSelector label="Participantes" suffix="máximo" options={PARTICIPANT_LIMITS} value={maxParticipants} fullWidth onChange={setMaxParticipants}/>}
+            <SegmentedSelector label="Resolução" suffix="" options={RESOLUTIONS} value={resolution} disabled={automaticQuality} premium={1080} onChange={value => { automaticQualityRef.current = false; setAutomaticQuality(false); void applyVideoProfile(value, fpsRef.current); }}/>
+            <SegmentedSelector label="Fluidez" suffix="" options={FRAME_RATES} value={fps} disabled={automaticQuality} premium={60} onChange={value => { automaticQualityRef.current = false; setAutomaticQuality(false); void applyVideoProfile(resolutionRef.current, value); }}/>
+            {!session && <SegmentedSelector label="Participantes" suffix="" options={PARTICIPANT_LIMITS} value={maxParticipants} fullWidth onChange={setMaxParticipants}/>}
           </div>
           <div className="sidebar-bitrate-settings">
             <div className="subsection-heading"><strong>Transmissão</strong><small>ATÉ {formatBitrate(effectiveBitrateMbps)}</small></div>
             <button className={`toggle-row bitrate-toggle ${adaptiveBitrate ? 'is-active' : ''}`} type="button" role="switch" aria-checked={adaptiveBitrate} onClick={() => changeAdaptiveBitrate(!adaptiveBitrate)}><Icon name="link"/><span className="toggle-row-copy"><strong>Bitrate adaptativo</strong><small>Ajusta bitrate, escala e FPS conforme perda, latência e participantes</small></span><MotionSwitch on={adaptiveBitrate}/></button>
             <div className={`bitrate-control sidebar-bitrate-control ${adaptiveBitrate ? 'is-disabled' : ''}`}><label htmlFor="sidebar-bitrate"><strong>Limite manual</strong><small>Disponível com o modo adaptativo desligado</small></label><input id="sidebar-bitrate" aria-label="Limite manual de bitrate" type="range" min={MIN_BITRATE_MBPS} max={MAX_BITRATE_MBPS} step="0.5" value={bitrateMbps} disabled={adaptiveBitrate} onChange={event => changeBitrate(Number(event.target.value))}/><output>{formatBitrate(bitrateMbps)}</output></div>
           </div>
-        </section>
-        <section className="panel-section interface-motion-section">
+        </section>}
+        {!compactJoinPanel && <section className="panel-section interface-motion-section">
           <div className="section-heading"><h3>Interface</h3><small>ESTE DISPOSITIVO</small></div>
           <button className={`toggle-row ${animationsEnabled ? 'is-active' : ''}`} type="button" role="switch" aria-checked={animationsEnabled} onClick={() => setAnimationsEnabled(enabled => !enabled)}><Icon name="motion"/><span className="toggle-row-copy"><strong>Animações e movimento</strong><small>{animationsEnabled ? 'Mascote e transições da interface' : 'Efeitos da interface pausados'}</small></span><MotionSwitch on={animationsEnabled}/></button>
           <button className="interface-action-row" type="button" onClick={reopenOnboarding}><Icon name="guide"/><span><strong>Rever tutorial</strong><small>Conheça chamadas, chat e compartilhamentos</small></span><Icon name="chevron"/></button>
@@ -4117,7 +4210,7 @@ export default function RoomApp() {
                     : null}
             {desktopUpdate.message && <p>{desktopUpdate.message}</p>}
           </div>}
-        </section>
+        </section>}
     </div>
   );
 
@@ -4128,13 +4221,13 @@ export default function RoomApp() {
         <button className={microphoneEnabled ? 'is-on' : ''} type="button" onClick={() => void toggleMicrophone()} disabled={microphonePending} aria-busy={microphonePending} aria-label={microphonePending ? 'Abrindo microfone' : microphoneEnabled ? 'Silenciar microfone' : 'Ativar microfone'} data-label={microphonePending ? 'Abrindo…' : 'Microfone'}><MotionIcon active={microphoneEnabled} activeIcon="microphone" inactiveIcon="microphoneOff"/></button>
         <button className={`dock-chevron ${audioMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { if (audioMenuOpen) dismissDockSheet(); else { setAudioMenuOpen(true); setScreenMenuOpen(false); setMoreMenuOpen(false); setLeaveMenuOpen(false); } }} aria-expanded={audioMenuOpen} aria-label="Configurações de áudio" data-label="Ajustes"><Icon name="chevronDown"/></button>
       </div>
-      {(!mobile || screenShareSupported) && <div className="dock-split-control screen-split-control">
+      {(!phone && (!mobile || screenShareSupported)) && <div className="dock-split-control screen-split-control">
         <button className={`${sharing ? 'is-on' : ''} ${!sharing && !screenShareSupported ? 'is-unsupported' : ''}`} type="button" onClick={() => void toggleScreenShare()} disabled={screenSharePending || (!sharing && !screenShareSupported)} aria-label={screenSharePending ? 'Abrindo seletor de tela' : sharing ? 'Parar compartilhamento' : screenShareSupported ? 'Compartilhar tela' : 'Compartilhamento de tela indisponível neste navegador'} aria-pressed={sharing} aria-busy={screenSharePending} data-label={screenSharePending ? 'Abrindo…' : sharing ? 'Parar tela' : screenShareSupported ? 'Compartilhar' : 'Indisponível'} title={!sharing && !screenShareSupported ? 'Este navegador não permite compartilhar a tela' : undefined}><Icon name="screen"/></button>
         <button className={`dock-chevron ${screenMenuOpen ? 'is-on' : ''}`} type="button" onClick={() => { if (screenMenuOpen) dismissDockSheet(); else { setScreenMenuOpen(true); setAudioMenuOpen(false); setMoreMenuOpen(false); setLeaveMenuOpen(false); } }} aria-expanded={screenMenuOpen} aria-label="Configurações da tela" data-label="Ajustes"><Icon name="chevronDown"/></button>
       </div>}
       <button className={`dock-chat-button ${activeChat ? 'is-on' : ''}`} type="button" onClick={toggleChatSidebar} aria-label={activeChat ? 'Fechar chat' : unreadMessages ? `Abrir chat, ${unreadMessages} mensagem${unreadMessages === 1 ? '' : 's'} não lida${unreadMessages === 1 ? '' : 's'}` : 'Abrir chat'} data-label="Chat"><Icon name="chat"/><span className="chat-unread-badge t-badge" data-open={unreadMessages > 0 ? 'true' : 'false'} aria-hidden="true"><span className="t-badge-dot">{unreadMessages === 99 ? '99+' : unreadMessages}</span></span></button>
       <button className={moreMenuOpen ? 'is-on' : ''} type="button" onClick={() => { if (moreMenuOpen) dismissDockSheet(); else { setMoreMenuOpen(true); setAudioMenuOpen(false); setScreenMenuOpen(false); setLeaveMenuOpen(false); } }} aria-expanded={moreMenuOpen} aria-label="Mais opções" data-label="Mais"><Icon name="more"/></button>
-      {mobile && <button className={controlsOpen ? 'is-on mobile-controls-trigger' : 'mobile-controls-trigger'} type="button" onClick={() => { if (controlsOpen) dismissControlsSheet(); else { setControlsOpen(true); setChatOpen(false); setProfileOpen(false); setAudioMenuOpen(false); setScreenMenuOpen(false); setMoreMenuOpen(false); setLeaveMenuOpen(false); } }} aria-expanded={controlsOpen} aria-label="Abrir controles" data-label="Controles"><Icon name="settings"/></button>}
+      {mobile && !phone && <button className={controlsOpen ? 'is-on mobile-controls-trigger' : 'mobile-controls-trigger'} type="button" onClick={() => { if (controlsOpen) dismissControlsSheet(); else { setControlsOpen(true); setChatOpen(false); setProfileOpen(false); setAudioMenuOpen(false); setScreenMenuOpen(false); setMoreMenuOpen(false); setLeaveMenuOpen(false); } }} aria-expanded={controlsOpen} aria-label="Abrir controles" data-label="Controles"><Icon name="settings"/></button>}
       <span className="dock-divider"/>
       <button className="hangup" type="button" onClick={() => { if (leaveMenuOpen) dismissDockSheet(); else { setLeaveMenuOpen(true); setAudioMenuOpen(false); setScreenMenuOpen(false); setMoreMenuOpen(false); } }} aria-expanded={leaveMenuOpen} aria-label="Opções para sair da chamada" data-label="Sair"><Icon name="hangup"/></button>
       {!phone && dockPopovers}
@@ -4199,7 +4292,7 @@ export default function RoomApp() {
                 <div className="unified-chat-settings-anchor" ref={chatSettingsRef}>
                   <button className={`chat-settings-trigger ${chatSettingsOpen ? 'is-open' : ''}`} type="button" aria-label="Personalizar aparência do chat" aria-expanded={chatSettingsOpen} onClick={() => { if (chatSettingsOpen) dismissChatSettingsSheet(); else setChatSettingsOpen(true); }}><Icon name="settings"/></button>
                   {(phone ? chatSettingsOpen : chatSettingsPresence.present) && <section className={`chat-settings-popover ${phone ? '' : `t-dropdown ${chatSettingsPresence.className}`}`} data-origin="top-right" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-label="Aparência do chat" {...chatSettingsSheetGesture}>
-                    <header><strong>Aparência do chat</strong><small>SÓ NESTE DISPOSITIVO</small></header>
+                    <header><strong>Aparência do chat</strong><small>SÓ NESTE DISPOSITIVO</small>{phone && <button className="mobile-sheet-close" type="button" onClick={() => dismissChatSettingsSheet()} aria-label="Fechar aparência do chat"><Icon name="close"/></button>}</header>
                     <label><span><strong>Seu balão</strong><small>Destaque das suas mensagens</small></span><input type="color" value={chatAppearance.ownBubble} aria-label="Cor do seu balão" onChange={event => setChatAppearance(current => ({ ...current, ownBubble: event.currentTarget.value }))}/></label>
                     <label><span><strong>Outros balões</strong><small>Mensagens dos participantes</small></span><input type="color" value={chatAppearance.otherBubble} aria-label="Cor dos outros balões" onChange={event => setChatAppearance(current => ({ ...current, otherBubble: event.currentTarget.value }))}/></label>
                     <label><span><strong>Nomes</strong><small>Branco por padrão</small></span><input type="color" value={chatAppearance.nameColor} aria-label="Cor dos nomes" onChange={event => setChatAppearance(current => ({ ...current, nameColor: event.currentTarget.value }))}/></label>
@@ -4225,14 +4318,14 @@ export default function RoomApp() {
           )}
           {callDock}
         </section>
-        <aside className={`control-panel unified-control-panel ${controlsOpen ? 'is-open' : ''}`} role={phone && controlsOpen ? 'dialog' : undefined} aria-modal={phone && controlsOpen || undefined} aria-hidden={mobile && !controlsOpen} {...controlsSheetGesture}>
-          <div className="panel-header"><div><h2>Controles</h2></div><button className={`sidebar-connection-indicator room-status-${connectionQuality}`} type="button" aria-label={!session ? 'Pronto para iniciar uma chamada' : !signalingConnected ? 'Reconectando a sinalização; a mídia P2P existente foi preservada' : mediaLatency === null ? 'Conexão P2P aguardando medição' : `Conexão P2P com ${mediaLatency} milissegundos de latência e ${packetLossLabel} de perda`}><i/><MotionText value={session ? connectionStatusLabel : 'Pronto'} enabled={animationsEnabled}/><span className="connection-tooltip"><strong>{session ? !signalingConnected ? 'Reconectando sinalização' : mediaLatency === null ? 'Medindo conexão' : `${latencyLabel} ms · ${packetLossLabel} perda` : 'Sem chamada ativa'}</strong><small>{session ? !signalingConnected ? `${connectedPeerCount} par${connectedPeerCount === 1 ? '' : 'es'} P2P preservado${connectedPeerCount === 1 ? '' : 's'}` : `RTT e perda WebRTC · ${connectedPeerCount} par${connectedPeerCount === 1 ? '' : 'es'} · ${turnAvailable ? 'relay disponível' : 'conexão direta'}` : 'O status da rede aparecerá durante a chamada'}</small></span></button>{mobile && <button className="mobile-panel-close" type="button" onClick={() => dismissControlsSheet()} aria-label="Fechar controles"><Icon name="close"/></button>}</div>
-          {mobile && <button className="mobile-control-profile" type="button" onClick={() => { setProfileOpen(true); setControlsOpen(false); }}><Avatar avatar={profile.avatar} name={profile.name} leader={Boolean(selfId && selfId === leaderId)} size="small"/><span><strong>{profile.name}</strong><small>{profile.status}</small></span><Icon name="settings"/></button>}
+        <aside className={`control-panel unified-control-panel ${controlsOpen ? 'is-open' : ''} ${compactJoinPanel ? 'is-join-sheet' : ''}`} role={phone && controlsOpen ? 'dialog' : undefined} aria-modal={phone && controlsOpen || undefined} aria-hidden={mobile && !controlsOpen} {...controlsSheetGesture}>
+          <div className="panel-header"><div><h2>{compactJoinPanel ? 'Entrar em uma chamada' : 'Controles'}</h2></div>{!compactJoinPanel && <button className={`sidebar-connection-indicator room-status-${connectionQuality}`} type="button" aria-label={!session ? 'Pronto para iniciar uma chamada' : !signalingConnected ? 'Reconectando a sinalização; a mídia P2P existente foi preservada' : mediaLatency === null ? 'Conexão P2P aguardando medição' : `Conexão P2P com ${mediaLatency} milissegundos de latência e ${packetLossLabel} de perda`}><i/><MotionText value={session ? connectionStatusLabel : 'Pronto'} enabled={animationsEnabled}/><span className="connection-tooltip"><strong>{session ? !signalingConnected ? 'Reconectando sinalização' : mediaLatency === null ? 'Medindo conexão' : `${latencyLabel} ms · ${packetLossLabel} perda` : 'Sem chamada ativa'}</strong><small>{session ? !signalingConnected ? `${connectedPeerCount} par${connectedPeerCount === 1 ? '' : 'es'} P2P preservado${connectedPeerCount === 1 ? '' : 's'}` : `RTT e perda WebRTC · ${connectedPeerCount} par${connectedPeerCount === 1 ? '' : 'es'} · ${turnAvailable ? 'relay disponível' : 'conexão direta'}` : 'O status da rede aparecerá durante a chamada'}</small></span></button>}{mobile && <button className="mobile-panel-close" type="button" onClick={() => dismissControlsSheet()} aria-label={compactJoinPanel ? 'Fechar entrada por código' : 'Fechar controles'}><Icon name="close"/></button>}</div>
+          {mobile && !compactJoinPanel && <button className="mobile-control-profile" type="button" onClick={() => { setProfileOpen(true); setControlsOpen(false); }}><Avatar avatar={profile.avatar} name={profile.name} leader={Boolean(selfId && selfId === leaderId)} size="small"/><span><strong>{profile.name}</strong><small>{profile.status}</small></span><Icon name="settings"/></button>}
           <div className="panel-view">{callPanel}</div>
         </aside>
       </main>
-      {phone && (controlsOpen || profileOpen) && (
-        <button className="mobile-overlay-backdrop" type="button" tabIndex={-1} aria-label="Fechar painel" onClick={() => { if (profileOpen) dismissProfileSheet(); else dismissControlsSheet(); }}/>
+      {phone && (controlsOpen || profileOpen || chatSettingsOpen) && (
+        <button className="mobile-overlay-backdrop" type="button" tabIndex={-1} aria-label="Fechar painel" onClick={() => { if (profileOpen) dismissProfileSheet(); else if (chatSettingsOpen) dismissChatSettingsSheet(); else dismissControlsSheet(); }}/>
       )}
       {dockSheetOpen && <div ref={mobileSheetRef} className="mobile-sheet-layer">
         <button className="mobile-sheet-backdrop" type="button" tabIndex={-1} aria-label="Fechar painel" onClick={() => dismissDockSheet()}/>
@@ -4248,6 +4341,26 @@ export default function RoomApp() {
           <label>Avatares do app</label><div className="avatar-picker">{AVATARS.map(avatar => <button className={profile.avatar === avatar.id ? 'selected' : ''} type="button" key={avatar.id} onClick={() => updateProfile({ avatar: avatar.id })}><Avatar avatar={avatar.id} name={avatar.label}/><span>{avatar.label}</span></button>)}</div>
         </div>
       )}
+      {desktopDisplayPickerPresence.present && <div className={`desktop-display-picker-backdrop motion-overlay ${desktopDisplayPickerPresence.className}`} role="presentation" onPointerDown={event => { if (event.target === event.currentTarget) void cancelDesktopDisplayPicker(); }}>
+        <section ref={desktopDisplayDialogRef} className={`desktop-display-picker t-modal ${desktopDisplayPickerPresence.className}`} role="dialog" aria-modal="true" aria-labelledby="desktop-display-picker-title" aria-describedby="desktop-display-picker-description">
+          <header className="desktop-display-picker-header">
+            <span className="desktop-display-picker-icon" aria-hidden="true"><Icon name="screen"/></span>
+            <div className="desktop-display-picker-heading"><h2 id="desktop-display-picker-title">Compartilhar tela</h2><p id="desktop-display-picker-description">Escolha uma tela ou janela.</p></div>
+            <button type="button" onClick={() => void cancelDesktopDisplayPicker()} aria-label="Cancelar compartilhamento"><Icon name="close"/></button>
+          </header>
+          <nav className="desktop-display-picker-tabs" aria-label="Tipo de fonte">
+            <button className={desktopDisplayFilter === 'screen' ? 'is-active' : ''} type="button" aria-pressed={desktopDisplayFilter === 'screen'} disabled={!desktopScreenSourceCount} onClick={() => setDesktopDisplayFilter('screen')}>Telas <span>{desktopScreenSourceCount}</span></button>
+            <button className={desktopDisplayFilter === 'window' ? 'is-active' : ''} type="button" aria-pressed={desktopDisplayFilter === 'window'} disabled={!desktopWindowSourceCount} onClick={() => setDesktopDisplayFilter('window')}>Janelas <span>{desktopWindowSourceCount}</span></button>
+          </nav>
+          <div className="desktop-display-picker-scroll">
+            {visibleDesktopDisplaySources.length ? <div className="desktop-display-source-grid">{visibleDesktopDisplaySources.map(source => <button className="desktop-display-source" type="button" key={source.id} disabled={desktopDisplaySelectionPending} onClick={() => void chooseDesktopDisplaySource(source.id)}>
+              {source.thumbnail ? <img className="desktop-display-source-thumbnail" src={source.thumbnail} alt="" draggable={false}/> : <span className="desktop-display-source-placeholder"><Icon name="screen"/></span>}
+              <span className="desktop-display-source-label">{source.appIcon && <img src={source.appIcon} alt="" draggable={false}/>}<span>{source.name}</span></span>
+            </button>)}</div> : <p className="desktop-display-picker-empty">Nenhuma fonte disponível nesta categoria.</p>}
+          </div>
+          <footer className="desktop-display-picker-footer"><span><i aria-hidden="true"/>{desktopSystemAudioAvailable ? 'Áudio do sistema incluído quando disponível' : 'Somente o vídeo da fonte será enviado'}</span><button type="button" onClick={() => void cancelDesktopDisplayPicker()}>Cancelar</button></footer>
+        </section>
+      </div>}
       {(phone ? qrOpen : qrPresence.present) && <div className={`modal-backdrop ${phone ? '' : `motion-overlay ${qrPresence.className}`}`} role="presentation" onPointerDown={event => { if (event.target === event.currentTarget) dismissQrSheet(); }}><section className={`qr-modal ${phone ? '' : `t-modal ${qrPresence.className}`}`} role="dialog" aria-modal="true" aria-labelledby="room-qr-title" {...qrSheetGesture}><span className="eyebrow">SALA {roomLabel}</span><h2 id="room-qr-title">Entrar pelo QR Code</h2><p>Aponte a câmera do celular para abrir o convite completo.</p>{qrCode ? <img src={qrCode} alt={`QR Code da sala ${roomLabel}`}/> : <div className="qr-loading">Gerando QR Code…</div>}<button type="button" onClick={() => dismissQrSheet()}>Fechar</button></section></div>}
       {updatePresence.present && desktopUpdate && <aside className={`desktop-update-card t-toast ${updatePresence.className} is-${desktopUpdate.status}`} role="status" aria-live="polite">
         <div className="desktop-update-icon"><Icon name={desktopUpdate.status === 'downloaded' ? 'check' : desktopUpdate.status === 'downloading' ? 'download' : 'refresh'}/></div>
@@ -4297,7 +4410,7 @@ export default function RoomApp() {
           </footer>
         </section>
       </div>}
-      {callErrorPresence.present && <button className={`call-error motion-call-error ${callErrorPresence.className}`} type="button" onClick={() => setError('')}>{callErrorTextRef.current}<Icon name="close"/></button>}
+      {callErrorPresence.present && <aside className={`call-error motion-call-error ${callErrorPresence.className}`} role="alert" aria-live="assertive"><Icon name="warning"/><span>{callErrorTextRef.current}</span><div>{connectionRetryAvailable && <button type="button" onClick={retryConnection}><Icon name="refresh"/>Tentar novamente</button>}{connectionRetryAvailable && <button type="button" onClick={leaveRoom}>Sair</button>}<button className="call-error-dismiss" type="button" onClick={() => setError('')} aria-label="Fechar aviso"><Icon name="close"/></button></div></aside>}
     </div>
   );
 }
