@@ -1,6 +1,6 @@
 {
   "name": "screenlink-web",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Chamadas P2P, voz, chat e compartilhamento de tela no navegador e no desktop.",
   "author": "ScreenLink",
   "repository": {
@@ -15,6 +15,8 @@
     "build": "tsc --noEmit && vite build && node scripts/precompress-dist.mjs",
     "start": "node --env-file-if-exists=.env server.mjs",
     "test": "node scripts/smoke-signaling.mjs",
+    "test:noise-suppression": "node scripts/benchmark-noise-suppression.mjs",
+    "test:noise-runtime": "electron scripts/smoke-audio-worklet.mjs",
     "test:desktop-capture": "electron scripts/smoke-electron-display.mjs",
     "test:desktop-ui": "electron scripts/smoke-electron-display-ui.mjs",
     "desktop": "npm run build && electron .",
@@ -26,6 +28,7 @@
     "node": ">=22"
   },
   "dependencies": {
+    "@sapphi-red/web-noise-suppressor": "0.4.0",
     "electron-updater": "^6.8.9",
     "qrcode": "^1.5.4",
     "react": "^19.2.8",

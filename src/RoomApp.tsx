@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent as ReactAnimationEvent, type FormEvent, type TouchEvent as ReactTouchEvent } from 'react';
 import QRCode from 'qrcode';
 import { playInterfaceSound as playCallSound, setInterfaceSoundOutputDevice, unlockInterfaceSounds, type InterfaceSoundName } from './callSounds';
+import { createNoiseSuppressorPipeline, setNoiseSuppression, type NoiseSuppressorPipeline } from './audioNoiseSuppression';
 import { createPrivateRoom, parseInvite, signalUrl, type IceServerConfig, type Invite, type RoomParticipant, type RoomProfile, type SessionDescription } from './protocol';
 import { loadStoredProfile, prepareAvatar, profileStorageKind, saveStoredProfile, type DesktopDisplaySource, type DesktopUpdateState } from './profileStore';
 
@@ -1069,8 +1070,18 @@ function microphoneConstraints(settings: AudioSettings, support: VoiceSettingSup
   const processing = voiceProcessingConstraints(settings, support, exactSetting);
   return {
     ...(settings.inputDeviceId ? { deviceId: { exact: settings.inputDeviceId } } : {}),
+    channelCount: { ideal: 1 },
+    sampleRate: { ideal: 48_000 },
     ...processing
   };
+}
+
+function createMicrophoneAudioContext() {
+  try {
+    return new AudioContext({ latencyHint: 'interactive', sampleRate: 48_000 });
+  } catch {
+    return new AudioContext({ latencyHint: 'interactive' });
+  }
 }
 
 function readVoiceTrackSettings(track: MediaStreamTrack): Partial<Record<VoiceSettingKey, boolean>> {
@@ -1464,6 +1475,7 @@ export default function RoomApp() {
   const analyserRef = useRef<AnalyserNode | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const microphoneGainRef = useRef<GainNode | null>(null);
+  const microphoneNoiseSuppressorRef = useRef<NoiseSuppressorPipeline | null>(null);
   const microphoneSourceStreamRef = useRef<MediaStream | null>(null);
   const audioSettingsRef = useRef(audioSettings);
   const verifiedVoiceSettingsRef = useRef<Partial<Record<VoiceSettingKey, boolean>>>({});
@@ -2751,6 +2763,8 @@ export default function RoomApp() {
     microphoneSourceStreamRef.current = null;
     localMicrophoneStreamRef.current = null;
     microphoneGainRef.current = null;
+    microphoneNoiseSuppressorRef.current?.destroy();
+    microphoneNoiseSuppressorRef.current = null;
     analyserRef.current = null;
     const context = audioContextRef.current;
     audioContextRef.current = null;
@@ -2811,12 +2825,13 @@ export default function RoomApp() {
       localMicrophoneStreamRef.current = sourceStream;
       let outboundTrack = sourceTrack;
       try {
-        const context = new AudioContext();
+        const context = createMicrophoneAudioContext();
         const source = context.createMediaStreamSource(sourceStream);
         const gain = context.createGain();
         const limiter = context.createDynamicsCompressor();
         const destination = context.createMediaStreamDestination();
         const analyser = context.createAnalyser();
+        const noiseSuppressor = await createNoiseSuppressorPipeline(context, effectiveSettings.noiseSuppression).catch(() => null);
         analyser.fftSize = 256;
         gain.gain.value = settings.inputVolume / 100;
         limiter.threshold.value = -3;
@@ -2824,12 +2839,18 @@ export default function RoomApp() {
         limiter.ratio.value = 12;
         limiter.attack.value = .003;
         limiter.release.value = .16;
-        source.connect(gain);
+        if (noiseSuppressor) {
+          source.connect(noiseSuppressor.input);
+          noiseSuppressor.output.connect(gain);
+        } else {
+          source.connect(gain);
+        }
         gain.connect(limiter);
         limiter.connect(destination);
         limiter.connect(analyser);
         audioContextRef.current = context;
         microphoneGainRef.current = gain;
+        microphoneNoiseSuppressorRef.current = noiseSuppressor;
         analyserRef.current = analyser;
         outboundTrack = destination.stream.getAudioTracks()[0] ?? sourceTrack;
         void context.resume().catch(() => undefined);
@@ -2895,6 +2916,12 @@ export default function RoomApp() {
   }, [disposeMicrophonePipeline, playSound, updateSelfMediaState, voiceSettingSupport]);
 
   acquireMicrophoneRef.current = acquireMicrophone;
+
+  useEffect(() => {
+    const context = audioContextRef.current;
+    if (!context) return;
+    setNoiseSuppression(microphoneNoiseSuppressorRef.current, audioSettings.noiseSuppression, context.currentTime);
+  }, [audioSettings.noiseSuppression]);
 
   const toggleMicrophone = useCallback(async () => {
     if (!localMicrophoneTrackRef.current || localMicrophoneTrackRef.current.readyState !== 'live') {

@@ -37,9 +37,10 @@ const MIME_TYPES = new Map([
   ['.jpeg', 'image/jpeg'],
   ['.webp', 'image/webp'],
   ['.ico', 'image/x-icon'],
+  ['.wasm', 'application/wasm'],
   ['.woff2', 'font/woff2']
 ]);
-const PRECOMPRESSED_EXTENSIONS = new Set(['.html', '.js', '.css', '.json', '.svg']);
+const PRECOMPRESSED_EXTENSIONS = new Set(['.html', '.js', '.css', '.json', '.svg', '.wasm']);
 const STATIC_ASSET_CACHE_LIMIT = 64;
 const STATIC_ASSET_MAX_BYTES = 1024 * 1024;
 const staticAssetCache = new Map();
@@ -493,7 +494,7 @@ function setSecurityHeaders(response) {
   response.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
   response.setHeader('Referrer-Policy', 'no-referrer');
   response.setHeader('Permissions-Policy', 'camera=(), microphone=(self), display-capture=(self)');
-  response.setHeader('Content-Security-Policy', "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; media-src 'self' blob:; style-src 'self'; style-src-elem 'self'; style-src-attr 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
+  response.setHeader('Content-Security-Policy', "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; media-src 'self' blob:; style-src 'self'; style-src-elem 'self'; style-src-attr 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
 }
 
 function websocketOriginAllowed(request) {

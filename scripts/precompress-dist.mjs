@@ -8,7 +8,7 @@ const brotli = promisify(brotliCompress);
 const gzipFile = promisify(gzip);
 const PROJECT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DIST_DIR = path.join(PROJECT_DIR, 'dist');
-const COMPRESSIBLE_EXTENSIONS = new Set(['.css', '.html', '.js', '.json', '.svg']);
+const COMPRESSIBLE_EXTENSIONS = new Set(['.css', '.html', '.js', '.json', '.svg', '.wasm']);
 const MINIMUM_BYTES = 256;
 
 async function filesBelow(directory) {
@@ -26,14 +26,15 @@ let gzipBytes = 0;
 let compressedFiles = 0;
 
 for (const filePath of await filesBelow(DIST_DIR)) {
-  if (!COMPRESSIBLE_EXTENSIONS.has(path.extname(filePath).toLowerCase())) continue;
+  const extension = path.extname(filePath).toLowerCase();
+  if (!COMPRESSIBLE_EXTENSIONS.has(extension)) continue;
   const source = await readFile(filePath);
   if (source.byteLength < MINIMUM_BYTES) continue;
 
   const [brotliResult, gzipResult] = await Promise.all([
     brotli(source, {
       params: {
-        [zlibConstants.BROTLI_PARAM_MODE]: zlibConstants.BROTLI_MODE_TEXT,
+        [zlibConstants.BROTLI_PARAM_MODE]: extension === '.wasm' ? zlibConstants.BROTLI_MODE_GENERIC : zlibConstants.BROTLI_MODE_TEXT,
         [zlibConstants.BROTLI_PARAM_QUALITY]: 11
       }
     }),
