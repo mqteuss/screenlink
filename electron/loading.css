@@ -28,19 +28,18 @@ main {
 }
 
 .brand-tile {
-  width: 56px;
-  height: 56px;
-  border-radius: 12px;
-  border: 1px solid rgb(255 255 255 / 12%);
-  background: rgb(255 255 255 / 5%);
+  width: 44px;
+  height: 44px;
+  border: 0;
+  background: transparent;
   display: grid;
   place-items: center;
   color: #f3f3f3;
 }
 
 .brand-mark {
-  width: 28px;
-  height: 28px;
+  width: 44px;
+  height: 44px;
   display: block;
 }
 

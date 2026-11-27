@@ -1,6 +1,6 @@
 {
   "name": "screenlink-web",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "description": "Chamadas P2P, voz, chat e compartilhamento de tela no navegador e no desktop.",
   "author": "ScreenLink",
   "repository": {
@@ -68,7 +68,7 @@
       "releaseType": "release"
     },
     "win": {
-      "icon": "build/icon.svg",
+      "icon": "build/icon.ico",
       "target": [
         {
           "target": "nsis",
@@ -90,7 +90,18 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "ScreenLink",
-      "artifactName": "ScreenLink-Setup-${arch}.${ext}"
+      "artifactName": "ScreenLink-Setup-${arch}.${ext}",
+      "installerSidebar": "build/installerSidebar.bmp",
+      "installerHeader": "build/installerHeader.bmp",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "include": "build/installer.nsh",
+      "language": "1046",
+      "installerLanguages": [
+        "pt_BR",
+        "en_US"
+      ],
+      "runAfterFinish": true
     },
     "portable": {
       "artifactName": "ScreenLink-Portable-${arch}.${ext}"

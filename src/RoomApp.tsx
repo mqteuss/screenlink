@@ -352,6 +352,16 @@ const RoomDevicePicker = memo(function RoomDevicePicker({ label, input = false, 
     if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
     closeTimerRef.current = window.setTimeout(() => setOpen(false), 240);
   };
+  const handlePointerEnter = (event: React.PointerEvent) => {
+    if (event.pointerType === 'mouse') openPicker();
+  };
+  const handlePointerLeave = (event: React.PointerEvent) => {
+    if (event.pointerType === 'mouse') scheduleClose();
+  };
+  const togglePicker = () => {
+    if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
+    setOpen(current => !current);
+  };
   useEffect(() => {
     if (!open) return;
     const closeOnOutsideClick = (event: PointerEvent) => {
@@ -361,11 +371,11 @@ const RoomDevicePicker = memo(function RoomDevicePicker({ label, input = false, 
     return () => document.removeEventListener('pointerdown', closeOnOutsideClick);
   }, [open]);
   useEffect(() => () => { if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current); }, []);
-  return <div ref={pickerRef} className={`room-device-picker ${open ? 'is-open' : ''}`} onPointerEnter={openPicker} onPointerLeave={scheduleClose}>
-    <button type="button" className="room-device-trigger" onClick={openPicker} aria-expanded={open}>
+  return <div ref={pickerRef} className={`room-device-picker ${open ? 'is-open' : ''}`} onPointerEnter={handlePointerEnter} onPointerLeave={handlePointerLeave}>
+    <button type="button" className="room-device-trigger" onClick={togglePicker} aria-expanded={open}>
       <Icon name={kind === 'audioinput' ? 'microphone' : 'volume'}/><span><strong>{label}</strong><small>{selected?.label || 'Padrão do sistema'}</small></span><Icon name="chevron"/>
     </button>
-    {open && <div className="room-device-options" aria-label={label} onPointerEnter={openPicker} onPointerLeave={scheduleClose}>
+    {open && <div className="room-device-options" aria-label={label} onPointerEnter={handlePointerEnter} onPointerLeave={handlePointerLeave}>
       <header className="room-device-options-header"><button type="button" onClick={() => setOpen(false)} aria-label="Voltar para configurações de áudio"><Icon name="chevron"/></button><strong>{label}</strong></header>
       <div className="room-device-options-list" role="listbox" aria-label={label}>{[{ deviceId: '', label: 'Padrão do sistema' }, ...available].map((device, index) => <button key={`${device.deviceId || 'default'}-${index}`} type="button" role="option" aria-selected={device.deviceId === value} onClick={() => { onChange(device.deviceId); setOpen(false); }}><Icon name={kind === 'audioinput' ? 'microphone' : 'volume'}/><span>{device.label || `${label} ${index + 1}`}</span>{device.deviceId === value && <b>✓</b>}</button>)}</div>
     </div>}
@@ -1287,6 +1297,7 @@ export default function RoomApp() {
   const emojiPickerRef = useRef<HTMLDivElement>(null);
   const emojiPanelRef = useRef<HTMLElement>(null);
   const chatSettingsRef = useRef<HTMLDivElement>(null);
+  const chatSettingsPopoverRef = useRef<HTMLElement>(null);
   const desktopDisplayDialogRef = useRef<HTMLElement>(null);
   const joinInputShellRef = useRef<HTMLDivElement>(null);
   const callErrorTextRef = useRef('');
@@ -1607,11 +1618,11 @@ export default function RoomApp() {
   }, [emojiOpen, phone]);
 
   useEffect(() => {
-    if (!chatSettingsOpen) return;
+    if (!chatSettingsOpen || phone) return;
     const dismiss = (event: PointerEvent) => {
-      if (!chatSettingsRef.current?.contains(event.target as Node)) {
-        if (phone) dismissMobileOverlayRef.current();
-        else setChatSettingsOpen(false);
+      const target = event.target as Node;
+      if (!chatSettingsRef.current?.contains(target) && !chatSettingsPopoverRef.current?.contains(target)) {
+        setChatSettingsOpen(false);
       }
     };
     document.addEventListener('pointerdown', dismiss);
@@ -4062,6 +4073,24 @@ export default function RoomApp() {
     </div>
   );
 
+  const chatSettingsPopover = (
+    <section
+      ref={chatSettingsPopoverRef}
+      className={`chat-settings-popover ${phone ? '' : `t-dropdown ${chatSettingsPresence.className}`}`}
+      data-origin="top-right"
+      role={phone ? 'dialog' : undefined}
+      aria-modal={phone || undefined}
+      aria-label="Aparência do chat"
+      {...chatSettingsSheetGesture}
+    >
+      <header><strong>Aparência do chat</strong><small>Só neste dispositivo</small>{phone && <button className="mobile-sheet-close" type="button" onClick={() => dismissChatSettingsSheet()} aria-label="Fechar aparência do chat"><Icon name="close"/></button>}</header>
+      <label><span><strong>Seu balão</strong><small>Destaque das suas mensagens</small></span><input type="color" value={chatAppearance.ownBubble} aria-label="Cor do seu balão" onChange={event => { const ownBubble = event.currentTarget.value; setChatAppearance(current => ({ ...current, ownBubble })); }}/></label>
+      <label><span><strong>Outros balões</strong><small>Mensagens dos participantes</small></span><input type="color" value={chatAppearance.otherBubble} aria-label="Cor dos outros balões" onChange={event => { const otherBubble = event.currentTarget.value; setChatAppearance(current => ({ ...current, otherBubble })); }}/></label>
+      <label><span><strong>Nomes</strong><small>Branco por padrão</small></span><input type="color" value={chatAppearance.nameColor} aria-label="Cor dos nomes" onChange={event => { const nameColor = event.currentTarget.value; setChatAppearance(current => ({ ...current, nameColor })); }}/></label>
+      <button className="chat-settings-reset" type="button" onClick={() => setChatAppearance(DEFAULT_CHAT_APPEARANCE)}>Restaurar padrão</button>
+    </section>
+  );
+
   return (
     <div ref={roomAppRef} className={`app room-app unified-room-app ${desktopApp ? 'is-electron-shell' : ''} ${mobile ? 'viewer-mode is-mobile-room' : ''} ${phone ? 'is-phone-room' : ''} ${activeChat ? 'is-chat-open' : ''} ${chatInputFocused ? 'is-chat-input-focused' : ''} ${emojiOpen ? 'is-emoji-open' : ''} ${controlsOpen ? 'is-controls-open' : ''} ${mobilePresentationOpen ? 'has-mobile-overlay' : ''} ${animationsEnabled ? '' : 'animations-disabled'}`}>
       {desktopApp && !phone && <div className="electron-drag-region" aria-hidden="true"/>}
@@ -4074,13 +4103,7 @@ export default function RoomApp() {
               <div className="unified-sidebar-actions">
                 <div className="unified-chat-settings-anchor" ref={chatSettingsRef}>
                   <button className={`chat-settings-trigger ${chatSettingsOpen ? 'is-open' : ''}`} type="button" aria-label="Personalizar aparência do chat" aria-expanded={chatSettingsOpen} onClick={() => { if (chatSettingsOpen) dismissChatSettingsSheet(); else setChatSettingsOpen(true); }}><Icon name="settings"/></button>
-                  {(phone ? chatSettingsOpen : chatSettingsPresence.present) && <section className={`chat-settings-popover ${phone ? '' : `t-dropdown ${chatSettingsPresence.className}`}`} data-origin="top-right" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-label="Aparência do chat" {...chatSettingsSheetGesture}>
-                    <header><strong>Aparência do chat</strong><small>Só neste dispositivo</small>{phone && <button className="mobile-sheet-close" type="button" onClick={() => dismissChatSettingsSheet()} aria-label="Fechar aparência do chat"><Icon name="close"/></button>}</header>
-                    <label><span><strong>Seu balão</strong><small>Destaque das suas mensagens</small></span><input type="color" value={chatAppearance.ownBubble} aria-label="Cor do seu balão" onChange={event => setChatAppearance(current => ({ ...current, ownBubble: event.currentTarget.value }))}/></label>
-                    <label><span><strong>Outros balões</strong><small>Mensagens dos participantes</small></span><input type="color" value={chatAppearance.otherBubble} aria-label="Cor dos outros balões" onChange={event => setChatAppearance(current => ({ ...current, otherBubble: event.currentTarget.value }))}/></label>
-                    <label><span><strong>Nomes</strong><small>Branco por padrão</small></span><input type="color" value={chatAppearance.nameColor} aria-label="Cor dos nomes" onChange={event => setChatAppearance(current => ({ ...current, nameColor: event.currentTarget.value }))}/></label>
-                    <button className="chat-settings-reset" type="button" onClick={() => setChatAppearance(DEFAULT_CHAT_APPEARANCE)}>Restaurar padrão</button>
-                  </section>}
+                  {!phone && chatSettingsPresence.present && chatSettingsPopover}
                 </div>
                 <button className={`unified-sidebar-close ${mobile ? '' : 'is-desktop-collapse'}`} type="button" onClick={() => { setChatOpen(false); setProfileOpen(false); setChatSettingsOpen(false); }} aria-label={mobile ? 'Fechar chat' : 'Recolher barra lateral'} title={mobile ? undefined : 'Recolher barra lateral'}><Icon name={mobile ? 'close' : 'chevron'}/></button>
               </div>
@@ -4093,7 +4116,7 @@ export default function RoomApp() {
             </button>
           </aside>
         <section ref={stageRef} className={`share-stage unified-room-stage ${sharingParticipants.length ? 'has-screens' : ''}`}>
-          {session && sharingParticipants.length === 0 && <button className={`stage-room-pill ${copied === 'code' ? 'is-copied' : ''}`} type="button" onClick={() => void copyValue('code')} disabled={!session.joinCode} aria-label={copied === 'code' ? `Código ${roomLabel} copiado` : `Copiar código da sala ${roomLabel}`} title="Copiar código da sala"><MotionIcon active={copied === 'code'} activeIcon="check" inactiveIcon="copy"/><span>{copied === 'code' ? 'Copiado' : 'Sala'}</span><strong>{roomLabel}</strong></button>}
+          {session && sharingParticipants.length === 0 && <button className={`stage-room-pill ${copied === 'code' ? 'is-copied' : ''}`} type="button" onClick={() => void copyValue('code')} disabled={!session.joinCode} aria-label={copied === 'code' ? `Código ${roomLabel} copiado` : `Copiar código da sala ${roomLabel}`} title="Copiar código da sala"><MotionIcon active={copied === 'code'} activeIcon="check" inactiveIcon="copy"/><span className="stage-room-pill-copy"><span className="stage-room-pill-default"><span>Sala</span><strong>{roomLabel}</strong></span><span className="stage-room-pill-copied" aria-hidden={copied !== 'code'}>Código copiado</span></span></button>}
           {stageContent}
           {session && sharingParticipants.length > 0 && mode === 'connected' && (
             <div className="participant-rail">{connectedParticipants.map(participant => <div key={participant.id} className={speakingIds.has(participant.id) ? 'is-speaking' : ''}><Avatar avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} leader={participant.id === leaderId} size="small"/><span><strong>{participant.name}</strong><small>{participant.status}</small></span></div>)}</div>
@@ -4109,6 +4132,7 @@ export default function RoomApp() {
       {phone && (controlsOpen || profileOpen || chatSettingsOpen) && (
         <button className="mobile-overlay-backdrop" type="button" tabIndex={-1} aria-label="Fechar painel" onClick={() => { if (profileOpen) dismissProfileSheet(); else if (chatSettingsOpen) dismissChatSettingsSheet(); else dismissControlsSheet(); }}/>
       )}
+      {phone && chatSettingsOpen && chatSettingsPopover}
       {dockSheetOpen && <div ref={mobileSheetRef} className="mobile-sheet-layer">
         <button className="mobile-sheet-backdrop" type="button" tabIndex={-1} aria-label="Fechar painel" onClick={() => dismissDockSheet()}/>
         <div className="mobile-sheet-host">{dockPopovers}</div>

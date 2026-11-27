@@ -104,7 +104,7 @@ export const MotionIcon = memo(function MotionIcon({
 export const BrandMark = memo(function BrandMark() {
   const maskId = `screenlink-owl-${useId().replace(/:/g, '')}`;
   return (
-    <svg className="screenlink-brand-mark" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+    <svg className="screenlink-brand-mark" viewBox="6 8 36 36" fill="none" aria-hidden="true">
       <defs>
         <mask id={maskId}>
           <rect width="48" height="48" fill="white" />
@@ -113,7 +113,6 @@ export const BrandMark = memo(function BrandMark() {
           <path d="m21 31 3 4.2 3-4.2Z" fill="black" />
         </mask>
       </defs>
-      <circle cx="24" cy="24" r="21" stroke="currentColor" strokeWidth="2.8" />
       <path d="M10.8 14.6c4-4 8.8-4.3 13.2-.9 4.4-3.4 9.2-3.1 13.2.9 4.2 4.2 4.7 13.3 1.4 19.5C35.8 39.4 30.9 42 24 42s-11.8-2.6-14.6-7.9c-3.3-6.2-2.8-15.3 1.4-19.5Z" fill="currentColor" mask={`url(#${maskId})`} />
       <circle cx="18.5" cy="22.8" r="2.15" fill="currentColor" />
       <circle cx="29.5" cy="22.8" r="2.15" fill="currentColor" />
