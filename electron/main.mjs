@@ -255,7 +255,7 @@ async function createMainWindow() {
     minHeight: 620,
     show: false,
     title: 'ScreenLink',
-    backgroundColor: '#080b0d',
+    backgroundColor: '#212121',
     autoHideMenuBar: true,
     webPreferences: {
       preload: PRELOAD_PATH,

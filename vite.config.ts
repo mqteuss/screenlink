@@ -3,6 +3,10 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
+  build: {
+    target: 'es2022',
+    cssMinify: true
+  },
   server: {
     port: 5173,
     strictPort: true,

@@ -4,6 +4,9 @@ import { readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { app, BrowserWindow } from 'electron';
 
+// Hidden test windows do not receive a user activation gesture.
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+
 function reservePort() {
   return new Promise((resolve, reject) => {
     const probe = createNetServer();
@@ -46,25 +49,33 @@ app.whenReady().then(async () => {
         channelCount: 1,
         channelCountMode: 'explicit'
       });
+      let processorError = false;
+      suppressor.addEventListener('processorerror', () => { processorError = true; });
       const oscillator = context.createOscillator();
       const analyser = context.createAnalyser();
       const mute = context.createGain();
-      mute.gain.value = 0;
+      // Keep the output connected and effectively silent: a zero-gain sink
+      // can suspend processing in a hidden Electron test window.
+      mute.gain.value = 0.000001;
       oscillator.connect(suppressor).connect(analyser).connect(mute).connect(context.destination);
       oscillator.start();
       await context.resume();
-      await new Promise(resolve => setTimeout(resolve, 180));
+      await new Promise(resolve => setTimeout(resolve, 850));
       const samples = new Float32Array(analyser.fftSize);
       analyser.getFloatTimeDomainData(samples);
       const peak = samples.reduce((maximum, value) => Math.max(maximum, Math.abs(value)), 0);
+      const contextState = context.state;
+      const time = context.currentTime;
       suppressor.parameters.get('enabled')?.setValueAtTime(0, context.currentTime);
       oscillator.stop();
       await context.close();
-      return { status: response.status, contentType: response.headers.get('content-type'), peak };
+      return { status: response.status, contentType: response.headers.get('content-type'), peak, contextState, time, processorError };
     })()`);
     assert.equal(result.status, 200);
     assert.match(result.contentType ?? '', /javascript/);
-    assert.ok(result.peak > 0.01, `O AudioWorklet não processou áudio: pico ${result.peak}`);
+    assert.equal(result.contextState, 'running', 'O AudioContext não iniciou.');
+    assert.equal(result.processorError, false, 'O processador adaptativo falhou no AudioWorklet.');
+    assert.ok(result.peak > 0.01, `O AudioWorklet não processou áudio: ${JSON.stringify(result)}`);
 
     const neuralResult = await window.webContents.executeJavaScript(`(async () => {
       const workletUrl = ${JSON.stringify(neuralWorkletUrl)};

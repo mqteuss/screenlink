@@ -1,12 +1,17 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent as ReactAnimationEvent, type FormEvent, type TouchEvent as ReactTouchEvent } from 'react';
-import QRCode from 'qrcode';
+import { lazy, memo, Suspense, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent as ReactAnimationEvent, type FormEvent, type TouchEvent as ReactTouchEvent } from 'react';
 import { playInterfaceSound as playCallSound, setInterfaceSoundOutputDevice, unlockInterfaceSounds, type InterfaceSoundName } from './callSounds';
-import { createNoiseSuppressorPipeline, setNoiseSuppression, type NoiseSuppressorPipeline } from './audioNoiseSuppression';
+import type { NoiseSuppressorPipeline } from './audioNoiseSuppression';
 import { createPrivateRoom, parseInvite, signalUrl, type IceServerConfig, type Invite, type RoomParticipant, type RoomProfile, type SessionDescription } from './protocol';
 import { loadStoredProfile, prepareAvatar, profileStorageKind, saveStoredProfile, type DesktopDisplaySource, type DesktopUpdateState } from './profileStore';
+import { BrandMark, Icon, MotionIcon, WindowsMark } from './components/Icons';
+import { ChatComposer, type ChatComposerHandle } from './components/ChatComposer';
+
+const EmojiPicker = lazy(() => import('./components/EmojiPicker'));
+const OnboardingDialog = lazy(() => import('./components/OnboardingDialog'));
+
+const CHAT_TIME_FORMAT = new Intl.DateTimeFormat('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
 type RoomMode = 'landing' | 'connecting' | 'connected' | 'error';
-type IconName = 'screen' | 'microphone' | 'microphoneOff' | 'volume' | 'volumeOff' | 'chat' | 'send' | 'hangup' | 'link' | 'copy' | 'settings' | 'users' | 'crown' | 'close' | 'chevron' | 'chevronDown' | 'smile' | 'keyboard' | 'search' | 'qr' | 'more' | 'expand' | 'pip' | 'wake' | 'motion' | 'grid' | 'download' | 'refresh' | 'warning' | 'check' | 'guide';
 type Session = { invite: Invite; joinCode?: string; joinByCode?: boolean; ownerKey?: string; participantId?: string; resumeToken?: string; maxParticipants?: number };
 type RoomEntry = { kind: 'invite'; invite: Invite } | { kind: 'code'; code: string };
 type ChatDelivery = 'pending' | 'sent' | 'delivered' | 'failed';
@@ -17,9 +22,6 @@ type ChatChannelPayload =
   | { type: 'chat-ack'; messageId: string }
   | { type: 'chat-history'; messages: ChatWireMessage[] };
 type ChatAppearance = { ownBubble: string; otherBubble: string; nameColor: string };
-type ChatEmojiCategory = 'recent' | 'faces' | 'gestures' | 'hearts' | 'activity' | 'objects';
-type ChatEmoji = { value: string; label: string };
-type ChatEmojiGroup = { id: Exclude<ChatEmojiCategory, 'recent'>; label: string; icon: string; emojis: ChatEmoji[] };
 type PendingChatMessage = { message: ChatMessage; awaiting: Set<string>; attempts: number; firstAttemptAt: number; lastAttemptAt: number; fallbackAccepted: boolean };
 type Resolution = 360 | 480 | 720 | 1080;
 type FrameRate = 15 | 30 | 45 | 60;
@@ -93,7 +95,6 @@ const INTERFACE_SOUNDS_KEY = 'screenlink-interface-sounds-v1';
 const INTERFACE_MOTION_KEY = 'screenlink-interface-motion-v1';
 const ONBOARDING_KEY = 'screenlink-onboarding-v1';
 const CHAT_APPEARANCE_KEY = 'screenlink-chat-appearance-v2';
-const CHAT_RECENT_EMOJIS_KEY = 'screenlink-chat-recent-emojis-v1';
 const CHAT_OWN_IDS_PREFIX = 'screenlink-chat-own:';
 const PEER_KEY_PREFIX = 'screenlink-room-peer:';
 const COMPACT_LAYOUT_QUERY = '(max-width: 1240px)';
@@ -115,7 +116,7 @@ const ADAPTIVE_NETWORK_PROFILES = [
   { bitrateFactor: .48, scaleResolutionDownBy: 1.65, frameRateFactor: .67 },
   { bitrateFactor: .3, scaleResolutionDownBy: 2.25, frameRateFactor: .5 }
 ] as const;
-const DEFAULT_CHAT_APPEARANCE: ChatAppearance = { ownBubble: '#383838', otherBubble: '#1c1c1c', nameColor: '#ffffff' };
+const DEFAULT_CHAT_APPEARANCE: ChatAppearance = { ownBubble: '#303030', otherBubble: '#212121', nameColor: '#ffffff' };
 const RESOLUTIONS: Resolution[] = [360, 480, 720, 1080];
 const FRAME_RATES: FrameRate[] = [15, 30, 45, 60];
 const PARTICIPANT_LIMITS = [2, 3, 4, 5, 6, 7, 8];
@@ -127,122 +128,12 @@ const VOICE_SETTING_DETAILS: Record<VoiceSettingKey, { label: string; descriptio
   echoCancellation: { label: 'Controle de eco', description: 'Evita retorno nos alto-falantes' },
   autoGainControl: { label: 'Ganho automático', description: 'Equilibra o volume da sua voz' }
 };
-const CHAT_EMOJI_GROUPS: ChatEmojiGroup[] = [
-  {
-    id: 'faces', label: 'Rostos', icon: '😀', emojis: [
-      { value: '😀', label: 'feliz sorriso alegria' }, { value: '😂', label: 'rindo lágrimas engraçado' },
-      { value: '🥹', label: 'emocionado segurando lágrimas' }, { value: '😍', label: 'apaixonado coração olhos' },
-      { value: '🥰', label: 'amor carinho corações' }, { value: '😎', label: 'legal óculos sol' },
-      { value: '🤔', label: 'pensando dúvida' }, { value: '😅', label: 'suor alívio nervoso' },
-      { value: '😭', label: 'chorando triste lágrimas' }, { value: '😡', label: 'bravo raiva' },
-      { value: '🥳', label: 'festa comemoração' }, { value: '🤯', label: 'surpreso cabeça explodindo' },
-      { value: '😴', label: 'sono dormindo' }, { value: '🫠', label: 'derretendo calor' },
-      { value: '🙄', label: 'revirando olhos' }, { value: '🤭', label: 'riso mão boca' }
-    ]
-  },
-  {
-    id: 'gestures', label: 'Gestos', icon: '👋', emojis: [
-      { value: '👋', label: 'oi tchau aceno' }, { value: '👍', label: 'positivo gostei sim' },
-      { value: '👎', label: 'negativo não gostei' }, { value: '👏', label: 'palmas parabéns' },
-      { value: '🙌', label: 'comemoração mãos' }, { value: '🙏', label: 'obrigado por favor oração' },
-      { value: '🤝', label: 'acordo aperto mãos' }, { value: '👌', label: 'ok perfeito' },
-      { value: '✌️', label: 'paz vitória' }, { value: '🤞', label: 'sorte dedos cruzados' },
-      { value: '💪', label: 'força músculo' }, { value: '🫶', label: 'coração mãos carinho' },
-      { value: '👀', label: 'olhos olhando' }, { value: '🫡', label: 'saudação respeito' },
-      { value: '🤌', label: 'gesto italiano' }, { value: '👊', label: 'soco cumprimento' }
-    ]
-  },
-  {
-    id: 'hearts', label: 'Símbolos', icon: '❤️', emojis: [
-      { value: '❤️', label: 'coração vermelho amor' }, { value: '💙', label: 'coração azul amor' },
-      { value: '💜', label: 'coração roxo amor' }, { value: '🖤', label: 'coração preto' },
-      { value: '💔', label: 'coração partido' }, { value: '💕', label: 'dois corações' },
-      { value: '✨', label: 'brilho estrelas' }, { value: '🔥', label: 'fogo incrível' },
-      { value: '✅', label: 'certo concluído confirmação' }, { value: '❌', label: 'errado cancelar não' },
-      { value: '⚠️', label: 'aviso atenção' }, { value: '💯', label: 'cem perfeito' },
-      { value: '💬', label: 'mensagem conversa' }, { value: '💤', label: 'sono zzz' },
-      { value: '❓', label: 'pergunta dúvida' }, { value: '‼️', label: 'exclamação importante' }
-    ]
-  },
-  {
-    id: 'activity', label: 'Atividades', icon: '🎉', emojis: [
-      { value: '🎉', label: 'festa confete comemoração' }, { value: '🎮', label: 'jogo controle videogame' },
-      { value: '⚽', label: 'futebol bola esporte' }, { value: '🏀', label: 'basquete bola esporte' },
-      { value: '🎵', label: 'música nota' }, { value: '🎧', label: 'fone música áudio' },
-      { value: '🎬', label: 'filme cinema claquete' }, { value: '🏆', label: 'troféu vitória' },
-      { value: '🎯', label: 'alvo objetivo' }, { value: '🚀', label: 'foguete lançamento' },
-      { value: '🎁', label: 'presente caixa' }, { value: '🎨', label: 'arte pintura' },
-      { value: '📸', label: 'foto câmera' }, { value: '🎤', label: 'microfone cantar' },
-      { value: '💻', label: 'computador notebook' }, { value: '📱', label: 'celular telefone' }
-    ]
-  },
-  {
-    id: 'objects', label: 'Objetos', icon: '💡', emojis: [
-      { value: '💡', label: 'ideia lâmpada' }, { value: '📌', label: 'alfinete marcar' },
-      { value: '📎', label: 'clipe anexo' }, { value: '🔗', label: 'link corrente' },
-      { value: '🔒', label: 'cadeado seguro privado' }, { value: '🔔', label: 'sino notificação' },
-      { value: '⏰', label: 'relógio alarme' }, { value: '📅', label: 'calendário data' },
-      { value: '📝', label: 'anotação escrever' }, { value: '🔍', label: 'buscar lupa' },
-      { value: '🛠️', label: 'ferramentas ajuste' }, { value: '⚙️', label: 'configuração engrenagem' },
-      { value: '🔋', label: 'bateria energia' }, { value: '📶', label: 'sinal conexão' },
-      { value: '🎲', label: 'dado jogo sorte' }, { value: '☕', label: 'café bebida' }
-    ]
-  }
-];
-const ALL_CHAT_EMOJIS = CHAT_EMOJI_GROUPS.flatMap(group => group.emojis);
-const DEFAULT_RECENT_EMOJIS = ['😂', '❤️', '👍', '😭', '🔥', '👏', '🥹', '✨'];
-const CHAT_EMOJI_CATEGORIES: Array<{ id: ChatEmojiCategory; label: string; icon: string }> = [
-  { id: 'recent', label: 'Recentes', icon: '◷' },
-  ...CHAT_EMOJI_GROUPS.map(({ id, label, icon }) => ({ id, label, icon }))
-];
-const PREMIUM_PARTICLES = [
-  ['11%', '26%', '.8px', '15.2s', '-2.6s', '.55px'],
-  ['23%', '67%', '1.1px', '17.8s', '-11.4s', '.8px'],
-  ['34%', '39%', '.65px', '13.9s', '-7.1s', '.45px'],
-  ['47%', '74%', '.9px', '19.3s', '-3.8s', '.7px'],
-  ['58%', '20%', '1px', '16.6s', '-13.2s', '.6px'],
-  ['69%', '53%', '.7px', '14.7s', '-5.4s', '.5px'],
-  ['79%', '31%', '1.15px', '20.1s', '-16.8s', '.85px'],
-  ['89%', '70%', '.72px', '18.4s', '-9.7s', '.55px'],
-  ['96%', '44%', '.55px', '15.8s', '-1.9s', '.4px']
-] as const;
 const VIDEO_PRESETS: Record<Resolution, { width: number; height: number; bitrate: number }> = {
   360: { width: 640, height: 360, bitrate: 900_000 },
   480: { width: 854, height: 480, bitrate: 1_600_000 },
   720: { width: 1280, height: 720, bitrate: 3_600_000 },
   1080: { width: 1920, height: 1080, bitrate: 7_000_000 }
 };
-
-const ONBOARDING_STEPS: Array<{ icon: IconName; eyebrow: string; title: string; description: string; points: string[] }> = [
-  {
-    icon: 'guide',
-    eyebrow: 'Visão geral',
-    title: 'Bem-vindo ao ScreenLink',
-    description: 'Uma sala simples para conversar, enviar mensagens e compartilhar telas. Este guia leva menos de um minuto.',
-    points: ['Perfil salvo apenas neste dispositivo', 'Nenhuma conta necessária']
-  },
-  {
-    icon: 'users',
-    eyebrow: 'Sala',
-    title: 'Comece ou entre em uma chamada',
-    description: 'Crie uma sala pelo botão central ou use Entrar com código. O convite fica disponível assim que a conexão abrir.',
-    points: ['Código curto para convidar', 'O chat pode ser recolhido quando você quiser']
-  },
-  {
-    icon: 'microphone',
-    eyebrow: 'Controles',
-    title: 'Áudio e tela são independentes',
-    description: 'Ligue o microfone ou compartilhe a tela quando precisar. Os chevrons abrem dispositivos, volumes e qualidade.',
-    points: ['Parar a tela mantém a chamada', 'Mais opções reúne os recursos de exibição']
-  },
-  {
-    icon: 'grid',
-    eyebrow: 'Transmissões',
-    title: 'Escolha a tela que quer acompanhar',
-    description: 'Com várias pessoas compartilhando, use Destacar. A tela escolhida cresce e as outras ficam acessíveis em miniaturas.',
-    points: ['Troque de tela sem sair do foco', 'Ver todas retorna à grade']
-  }
-];
 
 type WebStorageName = 'localStorage' | 'sessionStorage';
 
@@ -259,22 +150,6 @@ function writeStorage(storageName: WebStorageName, key: string, value: string) {
     return true;
   } catch {
     return false;
-  }
-}
-
-function normalizeEmojiSearch(value: string) {
-  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLocaleLowerCase('pt-BR');
-}
-
-function loadRecentChatEmojis() {
-  try {
-    const stored = JSON.parse(readStorage('localStorage', CHAT_RECENT_EMOJIS_KEY) || '[]');
-    if (!Array.isArray(stored)) return DEFAULT_RECENT_EMOJIS;
-    const available = new Set(ALL_CHAT_EMOJIS.map(emoji => emoji.value));
-    const recent = stored.filter((value): value is string => typeof value === 'string' && available.has(value)).slice(0, 24);
-    return recent.length ? recent : DEFAULT_RECENT_EMOJIS;
-  } catch {
-    return DEFAULT_RECENT_EMOJIS;
   }
 }
 
@@ -336,53 +211,7 @@ const AVATARS = [
   { id: 'echo', label: 'Echo', colors: ['#bfd0ff', '#91a9ef'], face: 'owl' }
 ] as const;
 
-function Icon({ name }: { name: IconName }) {
-  const paths: Record<IconName, React.ReactNode> = {
-    screen: <><rect x="3" y="4" width="18" height="13" rx="2.5"/><path d="M8 21h8M12 17v4"/></>,
-    microphone: <><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3M8.5 21h7"/></>,
-    microphoneOff: <><path d="m4 4 16 16M9 5.5V11a3 3 0 0 0 4.7 2.45M15 9V6a3 3 0 0 0-5.2-2.05M5.5 11.5a6.5 6.5 0 0 0 10.9 4.8M18.5 11.5a6.5 6.5 0 0 1-.7 2.9M12 18v3M8.5 21h7"/></>,
-    volume: <><path d="M5 10v4h4l5 4V6l-5 4H5Z"/><path d="M17 9a4 4 0 0 1 0 6M19.5 6.5a7.5 7.5 0 0 1 0 11"/></>,
-    volumeOff: <><path d="M5 10v4h4l5 4V6l-5 4H5ZM17 9l5 6M22 9l-5 6"/></>,
-    chat: <path d="M4 5.5h16v11H9l-5 3v-14Z"/>,
-    send: <><path d="M12 20V5"/><path d="m6.5 10.5 5.5-5.5 5.5 5.5"/></>,
-    hangup: <path d="M4.2 15.1c4.9-4.4 10.7-4.4 15.6 0 .7.6.7 1.7.1 2.3l-1.3 1.3c-.5.5-1.3.6-1.9.2l-2.2-1.5c-.4-.3-.7-.8-.6-1.3l.1-1.1a10.8 10.8 0 0 0-4 0l.1 1.1c.1.5-.2 1-.6 1.3l-2.2 1.5c-.6.4-1.4.3-1.9-.2l-1.3-1.3c-.6-.6-.6-1.7.1-2.3Z"/>,
-    link: <><path d="M9.5 14.5 14.5 9"/><path d="M7.5 17H6a4 4 0 0 1 0-8h4M16.5 7H18a4 4 0 0 1 0 8h-4"/></>,
-    copy: <><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></>,
-    settings: <><path d="M4 6h5M13 6h7M4 12h10M18 12h2M4 18h3M11 18h9"/><circle cx="11" cy="6" r="2"/><circle cx="16" cy="12" r="2"/><circle cx="9" cy="18" r="2"/></>,
-    users: <><circle cx="9" cy="9" r="3"/><path d="M3.5 20c.4-4 2.2-6 5.5-6s5.1 2 5.5 6M16 6.5a3 3 0 0 1 0 5.8M16.5 14c2.5.5 3.7 2.4 4 5"/></>,
-    crown: <path d="m3 7 4.5 4L12 5l4.5 6L21 7l-2 11H5L3 7Z"/>,
-    close: <path d="m6 6 12 12M18 6 6 18"/>,
-    chevron: <path d="m9 6 6 6-6 6"/>,
-    chevronDown: <path d="m6 9 6 6 6-6"/>,
-    smile: <><circle cx="12" cy="12" r="9"/><path d="M8.5 14.5c2 2 5 2 7 0M9 9.5h.01M15 9.5h.01"/></>,
-    keyboard: <><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M6.5 9h.01M10.2 9h.01M13.8 9h.01M17.5 9h.01M6.5 12.5h.01M10.2 12.5h.01M13.8 12.5h.01M17.5 12.5h.01M8 16h8"/></>,
-    search: <><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 4.2 4.2"/></>,
-    qr: <><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM18 14h3M21 14v3M14 19h3v2M19 18h2v3"/></>,
-    more: <><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none"/></>,
-    expand: <><path d="M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5"/></>,
-    pip: <><rect x="3" y="4" width="18" height="16" rx="2.5"/><rect x="12" y="11" width="7" height="6" rx="1.2"/></>,
-    wake: <><path d="M12 3v2M5.6 5.6 7 7M3 12h2M19 12h2M17 7l1.4-1.4"/><path d="M8 16a5 5 0 1 1 8 0l-1.2 1.3V20H9.2v-2.7L8 16ZM9.5 22h5"/></>,
-    motion: <><path d="M3 8.5c2.1-2.4 4.2-2.4 6.3 0s4.2 2.4 6.3 0 4.2-2.4 6.4 0"/><path d="M3 15.5c2.1-2.4 4.2-2.4 6.3 0s4.2 2.4 6.3 0 4.2-2.4 6.4 0"/></>
-    ,grid: <><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></>,
-    download: <><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 20h16"/></>,
-    refresh: <><path d="M20 7v5h-5"/><path d="M4 17v-5h5"/><path d="M6.1 8.5A7 7 0 0 1 18.8 7L20 12M4 12l1.2 5A7 7 0 0 0 17.9 15.5"/></>,
-    warning: <><path d="M10.2 4.2 2.8 17a2 2 0 0 0 1.7 3h15a2 2 0 0 0 1.7-3L13.8 4.2a2 2 0 0 0-3.6 0Z"/><path d="M12 9v4M12 17h.01"/></>,
-    check: <path d="m5 12.5 4.2 4.2L19 7"/>,
-    guide: <><path d="M4 5.5A3.5 3.5 0 0 1 7.5 2H12v18H7.5A3.5 3.5 0 0 0 4 23V5.5Z"/><path d="M20 5.5A3.5 3.5 0 0 0 16.5 2H12v18h4.5A3.5 3.5 0 0 1 20 23V5.5Z"/></>
-  };
-  return <svg className={`room-icon icon icon-${name}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
-}
-
-function MotionIcon({ active, activeIcon, inactiveIcon }: { active: boolean; activeIcon: IconName; inactiveIcon: IconName }) {
-  return (
-    <span className="t-icon-swap" data-state={active ? 'a' : 'b'} aria-hidden="true">
-      <span className="t-icon" data-icon="a"><Icon name={activeIcon}/></span>
-      <span className="t-icon" data-icon="b"><Icon name={inactiveIcon}/></span>
-    </span>
-  );
-}
-
-function MotionText({ value, enabled }: { value: string; enabled: boolean }) {
+const MotionText = memo(function MotionText({ value, enabled }: { value: string; enabled: boolean }) {
   const [displayed, setDisplayed] = useState(value);
   const displayedRef = useRef(value);
   const [phase, setPhase] = useState('');
@@ -416,28 +245,18 @@ function MotionText({ value, enabled }: { value: string; enabled: boolean }) {
   }, [enabled, value]);
 
   return <span ref={elementRef} className={`t-text-swap ${phase}`}>{displayed}</span>;
-}
+});
 
-function MotionSwitch({ on, compact = false }: { on: boolean; compact?: boolean }) {
-  const previousRef = useRef(on);
-  const [initialized, setInitialized] = useState(false);
+const MotionSwitch = memo(function MotionSwitch({ on, compact = false }: { on: boolean; compact?: boolean }) {
+  if (compact) return <i className="t-toggle" data-on={on ? 'true' : 'false'}><b className="t-toggle-thumb" /></i>;
+  return <span className="toggle-row-switch t-toggle" data-on={on ? 'true' : 'false'}><i className="t-toggle-thumb" /></span>;
+});
 
-  useLayoutEffect(() => {
-    if (previousRef.current === on) return;
-    previousRef.current = on;
-    setInitialized(true);
-  }, [on]);
-
-  const className = `t-toggle ${initialized ? 'is-init' : ''}`;
-  if (compact) return <i className={className} data-on={on ? 'true' : 'false'}><b className="t-toggle-thumb"/></i>;
-  return <span className={`toggle-row-switch ${className}`} data-on={on ? 'true' : 'false'}><i className="t-toggle-thumb"/></span>;
-}
-
-function ChatDeliveryIndicator({ delivery, onRetry }: { delivery: ChatDelivery; onRetry: () => void }) {
+const ChatDeliveryIndicator = memo(function ChatDeliveryIndicator({ delivery, onRetry }: { delivery: ChatDelivery; onRetry: () => void }) {
   if (delivery === 'failed') {
     return (
       <button className="chat-delivery is-failed" type="button" onClick={onRetry} aria-label="Falha no envio. Tentar novamente" title="Falha no envio · tentar novamente">
-        <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.25"/><path d="M8 4.5v4.25M8 11.35h.01"/></svg>
+        <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.25" /><path d="M8 4.5v4.25M8 11.35h.01" /></svg>
       </button>
     );
   }
@@ -446,74 +265,49 @@ function ChatDeliveryIndicator({ delivery, onRetry }: { delivery: ChatDelivery; 
   return (
     <span className={`chat-delivery is-${delivery}`} role="status" aria-label={label} title={label}>
       {delivery === 'pending' ? (
-        <svg className="chat-delivery-clock" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.75"/><path d="M8 4.8v3.55l2.35 1.4"/></svg>
+        <svg className="chat-delivery-clock" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.75" /><path d="M8 4.8v3.55l2.35 1.4" /></svg>
       ) : (
         <svg className="chat-delivery-ticks" viewBox="0 0 19 13" aria-hidden="true">
-          {delivery === 'delivered' && <path d="m1.5 7 3 3L10.8 3.7"/>}
-          <path d={delivery === 'delivered' ? 'm6.3 7 3 3 7.2-7.2' : 'm2.2 7 3 3 7.2-7.2'}/>
+          {delivery === 'delivered' && <path d="m1.5 7 3 3L10.8 3.7" />}
+          <path d={delivery === 'delivered' ? 'm6.3 7 3 3 7.2-7.2' : 'm2.2 7 3 3 7.2-7.2'} />
         </svg>
       )}
     </span>
   );
-}
+});
 
-function BrandMark() {
+const ChatMessageItem = memo(function ChatMessageItem({
+  message,
+  own,
+  onRetry
+}: {
+  message: ChatMessage;
+  own: boolean;
+  onRetry: (messageId: string) => void;
+}) {
+  if (message.system) return <p className="chat-system">{message.text}</p>;
   return (
-    <svg className="screenlink-brand-mark" viewBox="0 0 48 48" fill="none" aria-hidden="true">
-      <defs>
-        <mask id="screenlink-owl-cutouts">
-          <rect width="48" height="48" fill="white"/>
-          <circle cx="18.5" cy="22.8" r="7" fill="black"/>
-          <circle cx="29.5" cy="22.8" r="7" fill="black"/>
-          <path d="m21 31 3 4.2 3-4.2Z" fill="black"/>
-        </mask>
-      </defs>
-      <circle cx="24" cy="24" r="21" stroke="currentColor" strokeWidth="2.8"/>
-      <path d="M10.8 14.6c4-4 8.8-4.3 13.2-.9 4.4-3.4 9.2-3.1 13.2.9 4.2 4.2 4.7 13.3 1.4 19.5C35.8 39.4 30.9 42 24 42s-11.8-2.6-14.6-7.9c-3.3-6.2-2.8-15.3 1.4-19.5Z" fill="currentColor" mask="url(#screenlink-owl-cutouts)"/>
-      <circle cx="18.5" cy="22.8" r="2.15" fill="currentColor"/>
-      <circle cx="29.5" cy="22.8" r="2.15" fill="currentColor"/>
-    </svg>
-  );
-}
-
-function WindowsMark() {
-  return (
-    <svg className="windows-mark" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M2.5 4.6 10.6 3.5v7.75H2.5V4.6Zm9.1-1.24L21.5 2v9.25h-9.9V3.36ZM2.5 12.25h8.1V20l-8.1-1.12v-6.63Zm9.1 0h9.9V22l-9.9-1.36v-8.39Z"/>
-    </svg>
-  );
-}
-
-function OnboardingPreview({ step }: { step: number }) {
-  return (
-    <div className={`onboarding-preview is-step-${step}`} aria-hidden="true">
-      <div className="onboarding-preview-app">
-        <aside className="preview-sidebar preview-sidebar-left">
-          <div className="preview-brand"><BrandMark/><i/></div>
-          {step === 3 ? <div className="preview-chat-thread"><span/><span/><span/></div> : <div className="preview-sidebar-lines"><i/><i/><i/></div>}
-          <div className="preview-profile"><span/><i/></div>
-        </aside>
-        <section className="preview-stage">
-          {step === 0 && <div className="preview-welcome"><BrandMark/><strong>Sua sala está pronta</strong><span>Voz · tela · chat</span></div>}
-          {step === 1 && <div className="preview-room-entry"><BrandMark/><strong>Inicie uma chamada</strong><span className="preview-start-button"><Icon name="users"/>Iniciar chamada</span></div>}
-          {step === 2 && <><div className="preview-call-person"><span/><strong>Você</strong></div><div className="preview-audio-card"><i/><i/><i/></div><div className="preview-dock"><span><Icon name="volume"/></span><span className="is-highlighted"><Icon name="microphone"/></span><span className="is-highlighted"><Icon name="screen"/></span><span><Icon name="chat"/></span><span><Icon name="more"/></span></div></>}
-          {step === 3 && <div className="preview-screen-focus"><div className="preview-main-screen"><span/><strong>Tela de Ana</strong><i><Icon name="expand"/></i></div><div className="preview-screen-list"><span className="preview-all-screens"><Icon name="grid"/>Todas</span><div><span/><strong>Tela de Bruno</strong></div><div><span/><strong>Sua tela</strong></div></div></div>}
-        </section>
-        <aside className="preview-sidebar preview-sidebar-right">
-          <strong>Controles</strong>
-          {step === 1 ? <><label>Entrar com código</label><div className="preview-code"><Icon name="link"/><span>AB12CD</span></div><span className="preview-enter-button">Entrar</span></> : <div className="preview-settings-lines"><i/><i/><i/><i/></div>}
-        </aside>
+    <article className={`chat-message ${own ? 'is-own' : ''}`}>
+      <div className="chat-bubble">
+        {!own && <strong className="chat-message-sender">{message.senderName}</strong>}
+        <p>
+          <span className="chat-message-copy">{renderChatText(message.text)}</span>
+          <span className="chat-message-meta">
+            <time dateTime={new Date(message.sentAt).toISOString()}>{CHAT_TIME_FORMAT.format(message.sentAt)}</time>
+            {own && message.delivery && <ChatDeliveryIndicator delivery={message.delivery} onRetry={() => onRetry(message.id)} />}
+          </span>
+        </p>
       </div>
-    </div>
+    </article>
   );
-}
+});
 
-function SegmentedSelector<T extends number>({ label, suffix, options, value, disabled = false, premium, fullWidth = false, onChange }: { label: string; suffix: string; options: T[]; value: T; disabled?: boolean; premium?: T; fullWidth?: boolean; onChange: (value: T) => void }) {
+function SegmentedSelector<T extends number>({ label, suffix, options, value, disabled = false, fullWidth = false, onChange }: { label: string; suffix: string; options: T[]; value: T; disabled?: boolean; fullWidth?: boolean; onChange: (value: T) => void }) {
   const activeIndex = Math.max(0, options.indexOf(value));
-  return <fieldset className={`profile-fieldset ${fullWidth ? 'is-full-width' : ''}`}><legend><span>{label}</span>{suffix && <small>{suffix}</small>}</legend><div className={`segmented-control ${premium === value ? 'is-premium-selected' : ''}`} style={{ '--active-index': activeIndex, '--option-count': options.length } as React.CSSProperties}>{premium === value && <span className="premium-particles" aria-hidden="true">{PREMIUM_PARTICLES.map(([x, y, size, duration, delay, jitter], index) => <i key={index} style={{ '--particle-x': x, '--particle-y': y, '--particle-size': size, '--particle-duration': duration, '--particle-delay': delay, '--particle-jitter': jitter } as React.CSSProperties}/>)}</span>}{options.map(option => <button key={option} className={`${option === value ? 'is-active' : ''} ${option === premium ? 'is-premium' : ''}`} type="button" disabled={disabled} onClick={() => onChange(option)}>{option}{label === 'Resolução' ? 'p' : ''}</button>)}</div></fieldset>;
+  return <fieldset className={`profile-fieldset ${fullWidth ? 'is-full-width' : ''}`}><legend><span>{label}</span>{suffix && <small>{suffix}</small>}</legend><div className="segmented-control" style={{ '--active-index': activeIndex, '--option-count': options.length } as React.CSSProperties}>{options.map(option => <button key={option} className={option === value ? 'is-active' : ''} type="button" disabled={disabled} onClick={() => onChange(option)}>{option}{label === 'Resolução' ? 'p' : ''}</button>)}</div></fieldset>;
 }
 
-function Avatar({ avatar, name, speaking = false, leader = false, size = 'normal' }: { avatar: string; name: string; speaking?: boolean; leader?: boolean; size?: 'small' | 'normal' | 'large' }) {
+const Avatar = memo(function Avatar({ avatar, name, speaking = false, leader = false, size = 'normal' }: { avatar: string; name: string; speaking?: boolean; leader?: boolean; size?: 'small' | 'normal' | 'large' }) {
   const gradientId = `avatar-bg-${useId().replace(/:/g, '')}`;
   if (/^data:image\/(?:jpeg|png|webp);base64,/i.test(avatar)) {
     return <span className={`preset-avatar avatar-${size} custom-avatar ${speaking ? 'is-speaking' : ''}`} title={name}><img src={avatar} alt="" draggable={false}/>{leader && <span className="avatar-crown" aria-label="Líder da sala"><Icon name="crown"/></span>}</span>;
@@ -529,12 +323,12 @@ function Avatar({ avatar, name, speaking = false, leader = false, size = 'normal
         {preset.face === 'frog' && <><circle cx="21" cy="23" r="9" fill="#d9f3b8"/><circle cx="43" cy="23" r="9" fill="#d9f3b8"/><ellipse cx="32" cy="36" rx="21" ry="17" fill="#7db779"/><circle cx="21" cy="23" r="3"/><circle cx="43" cy="23" r="3"/><path d="M24 41c5 3 11 3 16 0" fill="none" stroke="#173c35" strokeWidth="2.5" strokeLinecap="round"/></>}
         {preset.face === 'cat' && <><path d="m14 23 5-13 10 9h6l10-9 5 13-4 29H18l-4-29Z" fill="rgba(45,32,81,.76)"/><path d="M23 31h5M36 31h5M28 42c3 2 5 2 8 0" fill="none" stroke="#fff" strokeWidth="2.6" strokeLinecap="round"/></>}
         {preset.face === 'bear' && <><circle cx="18" cy="20" r="8" fill="#784b52"/><circle cx="46" cy="20" r="8" fill="#784b52"/><circle cx="32" cy="34" r="20" fill="#a96f70"/><circle cx="25" cy="31" r="3"/><circle cx="39" cy="31" r="3"/><ellipse cx="32" cy="40" rx="7" ry="5" fill="#eed0bc"/></>}
-        {preset.face === 'owl' && <g className="echo-owl"><path d="M15.2 17.1c4.9-4.9 11.1-5.1 16.8-1 5.7-4.1 11.9-3.9 16.8 1 4.8 4.8 5.3 15.3 1.6 22.5C47.2 46 41.4 50 32 50s-15.2-4-18.4-10.4c-3.7-7.2-3.2-17.7 1.6-22.5Z" fill="#4d5f8f"/><g className="echo-owl-eye echo-owl-eye-left"><circle cx="24.2" cy="29.3" r="10.1" fill="#f5f7ff"/><circle cx="24.2" cy="29.3" r="3.15" fill="#05070b"/></g><g className="echo-owl-eye echo-owl-eye-right"><circle cx="39.8" cy="29.3" r="10.1" fill="#f5f7ff"/><circle cx="39.8" cy="29.3" r="3.15" fill="#05070b"/></g><path className="echo-owl-beak" d="m28.4 39.2 7.2-.05-3.55 5.25Z" fill="#f3c86f"/></g>}
+        {preset.face === 'owl' && <g><path d="M15.2 17.1c4.9-4.9 11.1-5.1 16.8-1 5.7-4.1 11.9-3.9 16.8 1 4.8 4.8 5.3 15.3 1.6 22.5C47.2 46 41.4 50 32 50s-15.2-4-18.4-10.4c-3.7-7.2-3.2-17.7 1.6-22.5Z" fill="#4d5f8f"/><circle cx="24.2" cy="29.3" r="10.1" fill="#f5f7ff"/><circle cx="24.2" cy="29.3" r="3.15" fill="#05070b"/><circle cx="39.8" cy="29.3" r="10.1" fill="#f5f7ff"/><circle cx="39.8" cy="29.3" r="3.15" fill="#05070b"/><path d="m28.4 39.2 7.2-.05-3.55 5.25Z" fill="#f3c86f"/></g>}
       </svg>
       {leader && <span className="avatar-crown" aria-label="Líder da sala"><Icon name="crown"/></span>}
     </span>
   );
-}
+});
 
 function normalizeAvatar(value: unknown) {
   const avatar = String(value || '');
@@ -543,7 +337,7 @@ function normalizeAvatar(value: unknown) {
   return 'orbit';
 }
 
-function RoomDevicePicker({ label, input = false, devices, value, onChange }: { label: string; input?: boolean; devices: MediaDeviceInfo[]; value: string; onChange: (deviceId: string) => void }) {
+const RoomDevicePicker = memo(function RoomDevicePicker({ label, input = false, devices, value, onChange }: { label: string; input?: boolean; devices: MediaDeviceInfo[]; value: string; onChange: (deviceId: string) => void }) {
   const kind = input ? 'audioinput' : 'audiooutput';
   const [open, setOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
@@ -576,7 +370,7 @@ function RoomDevicePicker({ label, input = false, devices, value, onChange }: { 
       <div className="room-device-options-list" role="listbox" aria-label={label}>{[{ deviceId: '', label: 'Padrão do sistema' }, ...available].map((device, index) => <button key={`${device.deviceId || 'default'}-${index}`} type="button" role="option" aria-selected={device.deviceId === value} onClick={() => { onChange(device.deviceId); setOpen(false); }}><Icon name={kind === 'audioinput' ? 'microphone' : 'volume'}/><span>{device.label || `${label} ${index + 1}`}</span>{device.deviceId === value && <b>✓</b>}</button>)}</div>
     </div>}
   </div>;
-}
+});
 
 function normalizeName(value: string) {
   return value.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 28) || 'Você';
@@ -670,26 +464,6 @@ function renderChatText(text: string) {
   );
 }
 
-function resizeChatInput(input: HTMLTextAreaElement | null) {
-  if (!input) return;
-  const composer = input.closest('.chat-composer');
-  input.style.height = 'auto';
-  const styles = window.getComputedStyle(input);
-  const minimumHeight = Number.parseFloat(styles.minHeight) || 0;
-  const maximumHeight = Number.parseFloat(styles.maxHeight) || 96;
-  const lineHeight = Number.parseFloat(styles.lineHeight) || 16;
-  const verticalPadding = (Number.parseFloat(styles.paddingTop) || 0) + (Number.parseFloat(styles.paddingBottom) || 0);
-  const naturalHeight = Math.ceil(input.scrollHeight);
-  const nextHeight = Math.max(minimumHeight, Math.min(naturalHeight, maximumHeight));
-  const multiline = input.value.includes('\n') || naturalHeight - verticalPadding > lineHeight * 1.35;
-  const scrollable = naturalHeight > maximumHeight + 1;
-
-  input.style.height = `${nextHeight}px`;
-  input.style.overflowY = scrollable ? 'auto' : 'hidden';
-  composer?.classList.toggle('is-multiline', multiline);
-  composer?.classList.toggle('is-scrollable', scrollable);
-}
-
 function closestVerticalScroller(target: EventTarget | null, sheet: HTMLElement) {
   let element = target instanceof HTMLElement ? target : target instanceof Element ? target.parentElement : null;
   while (element) {
@@ -729,7 +503,7 @@ function reducedInterfaceMotion() {
 
 function useMotionPresence(open: boolean, closeDurationProperty: string, closeFallback: number, animated: boolean) {
   const [present, setPresent] = useState(open);
-  const [phase, setPhase] = useState<'closed' | 'opening' | 'open' | 'closing'>(open ? 'opening' : 'closed');
+  const [phase, setPhase] = useState<'closed' | 'opening' | 'open' | 'closing'>(open ? 'open' : 'closed');
 
   useLayoutEffect(() => {
     let frame: number | null = null;
@@ -747,7 +521,19 @@ function useMotionPresence(open: boolean, closeDurationProperty: string, closeFa
         return undefined;
       }
       setPhase(current => current === 'open' ? current : 'opening');
-      frame = window.requestAnimationFrame(() => setPhase('open'));
+      const completeOpen = () => {
+        if (frame !== null) {
+          window.cancelAnimationFrame(frame);
+          frame = null;
+        }
+        if (timer !== null) {
+          window.clearTimeout(timer);
+          timer = null;
+        }
+        setPhase('open');
+      };
+      frame = window.requestAnimationFrame(completeOpen);
+      timer = window.setTimeout(completeOpen, 64);
     } else if (present) {
       if (!motionAllowed) {
         setPresent(false);
@@ -824,7 +610,8 @@ function useBottomSheetGesture(enabled: boolean, onDismiss: () => void) {
       session.element.style.setProperty('--sheet-drag-y', `${session.offset}px`);
     }
     const { element } = session;
-    if (!settle || !session.dragging) {
+    const reducedMotion = element.closest<HTMLElement>('.unified-room-app')?.classList.contains('animations-disabled') || reducedInterfaceMotion();
+    if (!settle || !session.dragging || reducedMotion) {
       element.classList.remove('is-sheet-settling', 'is-sheet-dismissing');
       element.classList.remove('is-sheet-dragging');
       element.style.removeProperty('--sheet-drag-y');
@@ -848,7 +635,7 @@ function useBottomSheetGesture(enabled: boolean, onDismiss: () => void) {
       element.classList.remove('is-sheet-settling');
       element.style.removeProperty('--sheet-drag-y');
       if (motionElementRef.current === element) motionElementRef.current = null;
-    }, motionMilliseconds('--duration-fast', 250) + 30);
+    }, motionMilliseconds('--sheet-settle-dur', 220) + 30);
   }, [removeNativeListeners]);
 
   const dismissSheet = useCallback((knownElement?: HTMLElement) => {
@@ -1139,7 +926,8 @@ function setScreenContentHint(track: MediaStreamTrack | null | undefined, fps: F
 }
 
 function formatBitrate(value: number) {
-  return `${value < 10 && value % 1 ? value.toFixed(1) : Math.round(value)} Mb/s`;
+  const formatted = value < 10 && value % 1 ? value.toFixed(1).replace('.', ',') : String(Math.round(value));
+  return `${formatted} Mb/s`;
 }
 
 async function configureScreenSender(sender: RTCRtpSender | null, resolution: Resolution, fps: FrameRate, adaptive: boolean, manualMbps: number, peerCount = 1, networkLevel = 0) {
@@ -1341,7 +1129,7 @@ function updateAdaptiveNetworkLevel(record: PeerRecord, metrics: PeerNetworkMetr
   return false;
 }
 
-function ScreenTile({ stream, name, local, focused, thumbnail, focusable, onFocus }: { stream: MediaStream; name: string; local?: boolean; focused?: boolean; thumbnail?: boolean; focusable?: boolean; onFocus?: () => void }) {
+const ScreenTile = memo(function ScreenTile({ tileId, stream, name, local, focused, thumbnail, focusable, onFocus }: { tileId: string; stream: MediaStream; name: string; local?: boolean; focused?: boolean; thumbnail?: boolean; focusable?: boolean; onFocus?: (id: string | null) => void }) {
   const ref = useRef<HTMLVideoElement>(null);
   useEffect(() => {
     const video = ref.current;
@@ -1351,12 +1139,15 @@ function ScreenTile({ stream, name, local, focused, thumbnail, focusable, onFocu
     void video.play().catch(() => undefined);
     return () => { if (video.srcObject === stream) video.srcObject = null; };
   }, [stream]);
-  return <article className={`screen-tile ${focused ? 'is-focused' : ''} ${thumbnail ? 'is-thumbnail' : ''}`} onDoubleClick={focusable ? onFocus : undefined}>
+  const handleFocus = useCallback(() => {
+    onFocus?.(focused ? null : tileId);
+  }, [focused, onFocus, tileId]);
+  return <article className={`screen-tile ${focused ? 'is-focused' : ''} ${thumbnail ? 'is-thumbnail' : ''}`} onDoubleClick={focusable ? handleFocus : undefined}>
     <video ref={ref} autoPlay muted playsInline/>
     <span className="screen-tile-label">{local ? 'Sua tela' : `Tela de ${name}`}</span>
-    {focusable && <button className="screen-tile-focus" type="button" onClick={onFocus} aria-label={focused ? 'Voltar para todas as telas' : `Destacar a tela de ${local ? 'você' : name}`} title={focused ? 'Ver todas as telas' : 'Destacar esta tela'}><MotionIcon active={Boolean(focused)} activeIcon="grid" inactiveIcon="expand"/><span>{focused ? 'Ver todas' : 'Destacar'}</span></button>}
+    {focusable && <button className="screen-tile-focus" type="button" onClick={handleFocus} aria-label={focused ? 'Voltar para todas as telas' : `Destacar a tela de ${local ? 'você' : name}`} title={focused ? 'Ver todas as telas' : 'Destacar esta tela'}><MotionIcon active={Boolean(focused)} activeIcon="grid" inactiveIcon="expand"/><span>{focused ? 'Ver todas' : 'Destacar'}</span></button>}
   </article>;
-}
+});
 
 export default function RoomApp() {
   const initialInvite = useMemo(() => parseInvite(), []);
@@ -1411,12 +1202,8 @@ export default function RoomApp() {
   const chatStickToBottomRef = useRef(true);
   const [unreadMessages, setUnreadMessages] = useState(0);
   const [newMessagesBelow, setNewMessagesBelow] = useState(0);
-  const [chatValue, setChatValue] = useState('');
   const [chatInputFocused, setChatInputFocused] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
-  const [emojiCategory, setEmojiCategory] = useState<ChatEmojiCategory>('recent');
-  const [emojiSearch, setEmojiSearch] = useState('');
-  const [recentEmojis, setRecentEmojis] = useState(loadRecentChatEmojis);
   const [chatSettingsOpen, setChatSettingsOpen] = useState(false);
   const [chatAppearance, setChatAppearance] = useState<ChatAppearance>(loadChatAppearance);
   const [profileOpen, setProfileOpen] = useState(false);
@@ -1496,11 +1283,10 @@ export default function RoomApp() {
   const stageRef = useRef<HTMLElement>(null);
   const roomAppRef = useRef<HTMLDivElement>(null);
   const chatLogRef = useRef<HTMLDivElement>(null);
-  const chatInputRef = useRef<HTMLTextAreaElement>(null);
+  const chatComposerRef = useRef<ChatComposerHandle>(null);
   const emojiPickerRef = useRef<HTMLDivElement>(null);
   const emojiPanelRef = useRef<HTMLElement>(null);
   const chatSettingsRef = useRef<HTMLDivElement>(null);
-  const onboardingDialogRef = useRef<HTMLElement>(null);
   const desktopDisplayDialogRef = useRef<HTMLElement>(null);
   const joinInputShellRef = useRef<HTMLDivElement>(null);
   const callErrorTextRef = useRef('');
@@ -1528,7 +1314,7 @@ export default function RoomApp() {
     shell.classList.remove('is-shaking');
     void shell.offsetWidth;
     shell.classList.add('is-shaking');
-    const shakeDuration = motionMilliseconds('--shake-dur-a', 80) * 2 + motionMilliseconds('--shake-dur-b', 60) * 2;
+    const shakeDuration = motionMilliseconds('--shake-dur', 400);
     const timer = window.setTimeout(() => shell.classList.remove('is-shaking'), shakeDuration + 20);
     return () => window.clearTimeout(timer);
   }, [joinErrorRevision]);
@@ -1598,40 +1384,6 @@ export default function RoomApp() {
   useEffect(() => {
     writeStorage('localStorage', INTERFACE_MOTION_KEY, String(animationsEnabled));
   }, [animationsEnabled]);
-  useEffect(() => {
-    if (!onboardingOpen) return;
-    const handleTutorialKeys = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        writeStorage('localStorage', ONBOARDING_KEY, 'complete');
-        setOnboardingOpen(false);
-        setOnboardingStep(0);
-        return;
-      }
-      if (event.key === 'ArrowRight') setOnboardingStep(step => Math.min(ONBOARDING_STEPS.length - 1, step + 1));
-      if (event.key === 'ArrowLeft') setOnboardingStep(step => Math.max(0, step - 1));
-      if (event.key !== 'Tab') return;
-      const dialog = onboardingDialogRef.current;
-      if (!dialog) return;
-      const focusable = [...dialog.querySelectorAll<HTMLElement>('button:not(:disabled), [href], input:not(:disabled), [tabindex]:not([tabindex="-1"])')];
-      if (!focusable.length) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    const focusFrame = window.requestAnimationFrame(() => onboardingDialogRef.current?.focus({ preventScroll: true }));
-    document.addEventListener('keydown', handleTutorialKeys);
-    return () => {
-      window.cancelAnimationFrame(focusFrame);
-      document.removeEventListener('keydown', handleTutorialKeys);
-    };
-  }, [onboardingOpen]);
   useEffect(() => {
     const bridge = window.screenLinkDesktop;
     if (!bridge?.getUpdateState || !bridge.onUpdateState) return;
@@ -1772,22 +1524,10 @@ export default function RoomApp() {
 
   useLayoutEffect(() => {
     if (!chatOpen) return;
-    const input = chatInputRef.current;
-    if (!input) return;
-    let previousWidth = input.getBoundingClientRect().width;
-    const syncInputHeight = () => resizeChatInput(input);
-    const resizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(entries => {
-      const nextWidth = entries[0]?.contentRect.width ?? input.getBoundingClientRect().width;
-      if (Math.abs(nextWidth - previousWidth) < 0.5) return;
-      previousWidth = nextWidth;
-      syncInputHeight();
-    });
-
+    const syncInputHeight = () => chatComposerRef.current?.resize();
     syncInputHeight();
-    resizeObserver?.observe(input);
     window.addEventListener('resize', syncInputHeight);
     return () => {
-      resizeObserver?.disconnect();
       window.removeEventListener('resize', syncInputHeight);
     };
   }, [chatOpen, phone]);
@@ -1884,15 +1624,19 @@ export default function RoomApp() {
       setQrOpen(false);
       return;
     }
+    if (!qrOpen) return;
     let cancelled = false;
-    void QRCode.toDataURL(groupInviteUrl(session.invite, shareOrigin), {
-      width: 720,
-      margin: 2,
-      color: { dark: '#071013', light: '#f7fbfc' },
-      errorCorrectionLevel: 'M'
-    }).then(value => { if (!cancelled) setQrCode(value); }).catch(() => { if (!cancelled) setQrCode(''); });
+    void import('qrcode')
+      .then(({ default: QRCode }) => QRCode.toDataURL(groupInviteUrl(session.invite, shareOrigin), {
+        width: 720,
+        margin: 2,
+        color: { dark: '#0d0d0d', light: '#ffffff' },
+        errorCorrectionLevel: 'M'
+      }))
+      .then(value => { if (!cancelled) setQrCode(value); })
+      .catch(() => { if (!cancelled) setQrCode(''); });
     return () => { cancelled = true; };
-  }, [session?.invite.roomId, session?.invite.token, shareOrigin]);
+  }, [qrOpen, session?.invite.roomId, session?.invite.token, shareOrigin]);
 
   useEffect(() => {
     if (!profileOpen) return;
@@ -2708,7 +2452,18 @@ export default function RoomApp() {
     }
     let cancelled = false;
     const sample = async () => {
-      const connected = [...peersRef.current.values()].filter(peer => peer.pc.connectionState === 'connected');
+      if (!peersRef.current.size) {
+        if (!cancelled) {
+          setMediaLatency(null);
+          setMediaPacketLoss(null);
+          setAdaptiveNetworkLevel(0);
+        }
+        return;
+      }
+      const connected: PeerRecord[] = [];
+      for (const peer of peersRef.current.values()) {
+        if (peer.pc.connectionState === 'connected') connected.push(peer);
+      }
       if (!connected.length) {
         if (!cancelled) {
           setMediaLatency(null);
@@ -2831,7 +2586,9 @@ export default function RoomApp() {
         const limiter = context.createDynamicsCompressor();
         const destination = context.createMediaStreamDestination();
         const analyser = context.createAnalyser();
-        const noiseSuppressor = await createNoiseSuppressorPipeline(context, effectiveSettings.noiseSuppression).catch(() => null);
+        const noiseSuppressor = await import('./audioNoiseSuppression')
+          .then(({ createNoiseSuppressorPipeline }) => createNoiseSuppressorPipeline(context, effectiveSettings.noiseSuppression))
+          .catch(() => null);
         analyser.fftSize = 256;
         gain.gain.value = settings.inputVolume / 100;
         limiter.threshold.value = -3;
@@ -2920,7 +2677,7 @@ export default function RoomApp() {
   useEffect(() => {
     const context = audioContextRef.current;
     if (!context) return;
-    setNoiseSuppression(microphoneNoiseSuppressorRef.current, audioSettings.noiseSuppression, context.currentTime);
+    microphoneNoiseSuppressorRef.current?.setEnabled(audioSettings.noiseSuppression, context.currentTime);
   }, [audioSettings.noiseSuppression]);
 
   const toggleMicrophone = useCallback(async () => {
@@ -3154,27 +2911,51 @@ export default function RoomApp() {
   }
 
   useEffect(() => {
+    if (!session) {
+      setSpeakingIds(current => current.size ? new Set() : current);
+      return undefined;
+    }
+    let sampleBuffer: Uint8Array<ArrayBuffer> | null = null;
     const timer = window.setInterval(() => {
-      const next = new Set<string>();
       const analyser = analyserRef.current;
-      if (selfIdRef.current && microphoneEnabledRef.current && analyser) {
-        const values = new Uint8Array(analyser.fftSize);
-        analyser.getByteTimeDomainData(values);
+      const checkLocal = Boolean(selfIdRef.current && microphoneEnabledRef.current && analyser);
+      if (!checkLocal && peersRef.current.size === 0) {
+        setSpeakingIds(current => current.size ? new Set() : current);
+        return;
+      }
+      const next = new Set<string>();
+      if (checkLocal && analyser) {
+        if (!sampleBuffer || sampleBuffer.length !== analyser.fftSize) {
+          sampleBuffer = new Uint8Array(new ArrayBuffer(analyser.fftSize));
+        }
+        analyser.getByteTimeDomainData(sampleBuffer);
         let energy = 0;
-        for (const value of values) energy += ((value - 128) / 128) ** 2;
-        if (Math.sqrt(energy / values.length) > .035) next.add(selfIdRef.current);
+        for (let i = 0; i < sampleBuffer.length; i += 1) {
+          const centered = (sampleBuffer[i] - 128) / 128;
+          energy += centered * centered;
+        }
+        if (Math.sqrt(energy / sampleBuffer.length) > .035) next.add(selfIdRef.current);
       }
       for (const peer of peersRef.current.values()) {
         const sources = peer.callAudioReceiver?.getSynchronizationSources?.() ?? [];
         if (sources.some(source => Number(source.audioLevel || 0) > .025)) next.add(peer.id);
       }
       setSpeakingIds(current => {
-        if (current.size === next.size && [...current].every(id => next.has(id))) return current;
+        if (current.size === next.size) {
+          let identical = true;
+          for (const id of current) {
+            if (!next.has(id)) {
+              identical = false;
+              break;
+            }
+          }
+          if (identical) return current;
+        }
         return next;
       });
     }, 120);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [session]);
 
   useEffect(() => () => {
     microphoneRecoveryRequestedRef.current = false;
@@ -3330,7 +3111,7 @@ export default function RoomApp() {
     ownChatMessageIdsRef.current.clear();
     chatMessagesRef.current = [];
     setChatMessages([]);
-    setChatValue('');
+    chatComposerRef.current?.clear();
     setUnreadMessages(0);
     setNewMessagesBelow(0);
     chatStickToBottomRef.current = true;
@@ -3359,14 +3140,14 @@ export default function RoomApp() {
     reconnectNowRef.current?.();
   }
 
-  async function changeInputDevice(deviceId: string) {
+  const changeInputDevice = useCallback((deviceId: string) => {
     const next = { ...audioSettingsRef.current, inputDeviceId: deviceId };
     audioSettingsRef.current = next;
     setAudioSettings(next);
-    if (localMicrophoneTrackRef.current?.readyState === 'live') await acquireMicrophone(true);
-  }
+    if (localMicrophoneTrackRef.current?.readyState === 'live') void acquireMicrophoneRef.current(true);
+  }, []);
 
-  function changeOutputDevice(deviceId: string) {
+  const changeOutputDevice = useCallback((deviceId: string) => {
     const next = { ...audioSettingsRef.current, outputDeviceId: deviceId };
     audioSettingsRef.current = next;
     setAudioSettings(next);
@@ -3378,7 +3159,7 @@ export default function RoomApp() {
         if (sinkable.setSinkId) void sinkable.setSinkId(deviceId).catch(() => undefined);
       }
     }
-  }
+  }, []);
 
   function changeInputVolume(value: number) {
     const next = { ...audioSettingsRef.current, inputVolume: value };
@@ -3622,10 +3403,9 @@ export default function RoomApp() {
     else void releaseWakeLock();
   }
 
-  function sendChat(event: FormEvent) {
-    event.preventDefault();
-    const text = normalizeChatText(chatValue);
-    if (!text || !selfIdRef.current || mode === 'error') return;
+  const sendChatText = useCallback((rawText: string) => {
+    const text = normalizeChatText(rawText);
+    if (!text || !selfIdRef.current || mode === 'error') return false;
     const recipients = Object.values(participantsRef.current)
       .filter(participant => participant.connected && participant.id !== selfIdRef.current)
       .map(participant => participant.id);
@@ -3652,13 +3432,12 @@ export default function RoomApp() {
       });
       transmitPendingChat(message.id, true);
     }
-    setChatValue('');
     if (phone && emojiOpen) dismissMobileOverlayRef.current();
     else setEmojiOpen(false);
-    window.requestAnimationFrame(() => resizeChatInput(chatInputRef.current));
-  }
+    return true;
+  }, [appendMessage, emojiOpen, mode, phone, rememberOwnChatMessage, transmitPendingChat]);
 
-  function retryChatMessage(messageId: string) {
+  const retryChatMessage = useCallback((messageId: string) => {
     const message = chatMessagesRef.current.find(item => item.id === messageId && isOwnChatMessage(item));
     if (!message || mode === 'error') return;
     const recipients = Object.values(participantsRef.current)
@@ -3679,44 +3458,27 @@ export default function RoomApp() {
     });
     updateChatDelivery(messageId, 'pending');
     transmitPendingChat(messageId, true);
-  }
+  }, [isOwnChatMessage, mode, transmitPendingChat, updateChatDelivery]);
 
-  function insertEmoji(emoji: string) {
-    const input = chatInputRef.current;
-    const start = input?.selectionStart ?? chatValue.length;
-    const end = input?.selectionEnd ?? start;
-    const next = `${chatValue.slice(0, start)}${emoji}${chatValue.slice(end)}`.slice(0, 1_000);
-    setChatValue(next);
-    setRecentEmojis(current => {
-      const updated = [emoji, ...current.filter(value => value !== emoji)].slice(0, 24);
-      writeStorage('localStorage', CHAT_RECENT_EMOJIS_KEY, JSON.stringify(updated));
-      return updated;
-    });
+  const insertEmoji = useCallback((emoji: string) => {
+    chatComposerRef.current?.insertEmoji(emoji, !phone);
     if (!phone) setEmojiOpen(false);
-    window.requestAnimationFrame(() => {
-      const cursor = Math.min(start + emoji.length, next.length);
-      input?.setSelectionRange(cursor, cursor);
-      resizeChatInput(input ?? null);
-      if (!phone) input?.focus();
-    });
-  }
+  }, [phone]);
 
-  function toggleEmojiPicker() {
+  const toggleEmojiPicker = useCallback(() => {
     if (emojiOpen) {
       if (phone) {
         dismissMobileOverlayRef.current();
         window.setTimeout(
-          () => chatInputRef.current?.focus(),
+          () => chatComposerRef.current?.focus(),
           motionMilliseconds('--panel-close-dur', 350) + 30
         );
       } else setEmojiOpen(false);
       return;
     }
-    setEmojiSearch('');
-    setEmojiCategory('recent');
-    if (phone) chatInputRef.current?.blur();
+    if (phone) chatComposerRef.current?.blur();
     setEmojiOpen(true);
-  }
+  }, [emojiOpen, phone]);
 
   function toggleChatSidebar() {
     if (chatOpen) setProfileOpen(false);
@@ -3731,10 +3493,10 @@ export default function RoomApp() {
     setChatOpen(!chatOpen);
   }
 
-  function finishOnboarding() {
+  const finishOnboarding = useCallback(() => {
     writeStorage('localStorage', ONBOARDING_KEY, 'complete');
     setOnboardingOpen(false);
-  }
+  }, []);
 
   function reopenOnboarding() {
     setControlsOpen(false);
@@ -3801,19 +3563,36 @@ export default function RoomApp() {
     window.setTimeout(() => setCopied(''), 1_500);
   }
 
-  const participantList = Object.values(participants).sort((left, right) => left.joinedAt - right.joinedAt);
-  const connectedParticipants = participantList.filter(participant => participant.connected);
-  const remoteParticipants = connectedParticipants.filter(participant => participant.id !== selfId);
-  const sharingParticipants = connectedParticipants.filter(participant => participant.sharing);
-  const remoteSharingParticipants = sharingParticipants.filter(participant => participant.id !== selfId);
+  const participantList = useMemo(
+    () => Object.values(participants).sort((left, right) => left.joinedAt - right.joinedAt),
+    [participants]
+  );
+  const connectedParticipants = useMemo(
+    () => participantList.filter(participant => participant.connected),
+    [participantList]
+  );
+  const remoteParticipants = useMemo(
+    () => connectedParticipants.filter(participant => participant.id !== selfId),
+    [connectedParticipants, selfId]
+  );
+  const sharingParticipants = useMemo(
+    () => connectedParticipants.filter(participant => participant.sharing),
+    [connectedParticipants]
+  );
+  const remoteSharingParticipants = useMemo(
+    () => sharingParticipants.filter(participant => participant.id !== selfId),
+    [sharingParticipants, selfId]
+  );
   const localScreen = localScreenStreamRef.current;
   const isOwner = Boolean(session?.ownerKey);
   const roomLabel = session ? (session.joinCode?.toUpperCase() || '••••••') : '';
   const remoteParticipantCount = remoteParticipants.length;
   const connectedPeerCount = [...peersRef.current.values()].filter(peer => peer.pc.connectionState === 'connected').length;
-  const connectionQuality = mode !== 'connected' || !signalingConnected || !connectedPeerCount || mediaLatency === null
-    ? 'waiting'
-    : mediaLatency > 450 || (mediaPacketLoss ?? 0) >= .08 ? 'blocked' : mediaLatency > 180 || (mediaPacketLoss ?? 0) >= .03 ? 'limited' : mediaLatency > 90 || (mediaPacketLoss ?? 0) >= .015 ? 'good' : 'excellent';
+  const connectionQuality = !session
+    ? 'idle'
+    : mode !== 'connected' || !signalingConnected || !connectedPeerCount || mediaLatency === null
+      ? 'waiting'
+      : mediaLatency > 450 || (mediaPacketLoss ?? 0) >= .08 ? 'blocked' : mediaLatency > 180 || (mediaPacketLoss ?? 0) >= .03 ? 'limited' : mediaLatency > 90 || (mediaPacketLoss ?? 0) >= .015 ? 'good' : 'excellent';
   const latencyLabel = mediaLatency === null ? '—' : String(mediaLatency);
   const packetLossLabel = mediaPacketLoss === null ? '—' : `${(mediaPacketLoss * 100).toFixed(mediaPacketLoss >= .1 ? 0 : 1)}%`;
   const connectionStatusLabel = mode !== 'connected'
@@ -3829,7 +3608,7 @@ export default function RoomApp() {
   const callErrorVisible = Boolean(error && mode !== 'error' && !joinEntryError);
   if (callErrorVisible) callErrorTextRef.current = error;
   const connectionRetryAvailable = Boolean(session && /servidor|sincronizar|conexão será refeita/i.test(callErrorTextRef.current));
-  const onboarding = ONBOARDING_STEPS[onboardingStep];
+  const savedOwnerSession = useMemo(() => (session ? null : loadOwnerSession()), [session, mode]);
   const activeChat = chatOpen;
   const activeResolution = automaticQuality ? 720 : resolution;
   const activeFps = automaticQuality ? 30 : fps;
@@ -3844,17 +3623,8 @@ export default function RoomApp() {
       : !selfId
         ? 'Conectando ao chat…'
         : mode === 'connecting'
-          ? 'Reconectando — as mensagens ficam na fila…'
+          ? 'Reconectando — mensagens na fila…'
           : 'Escrever mensagem…';
-  const emojiSearchTerm = normalizeEmojiSearch(emojiSearch);
-  const emojiOptions: ChatEmoji[] = emojiSearchTerm
-    ? ALL_CHAT_EMOJIS.filter(emoji => normalizeEmojiSearch(emoji.label).includes(emojiSearchTerm))
-    : emojiCategory === 'recent'
-      ? recentEmojis
-        .map(value => ALL_CHAT_EMOJIS.find(emoji => emoji.value === value))
-        .filter((emoji): emoji is ChatEmoji => Boolean(emoji))
-      : CHAT_EMOJI_GROUPS.find(group => group.id === emojiCategory)?.emojis || [];
-  const activeEmojiCategoryIndex = Math.max(0, CHAT_EMOJI_CATEGORIES.findIndex(category => category.id === emojiCategory));
   const audioMenuPresence = useMotionPresence(!mobile && audioMenuOpen, '--dropdown-close-dur', 150, animationsEnabled);
   const screenMenuPresence = useMotionPresence(!mobile && screenMenuOpen, '--dropdown-close-dur', 150, animationsEnabled);
   const moreMenuPresence = useMotionPresence(!mobile && moreMenuOpen, '--dropdown-close-dur', 150, animationsEnabled);
@@ -4037,69 +3807,60 @@ export default function RoomApp() {
         chatStickToBottomRef.current = atBottom;
         if (atBottom) setNewMessagesBelow(0);
       }}>
-        {chatMessages.length ? chatMessages.map(message => {
-          if (message.system) return <p className="chat-system" key={message.id}>{message.text}</p>;
-          const own = isOwnChatMessage(message);
-          return (
-            <article className={`chat-message ${own ? 'is-own' : ''}`} key={message.id}>
-              <div className="chat-bubble">
-                {!own && <strong className="chat-message-sender">{message.senderName}</strong>}
-                <p>
-                  <span className="chat-message-copy">{renderChatText(message.text)}</span>
-                  <span className="chat-message-meta">
-                    <time dateTime={new Date(message.sentAt).toISOString()}>{new Date(message.sentAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</time>
-                    {own && message.delivery && <ChatDeliveryIndicator delivery={message.delivery} onRetry={() => retryChatMessage(message.id)}/>}
-                  </span>
-                </p>
-              </div>
-            </article>
-          );
-        }) : <div className="chat-empty"><Icon name="chat"/><strong>A conversa começa aqui</strong></div>}
+        {chatMessages.length ? chatMessages.map(message => (
+          <ChatMessageItem
+            key={message.id}
+            message={message}
+            own={!message.system && isOwnChatMessage(message)}
+            onRetry={retryChatMessage}
+          />
+        )) : <div className="chat-empty"><span className="chat-empty-icon" aria-hidden="true"><Icon name="chat"/></span><strong>Nenhuma mensagem ainda</strong><small>As mensagens da chamada aparecem aqui.</small></div>}
       </div>
       {newMessagesBelow > 0 && <button className="chat-jump-latest" type="button" onClick={() => scrollChatToLatest(true)}>{newMessagesBelow === 1 ? 'Nova mensagem' : `${newMessagesBelow} novas mensagens`} <span aria-hidden="true">↓</span></button>}
-      <form className="chat-composer" onSubmit={sendChat}>
-        <div className="emoji-picker-anchor" ref={emojiPickerRef}>
-          <button className={emojiOpen ? 'is-open' : ''} type="button" onClick={toggleEmojiPicker} disabled={!chatCanSend} aria-expanded={emojiOpen} aria-controls="chat-emoji-picker" aria-label={emojiOpen ? 'Voltar ao teclado' : 'Escolher emoji'}><MotionIcon active={emojiOpen && phone} activeIcon="keyboard" inactiveIcon="smile"/></button>
-        </div>
-        <textarea ref={chatInputRef} aria-label="Escrever mensagem" title={phone ? 'Enter quebra a linha' : 'Enter envia · Shift+Enter quebra a linha'} enterKeyHint={phone ? 'enter' : 'send'} rows={1} value={chatValue} onFocus={() => setChatInputFocused(true)} onBlur={() => window.setTimeout(() => setChatInputFocused(document.activeElement === chatInputRef.current), 0)} onChange={event => { setChatValue(event.target.value); resizeChatInput(event.currentTarget); }} onKeyDown={event => { if (!phone && event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={chatPlaceholder} maxLength={1000} disabled={!chatCanSend}/>
-        <button type="submit" onPointerDown={event => { if (phone) event.preventDefault(); }} disabled={!normalizeChatText(chatValue) || !chatCanSend} aria-label="Enviar mensagem"><Icon name="send"/></button>
-      </form>
-      {emojiOpen && <section ref={emojiPanelRef} id="chat-emoji-picker" className="emoji-picker" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-label="Seletor de emojis" {...emojiSheetGesture}>
-        <div className="emoji-picker-handle" aria-hidden="true"/>
-        <label className="emoji-picker-search"><Icon name="search"/><input type="search" value={emojiSearch} onChange={event => setEmojiSearch(event.currentTarget.value)} placeholder="Buscar emoji" aria-label="Buscar emoji"/></label>
-        <nav className={`emoji-picker-categories ${emojiSearchTerm ? 'is-searching' : ''}`} role="tablist" aria-label="Categorias de emojis">
-          <span className="emoji-category-indicator" style={{ transform: `translate3d(calc(${activeEmojiCategoryIndex * 100}% + ${activeEmojiCategoryIndex * .2}rem), 0, 0)` }} aria-hidden="true"/>
-          {CHAT_EMOJI_CATEGORIES.map(category => <button className={!emojiSearchTerm && emojiCategory === category.id ? 'is-active' : ''} key={category.id} type="button" role="tab" aria-selected={!emojiSearchTerm && emojiCategory === category.id} aria-label={category.label} title={category.label} onClick={() => { setEmojiSearch(''); setEmojiCategory(category.id); }}>{category.icon}</button>)}
-        </nav>
-        <div className="emoji-picker-heading"><strong>{emojiSearchTerm ? 'Resultados' : CHAT_EMOJI_CATEGORIES.find(category => category.id === emojiCategory)?.label}</strong><small>{emojiOptions.length}</small></div>
-        <div className="emoji-picker-grid" role="listbox" aria-label={emojiSearchTerm ? 'Resultados da busca' : 'Emojis disponíveis'}>
-          {emojiOptions.map(emoji => <button key={emoji.value} type="button" role="option" aria-label={emoji.label} title={emoji.label} onClick={() => insertEmoji(emoji.value)}>{emoji.value}</button>)}
-          {!emojiOptions.length && <p className="emoji-picker-empty">Nenhum emoji encontrado.</p>}
-        </div>
-      </section>}
+      <ChatComposer
+        ref={chatComposerRef}
+        canSend={chatCanSend}
+        placeholder={chatPlaceholder}
+        phone={phone}
+        emojiOpen={emojiOpen}
+        emojiPickerRef={emojiPickerRef}
+        onToggleEmoji={toggleEmojiPicker}
+        onFocusChange={setChatInputFocused}
+        onSubmitText={sendChatText}
+      />
+      {emojiOpen && (
+        <Suspense fallback={null}>
+          <EmojiPicker
+            panelRef={emojiPanelRef}
+            phone={phone}
+            sheetProps={emojiSheetGesture}
+            onSelect={insertEmoji}
+          />
+        </Suspense>
+      )}
     </div>
   );
 
   const audioPopover = (mobile ? audioMenuOpen : audioMenuPresence.present) ? (
     <section className={`dock-popover audio-popover unified-audio-popover ${mobile ? '' : `t-dropdown ${audioMenuPresence.className}`}`} data-origin="bottom-center" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="audio-sheet-title" {...dockSheetGesture}>
-      <header><strong id="audio-sheet-title">Áudio</strong><small>DISPOSITIVOS E VOZ</small><button className="mobile-sheet-close" type="button" onClick={() => dismissDockSheet()} aria-label="Fechar configurações de áudio"><Icon name="close"/></button></header>
+      <header><strong id="audio-sheet-title">Áudio</strong><small>Dispositivos e voz</small><button className="mobile-sheet-close" type="button" onClick={() => dismissDockSheet()} aria-label="Fechar configurações de áudio"><Icon name="close"/></button></header>
       <div className="room-device-stack">
-        <RoomDevicePicker input label="Dispositivo de entrada" value={audioSettings.inputDeviceId} devices={audioDevices} onChange={deviceId => void changeInputDevice(deviceId)}/>
+        <RoomDevicePicker input label="Dispositivo de entrada" value={audioSettings.inputDeviceId} devices={audioDevices} onChange={changeInputDevice}/>
         <RoomDevicePicker label="Dispositivo de saída" value={audioSettings.outputDeviceId} devices={audioDevices} onChange={changeOutputDevice}/>
       </div>
       <div className="audio-popover-scroll">
         <section className="audio-menu-section">
-          <header><strong>Volumes</strong><small>LOCAL</small></header>
-          <div className="volume-control"><label htmlFor="room-input-volume"><strong>Volume de entrada</strong><small>Ganho do seu microfone</small></label><input id="room-input-volume" type="range" min="0" max="150" value={audioSettings.inputVolume} onChange={event => changeInputVolume(Number(event.target.value))}/><output>{audioSettings.inputVolume}%</output></div>
-          <div className="volume-control"><label htmlFor="room-output-volume"><strong>Volume de saída</strong><small>Áudio recebido da chamada</small></label><input id="room-output-volume" type="range" min="0" max="100" value={audioSettings.outputVolume} onChange={event => changeOutputVolume(Number(event.target.value))}/><output>{audioSettings.outputVolume}%</output></div>
+          <header><strong>Volumes</strong><small>Local</small></header>
+          <div className="volume-control"><label htmlFor="room-input-volume"><strong>Volume de entrada</strong><small>Ganho do microfone</small></label><input id="room-input-volume" type="range" min="0" max="150" value={audioSettings.inputVolume} onChange={event => changeInputVolume(Number(event.target.value))}/><output>{audioSettings.inputVolume}%</output></div>
+          <div className="volume-control"><label htmlFor="room-output-volume"><strong>Volume de saída</strong><small>Áudio da chamada</small></label><input id="room-output-volume" type="range" min="0" max="100" value={audioSettings.outputVolume} onChange={event => changeOutputVolume(Number(event.target.value))}/><output>{audioSettings.outputVolume}%</output></div>
           <div className="interface-sound-controls">
-            <button className="voice-setting interface-sound-setting" type="button" role="switch" aria-checked={interfaceSoundsEnabled} onClick={toggleInterfaceSounds}><span><strong>Sons da interface</strong><small>Chamada, microfone e participantes</small></span><MotionSwitch on={interfaceSoundsEnabled} compact/></button>
+            <button className="voice-setting interface-sound-setting" type="button" role="switch" aria-checked={interfaceSoundsEnabled} onClick={toggleInterfaceSounds}><span><strong>Sons da interface</strong><small>Avisos sonoros da chamada</small></span><MotionSwitch on={interfaceSoundsEnabled} compact/></button>
             <button className="interface-sound-test" type="button" onClick={() => void testInterfaceSound()}>Testar</button>
           </div>
           {interfaceSoundFeedback && <p className="interface-sound-feedback" role="status">{interfaceSoundFeedback}</p>}
         </section>
         <section className="audio-menu-section participant-volume-section">
-          <header><strong>Voz dos participantes</strong><small><MotionText value={remoteParticipants.length ? `${remoteParticipants.length} PESSOA${remoteParticipants.length === 1 ? '' : 'S'}` : 'SÓ VOCÊ'} enabled={animationsEnabled}/></small></header>
+          <header><strong>Voz dos participantes</strong><small><MotionText value={remoteParticipants.length ? `${remoteParticipants.length} pessoa${remoteParticipants.length === 1 ? '' : 's'}` : 'Só você'} enabled={animationsEnabled}/></small></header>
           {remoteParticipants.length ? <div className="screen-volume-list participant-volume-list">{remoteParticipants.map(participant => (
             <div className="screen-volume-row participant-volume-row" key={participant.id}>
               <Avatar avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} size="small"/>
@@ -4110,7 +3871,7 @@ export default function RoomApp() {
           ))}</div> : <p className="screen-audio-empty"><Icon name="volumeOff"/>Os controles aparecem quando outra pessoa entrar.</p>}
         </section>
         <section className="audio-menu-section">
-          <header><strong>Tratamento de voz</strong><small>MICROFONE</small></header>
+          <header><strong>Tratamento de voz</strong><small>Microfone</small></header>
           <div className="voice-settings">
             {VOICE_SETTING_KEYS.map(key => {
               const details = VOICE_SETTING_DETAILS[key];
@@ -4137,11 +3898,11 @@ export default function RoomApp() {
 
   const screenPopover = (mobile ? screenMenuOpen : screenMenuPresence.present) ? (
     <section className={`dock-popover more-popover screen-popover unified-screen-popover ${mobile ? '' : `t-dropdown ${screenMenuPresence.className}`}`} data-origin="bottom-center" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="screen-sheet-title" {...dockSheetGesture}>
-      <header><strong id="screen-sheet-title">Compartilhamento</strong><small><MotionText value={sharing ? 'ATIVO' : 'PRONTO'} enabled={animationsEnabled}/></small><button className="mobile-sheet-close" type="button" onClick={() => dismissDockSheet()} aria-label="Fechar configurações do compartilhamento"><Icon name="close"/></button></header>
+      <header><strong id="screen-sheet-title">Compartilhamento</strong><small><MotionText value={sharing ? 'Ativo' : 'Pronto'} enabled={animationsEnabled}/></small><button className="mobile-sheet-close" type="button" onClick={() => dismissDockSheet()} aria-label="Fechar configurações do compartilhamento"><Icon name="close"/></button></header>
       <button type="button" onClick={() => { void toggleScreenShare(); dismissDockSheet(); }} disabled={screenSharePending || (!sharing && !screenShareSupported)}><Icon name="screen"/><span><strong>{screenSharePending ? 'Abrindo seletor…' : sharing ? 'Parar compartilhamento' : 'Compartilhar tela'}</strong><small>{sharing ? 'A chamada continuará ativa' : screenShareSupported ? 'Escolha uma tela, janela ou aba' : 'Não disponível neste navegador'}</small></span></button>
       <div className="screen-popover-scroll">
         <section className="screen-menu-section">
-          <header><strong>Áudio recebido</strong><small>{remoteSharingParticipants.length ? `${remoteSharingParticipants.length} TELA${remoteSharingParticipants.length === 1 ? '' : 'S'}` : 'SEM TELAS'}</small></header>
+          <header><strong>Áudio recebido</strong><small>{remoteSharingParticipants.length ? `${remoteSharingParticipants.length} tela${remoteSharingParticipants.length === 1 ? '' : 's'}` : 'Sem telas'}</small></header>
           {remoteSharingParticipants.length ? <div className="screen-volume-list">{remoteSharingParticipants.map(participant => (
             <div className="screen-volume-row" key={participant.id}>
               <Avatar avatar={participant.avatar} name={participant.name} size="small"/>
@@ -4152,7 +3913,7 @@ export default function RoomApp() {
           ))}</div> : <p className="screen-audio-empty"><Icon name="volumeOff"/>Os controles aparecem quando alguém compartilhar uma tela.</p>}
         </section>
         {screenShareSupported && <section className="screen-menu-section bitrate-menu-section">
-          <header><strong>Bitrate de envio</strong><small>ATÉ {formatBitrate(effectiveBitrateMbps)}</small></header>
+          <header><strong>Bitrate de envio</strong><small>Até {formatBitrate(effectiveBitrateMbps)}</small></header>
           <button className={`compact-toggle ${adaptiveBitrate ? 'is-active' : ''}`} type="button" role="switch" aria-checked={adaptiveBitrate} onClick={() => changeAdaptiveBitrate(!adaptiveBitrate)}><span><strong>Bitrate adaptativo</strong><small>Reage à rede e divide o upload entre os pares</small></span><MotionSwitch on={adaptiveBitrate} compact/></button>
           <div className={`bitrate-control ${adaptiveBitrate ? 'is-disabled' : ''}`}><label htmlFor="popover-bitrate"><strong>Limite manual</strong><small>0,5 a 20 Mb/s</small></label><input id="popover-bitrate" aria-label="Bitrate manual do compartilhamento" type="range" min={MIN_BITRATE_MBPS} max={MAX_BITRATE_MBPS} step="0.5" value={bitrateMbps} disabled={adaptiveBitrate} onChange={event => changeBitrate(Number(event.target.value))}/><output>{formatBitrate(bitrateMbps)}</output></div>
         </section>}
@@ -4162,18 +3923,18 @@ export default function RoomApp() {
 
   const morePopover = (mobile ? moreMenuOpen : moreMenuPresence.present) ? (
     <section className={`dock-popover more-popover viewing-popover ${mobile ? '' : `t-dropdown ${moreMenuPresence.className}`}`} data-origin="bottom-center" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="more-sheet-title" {...dockSheetGesture}>
-      <header><strong id="more-sheet-title">Mais opções</strong><small>ESTE DISPOSITIVO</small><button className="mobile-sheet-close" type="button" onClick={() => dismissDockSheet()} aria-label="Fechar mais opções"><Icon name="close"/></button></header>
+      <header><strong id="more-sheet-title">Mais opções</strong><small>Este dispositivo</small><button className="mobile-sheet-close" type="button" onClick={() => dismissDockSheet()} aria-label="Fechar mais opções"><Icon name="close"/></button></header>
       {phone && <button type="button" onClick={() => { setMoreMenuOpen(false); setControlsOpen(true); setChatOpen(false); setProfileOpen(false); }}><Icon name="settings"/><span><strong>Controles da sala</strong><small>Convite, participantes e qualidade</small></span><Icon name="chevron"/></button>}
       {mobile && <button type="button" onClick={() => { setMoreMenuOpen(false); setScreenMenuOpen(true); }}><Icon name="screen"/><span><strong>Compartilhamentos</strong><small>{remoteSharingParticipants.length ? `Ajustar áudio de ${remoteSharingParticipants.length} tela${remoteSharingParticipants.length === 1 ? '' : 's'}` : screenShareSupported ? 'Tela, áudio e bitrate' : 'Áudio das telas recebidas'}</small></span><Icon name="chevron"/></button>}
       <button type="button" onClick={() => void toggleFullscreen()}><Icon name="expand"/><span><strong>{document.fullscreenElement ? 'Sair da tela cheia' : 'Tela cheia'}</strong><small>Amplia a área compartilhada</small></span></button>
       <button type="button" onClick={() => void togglePictureInPicture()} disabled={!sharingParticipants.length}><Icon name="pip"/><span><strong>Miniplayer</strong><small>{sharingParticipants.length ? 'Mantém uma tela sobre as outras janelas' : 'Disponível quando alguém compartilhar'}</small></span></button>
-      <button className={keepAwake ? 'is-selected' : ''} type="button" onClick={toggleKeepAwake} disabled={!('wakeLock' in navigator)}><Icon name="wake"/><span><strong>Manter tela ativa</strong><small>{'wakeLock' in navigator ? 'Evita que este dispositivo adormeça na chamada' : 'Não disponível neste navegador'}</small></span><i>{keepAwake ? wakeLockActive ? 'ATIVO' : 'AGUARDANDO' : 'DESLIGADO'}</i></button>
+      <button className={keepAwake ? 'is-selected' : ''} type="button" onClick={toggleKeepAwake} disabled={!('wakeLock' in navigator)}><Icon name="wake"/><span><strong>Manter tela ativa</strong><small>{'wakeLock' in navigator ? 'Evita que este dispositivo adormeça na chamada' : 'Não disponível neste navegador'}</small></span><i>{keepAwake ? wakeLockActive ? 'Ativo' : 'Aguardando' : 'Desligado'}</i></button>
     </section>
   ) : null;
 
   const exitPopover = (mobile ? leaveMenuOpen : leaveMenuPresence.present) ? (
     <section className={`dock-popover audio-popover exit-popover ${mobile ? '' : `t-dropdown ${leaveMenuPresence.className}`}`} data-origin="bottom-right" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="exit-sheet-title" {...dockSheetGesture}>
-      <header><strong id="exit-sheet-title">Sair da chamada</strong><small>AÇÕES DA SALA</small><button className="mobile-sheet-close" type="button" onClick={() => dismissDockSheet()} aria-label="Fechar opções para sair"><Icon name="close"/></button></header>
+      <header><strong id="exit-sheet-title">Sair da chamada</strong><small>Ações da sala</small><button className="mobile-sheet-close" type="button" onClick={() => dismissDockSheet()} aria-label="Fechar opções para sair"><Icon name="close"/></button></header>
       <div className="exit-options">
         <button type="button" onClick={leaveRoom}><Icon name="hangup"/><span><strong>Sair da chamada</strong><small>A sala continua para quem permanecer</small></span></button>
         {isOwner && <button className="is-danger" type="button" onClick={closeRoom}><Icon name="close"/><span><strong>Encerrar sala</strong><small>Desconecta todas as pessoas agora</small></span></button>}
@@ -4187,43 +3948,43 @@ export default function RoomApp() {
     <div className="panel-page unified-call-page">
       {!session ? (
         <section className="panel-section unified-join-section">
-          <div className="section-heading"><h3>Entrar em uma chamada</h3><small>CÓDIGO OU LINK</small></div>
+          <div className="section-heading"><h3>Entrar em uma chamada</h3><small>Código ou link</small></div>
           <form onSubmit={joinRoom} className={`unified-join-form t-input-wrap ${joinEntryError ? 'is-error' : ''}`}>
             <div ref={joinInputShellRef} className={`t-input ${joinEntryError ? 'is-error' : ''}`}><Icon name="link"/><input aria-label="Código ou link da chamada" aria-describedby="join-room-error" aria-invalid={joinEntryError} value={joinValue} onChange={event => { setJoinValue(event.target.value); joinInputShellRef.current?.classList.remove('is-shaking'); if (error) setError(''); }} placeholder="Cole o código da sala" autoComplete="off" autoCapitalize="characters" enterKeyHint="go" spellCheck={false} maxLength={512}/><button type="submit" disabled={!joinValue.trim()}>Entrar</button></div>
             <p id="join-room-error" className="t-error-msg" role="alert">{INVALID_ROOM_ENTRY_ERROR}</p>
           </form>
-          {loadOwnerSession() && <button className="unified-resume" type="button" onClick={() => { setSession(loadOwnerSession()); setMode('connecting'); setChatOpen(!usesCompactLayout()); }}>Retomar sua última sala</button>}
+          {savedOwnerSession && <button className="unified-resume" type="button" onClick={() => { setSession(savedOwnerSession); setMode('connecting'); setChatOpen(!usesCompactLayout()); }}>Retomar sua última sala</button>}
         </section>
       ) : (
         <section className="panel-section unified-invite-section">
-          <div className="section-heading"><h3>Convite da chamada</h3><small>SALA {roomLabel}</small></div>
+          <div className="section-heading"><h3>Convite da chamada</h3><small>Sala {roomLabel}</small></div>
           <button className="invite-code-display" type="button" onClick={() => void copyValue('code')} disabled={!session.joinCode} aria-label={session.joinCode ? 'Copiar código curto da sala' : 'Código curto sendo gerado'}><MotionText value={copied === 'code' ? 'Código copiado' : session.joinCode ? 'Código curto' : 'Gerando código'} enabled={animationsEnabled}/><strong>{roomLabel}</strong><Icon name="copy"/></button>
-          <div className="invite-actions"><button type="button" onClick={() => void copyValue('link')}><Icon name="link"/><MotionText value={copied === 'link' ? 'Link copiado' : 'Copiar link'} enabled={animationsEnabled}/></button><button type="button" onClick={() => setQrOpen(true)} disabled={!qrCode}><Icon name="qr"/>QR Code</button></div>
+          <div className="invite-actions"><button type="button" onClick={() => void copyValue('link')}><Icon name="link"/><MotionText value={copied === 'link' ? 'Link copiado' : 'Copiar link'} enabled={animationsEnabled}/></button><button type="button" onClick={() => setQrOpen(true)} disabled={!session.invite.token}><Icon name="qr"/>QR Code</button></div>
         </section>
       )}
         {session && <section className="panel-section unified-participants-section">
-          <div className="section-heading"><h3>Na chamada</h3><small>{connectedParticipants.length} CONECTADO{connectedParticipants.length === 1 ? '' : 'S'}</small></div>
-          <div className="unified-participant-list">{connectedParticipants.map(participant => <div key={participant.id}><Avatar avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} size="small"/><span><strong>{participant.name}{participant.id === selfId ? ' · você' : ''}</strong><small>{participant.sharing ? 'Compartilhando tela' : participant.microphoneEnabled ? 'Microfone ativo' : participant.status}</small></span>{participant.id === leaderId && <Icon name="crown"/>}</div>)}</div>
+          <div className="section-heading"><h3>Na chamada</h3><small>{connectedParticipants.length} conectado{connectedParticipants.length === 1 ? '' : 's'}</small></div>
+          <div className="unified-participant-list">{connectedParticipants.map(participant => <div key={participant.id}><Avatar avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} size="small"/><span><strong>{participant.name}{participant.id === selfId && participant.name.trim().toLowerCase() !== 'você' ? ' · você' : ''}</strong><small>{participant.sharing ? 'Compartilhando tela' : participant.microphoneEnabled ? 'Microfone ativo' : participant.status}</small></span>{participant.id === leaderId && <Icon name="crown"/>}</div>)}</div>
         </section>}
         {session && mobile && !screenShareSupported && <section className="panel-section mobile-screen-capability" role="status"><Icon name="screen"/><span><strong>Compartilhamento pelo celular</strong><small>Este navegador pode assistir à chamada, mas não consegue enviar a tela.</small></span></section>}
         {!compactJoinPanel && <section className="panel-section quality-section">
           <div className="section-heading"><h3>Qualidade do vídeo</h3><small>{automaticQuality ? `${activeResolution}p · ${activeFps} FPS` : 'Manual'}</small></div>
           <button className={`toggle-row ${automaticQuality ? 'is-active' : ''}`} type="button" role="switch" aria-checked={automaticQuality} onClick={() => changeAutomaticQuality(!automaticQuality)}><Icon name="settings"/><span className="toggle-row-copy"><strong>Resolução e fluidez automáticas</strong><small>{activeResolution}p · até {activeFps} FPS</small></span><MotionSwitch on={automaticQuality}/></button>
           <div className="quality-controls">
-            <SegmentedSelector label="Resolução" suffix="" options={RESOLUTIONS} value={resolution} disabled={automaticQuality} premium={1080} onChange={value => { automaticQualityRef.current = false; setAutomaticQuality(false); void applyVideoProfile(value, fpsRef.current); }}/>
-            <SegmentedSelector label="Fluidez" suffix="" options={FRAME_RATES} value={fps} disabled={automaticQuality} premium={60} onChange={value => { automaticQualityRef.current = false; setAutomaticQuality(false); void applyVideoProfile(resolutionRef.current, value); }}/>
+            <SegmentedSelector label="Resolução" suffix="" options={RESOLUTIONS} value={resolution} disabled={automaticQuality} onChange={value => { automaticQualityRef.current = false; setAutomaticQuality(false); void applyVideoProfile(value, fpsRef.current); }}/>
+            <SegmentedSelector label="Fluidez" suffix="" options={FRAME_RATES} value={fps} disabled={automaticQuality} onChange={value => { automaticQualityRef.current = false; setAutomaticQuality(false); void applyVideoProfile(resolutionRef.current, value); }}/>
             {!session && <SegmentedSelector label="Participantes" suffix="" options={PARTICIPANT_LIMITS} value={maxParticipants} fullWidth onChange={setMaxParticipants}/>}
           </div>
           <div className="sidebar-bitrate-settings">
-            <div className="subsection-heading"><strong>Transmissão</strong><small>ATÉ {formatBitrate(effectiveBitrateMbps)}</small></div>
-            <button className={`toggle-row bitrate-toggle ${adaptiveBitrate ? 'is-active' : ''}`} type="button" role="switch" aria-checked={adaptiveBitrate} onClick={() => changeAdaptiveBitrate(!adaptiveBitrate)}><Icon name="link"/><span className="toggle-row-copy"><strong>Bitrate adaptativo</strong><small>Ajusta bitrate, escala e FPS conforme perda, latência e participantes</small></span><MotionSwitch on={adaptiveBitrate}/></button>
-            <div className={`bitrate-control sidebar-bitrate-control ${adaptiveBitrate ? 'is-disabled' : ''}`}><label htmlFor="sidebar-bitrate"><strong>Limite manual</strong><small>Disponível com o modo adaptativo desligado</small></label><input id="sidebar-bitrate" aria-label="Limite manual de bitrate" type="range" min={MIN_BITRATE_MBPS} max={MAX_BITRATE_MBPS} step="0.5" value={bitrateMbps} disabled={adaptiveBitrate} onChange={event => changeBitrate(Number(event.target.value))}/><output>{formatBitrate(bitrateMbps)}</output></div>
+            <div className="subsection-heading"><strong>Transmissão</strong><small>Até {formatBitrate(effectiveBitrateMbps)}</small></div>
+            <button className={`toggle-row bitrate-toggle ${adaptiveBitrate ? 'is-active' : ''}`} type="button" role="switch" aria-checked={adaptiveBitrate} onClick={() => changeAdaptiveBitrate(!adaptiveBitrate)}><Icon name="link"/><span className="toggle-row-copy"><strong>Bitrate adaptativo</strong><small>Ajusta bitrate e FPS à rede</small></span><MotionSwitch on={adaptiveBitrate}/></button>
+            <div className={`bitrate-control sidebar-bitrate-control ${adaptiveBitrate ? 'is-disabled' : ''}`}><label htmlFor="sidebar-bitrate"><strong>Limite manual</strong><small>{adaptiveBitrate ? 'Requer modo manual' : '0,5 a 20 Mb/s'}</small></label><input id="sidebar-bitrate" aria-label="Limite manual de bitrate" type="range" min={MIN_BITRATE_MBPS} max={MAX_BITRATE_MBPS} step="0.5" value={bitrateMbps} disabled={adaptiveBitrate} onChange={event => changeBitrate(Number(event.target.value))}/><output>{formatBitrate(bitrateMbps)}</output></div>
           </div>
         </section>}
         {!compactJoinPanel && <section className="panel-section interface-motion-section">
-          <div className="section-heading"><h3>Interface</h3><small>ESTE DISPOSITIVO</small></div>
-          <button className={`toggle-row ${animationsEnabled ? 'is-active' : ''}`} type="button" role="switch" aria-checked={animationsEnabled} onClick={() => setAnimationsEnabled(enabled => !enabled)}><Icon name="motion"/><span className="toggle-row-copy"><strong>Animações e movimento</strong><small>{animationsEnabled ? 'Mascote e transições da interface' : 'Efeitos da interface pausados'}</small></span><MotionSwitch on={animationsEnabled}/></button>
-          <button className="interface-action-row" type="button" onClick={reopenOnboarding}><Icon name="guide"/><span><strong>Rever tutorial</strong><small>Conheça chamadas, chat e compartilhamentos</small></span><Icon name="chevron"/></button>
+          <div className="section-heading"><h3>Interface</h3><small>Este dispositivo</small></div>
+          <button className={`toggle-row ${animationsEnabled ? 'is-active' : ''}`} type="button" role="switch" aria-checked={animationsEnabled} onClick={() => setAnimationsEnabled(enabled => !enabled)}><Icon name="motion"/><span className="toggle-row-copy"><strong>Transições da interface</strong><small>{animationsEnabled ? 'Animações sutis ativas' : 'Movimento reduzido'}</small></span><MotionSwitch on={animationsEnabled}/></button>
+          <button className="interface-action-row" type="button" onClick={reopenOnboarding}><Icon name="guide"/><span><strong>Rever guia</strong><small>Chamadas, chat e compartilhamentos</small></span><Icon name="chevron"/></button>
           {desktopApp && desktopUpdate && <div className="desktop-update-settings">
             <div><Icon name={desktopUpdate.status === 'downloaded' ? 'check' : 'refresh'}/><span><strong>Atualizações do aplicativo</strong><small>Versão {desktopUpdate.currentVersion}{desktopUpdate.status === 'portable' ? ' · edição portátil' : ''}</small></span></div>
             {desktopUpdate.status === 'downloaded'
@@ -4270,37 +4031,32 @@ export default function RoomApp() {
     focusedScreen && screenTiles.length > 1 ? (
       <div className="unified-screen-focus-layout">
         <div className="unified-screen-focus-main">
-          <ScreenTile stream={focusedScreen.stream} name={focusedScreen.participant.name} local={focusedScreen.local} focused focusable onFocus={() => setFocusedScreenId(null)}/>
+          <ScreenTile tileId={focusedScreen.participant.id} stream={focusedScreen.stream} name={focusedScreen.participant.name} local={focusedScreen.local} focused focusable onFocus={setFocusedScreenId}/>
         </div>
         <aside className="unified-screen-strip" aria-label="Outras telas compartilhadas">
           <header><span>Outras telas</span><button type="button" onClick={() => setFocusedScreenId(null)}><Icon name="grid"/>Ver todas</button></header>
-          {screenTiles.filter(tile => tile.participant.id !== focusedScreen.participant.id).map(tile => <ScreenTile key={tile.participant.id} stream={tile.stream} name={tile.participant.name} local={tile.local} thumbnail focusable onFocus={() => setFocusedScreenId(tile.participant.id)}/>)}
+          {screenTiles.filter(tile => tile.participant.id !== focusedScreen.participant.id).map(tile => <ScreenTile key={tile.participant.id} tileId={tile.participant.id} stream={tile.stream} name={tile.participant.name} local={tile.local} thumbnail focusable onFocus={setFocusedScreenId}/>)}
         </aside>
       </div>
     ) : <div className={`unified-screens-grid count-${screenTiles.length}`}>
-      {screenTiles.map(tile => <ScreenTile key={tile.participant.id} stream={tile.stream} name={tile.participant.name} local={tile.local} focusable={screenTiles.length > 1} onFocus={() => setFocusedScreenId(tile.participant.id)}/>)}
+      {screenTiles.map(tile => <ScreenTile key={tile.participant.id} tileId={tile.participant.id} stream={tile.stream} name={tile.participant.name} local={tile.local} focusable={screenTiles.length > 1} onFocus={setFocusedScreenId}/>)}
     </div>
   ) : (
     <div className="stage-empty unified-stage-empty">
       {session && mode === 'connected' && connectedParticipants.length ? (
         <div className="stage-identities">{connectedParticipants.map(participant => <div className="stage-identity" key={participant.id}><Avatar avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} leader={participant.id === leaderId} size="large"/><strong>{participant.name}</strong><small>{participant.status}</small></div>)}</div>
-      ) : <div className="stage-echo"><Avatar avatar="echo" name="Echo" size="large"/></div>}
+      ) : <div className="stage-brand-tile" aria-hidden="true"><BrandMark/></div>}
       <h1><MotionText value={!session ? 'Inicie uma chamada' : mode === 'connecting' ? 'Entrando na chamada' : mode === 'error' ? 'Sala indisponível' : 'Chamada em andamento'} enabled={animationsEnabled}/></h1>
-      {mode !== 'connected' && <p><MotionText value={!session ? 'Crie uma sala ou entre com um código. Quem estiver no computador também pode compartilhar a própria tela.' : mode === 'connecting' ? 'Reconectando à sala sem interromper quem já está aqui…' : error} enabled={animationsEnabled}/></p>}
+      {mode !== 'connected' && <p><MotionText value={!session ? 'Crie uma sala ou entre com um código. Quem estiver no computador também pode compartilhar a tela.' : mode === 'connecting' ? 'Reconectando à sala sem interromper quem já está aqui…' : error} enabled={animationsEnabled}/></p>}
       {!session && <div className="stage-entry-actions"><button className="primary-action" type="button" onClick={() => void createRoom()}><Icon name="users"/> Iniciar chamada</button>{mobile && <button className="secondary-action" type="button" onClick={() => { setControlsOpen(true); setChatOpen(false); }}><Icon name="link"/> Entrar com código</button>}</div>}
       {!session && showWindowsDownload && <aside className="windows-download-promo" aria-label="Aplicativo ScreenLink para Windows">
         <div className="windows-download-heading">
           <span className="windows-download-symbol"><WindowsMark/></span>
-          <span><strong>ScreenLink para Windows</strong><small>Mais integrado ao computador, sem perder suas salas P2P.</small></span>
+          <span><strong>ScreenLink para Windows</strong><small>Seletor nativo de telas · Áudio do sistema · Atualizações automáticas</small></span>
         </div>
         <a className="windows-download-button" href={WINDOWS_INSTALLER_URL} aria-label="Baixar ScreenLink para Windows em formato EXE">
-          <WindowsMark/><span><strong>Baixar para Windows</strong><small>Instalador .exe · x64</small></span><Icon name="download"/>
+          <WindowsMark/><span><strong>Baixar .exe</strong><small>Windows x64</small></span><Icon name="download"/>
         </a>
-        <div className="windows-download-benefits" aria-label="Vantagens do aplicativo para Windows">
-          <span><Icon name="screen"/>Seletor nativo de telas</span>
-          <span><Icon name="volume"/>Áudio do sistema</span>
-          <span><Icon name="refresh"/>Atualizações automáticas</span>
-        </div>
       </aside>}
       {mode === 'error' && <button className="primary-action" type="button" onClick={leaveRoom}>Voltar</button>}
     </div>
@@ -4314,12 +4070,12 @@ export default function RoomApp() {
             <div className="unified-sidebar-brand"><div className="brand"><BrandMark/><strong>ScreenLink</strong></div></div>
             <button className="unified-rail-chat" type="button" onClick={toggleChatSidebar} aria-label={unreadMessages ? `Abrir chat, ${unreadMessages} mensagem${unreadMessages === 1 ? '' : 's'} não lida${unreadMessages === 1 ? '' : 's'}` : 'Abrir chat'}><Icon name="chat"/><span className="chat-unread-badge t-badge" data-open={unreadMessages > 0 ? 'true' : 'false'} aria-hidden="true"><span className="t-badge-dot">{unreadMessages === 99 ? '99+' : unreadMessages}</span></span></button>
             <header className="unified-sidebar-header">
-              <div className="unified-sidebar-title"><Icon name="chat"/><span><strong>Chat</strong><small>{session ? `Sala ${roomLabel}` : 'LOCAL'}</small></span></div>
+              <div className="unified-sidebar-title"><Icon name="chat"/><span><strong>Chat</strong><small>{session ? `Sala ${roomLabel}` : 'Local'}</small></span></div>
               <div className="unified-sidebar-actions">
                 <div className="unified-chat-settings-anchor" ref={chatSettingsRef}>
                   <button className={`chat-settings-trigger ${chatSettingsOpen ? 'is-open' : ''}`} type="button" aria-label="Personalizar aparência do chat" aria-expanded={chatSettingsOpen} onClick={() => { if (chatSettingsOpen) dismissChatSettingsSheet(); else setChatSettingsOpen(true); }}><Icon name="settings"/></button>
                   {(phone ? chatSettingsOpen : chatSettingsPresence.present) && <section className={`chat-settings-popover ${phone ? '' : `t-dropdown ${chatSettingsPresence.className}`}`} data-origin="top-right" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-label="Aparência do chat" {...chatSettingsSheetGesture}>
-                    <header><strong>Aparência do chat</strong><small>SÓ NESTE DISPOSITIVO</small>{phone && <button className="mobile-sheet-close" type="button" onClick={() => dismissChatSettingsSheet()} aria-label="Fechar aparência do chat"><Icon name="close"/></button>}</header>
+                    <header><strong>Aparência do chat</strong><small>Só neste dispositivo</small>{phone && <button className="mobile-sheet-close" type="button" onClick={() => dismissChatSettingsSheet()} aria-label="Fechar aparência do chat"><Icon name="close"/></button>}</header>
                     <label><span><strong>Seu balão</strong><small>Destaque das suas mensagens</small></span><input type="color" value={chatAppearance.ownBubble} aria-label="Cor do seu balão" onChange={event => setChatAppearance(current => ({ ...current, ownBubble: event.currentTarget.value }))}/></label>
                     <label><span><strong>Outros balões</strong><small>Mensagens dos participantes</small></span><input type="color" value={chatAppearance.otherBubble} aria-label="Cor dos outros balões" onChange={event => setChatAppearance(current => ({ ...current, otherBubble: event.currentTarget.value }))}/></label>
                     <label><span><strong>Nomes</strong><small>Branco por padrão</small></span><input type="color" value={chatAppearance.nameColor} aria-label="Cor dos nomes" onChange={event => setChatAppearance(current => ({ ...current, nameColor: event.currentTarget.value }))}/></label>
@@ -4337,7 +4093,6 @@ export default function RoomApp() {
             </button>
           </aside>
         <section ref={stageRef} className={`share-stage unified-room-stage ${sharingParticipants.length ? 'has-screens' : ''}`}>
-          <div className="room-static-background" aria-hidden="true"/>
           {session && sharingParticipants.length === 0 && <button className={`stage-room-pill ${copied === 'code' ? 'is-copied' : ''}`} type="button" onClick={() => void copyValue('code')} disabled={!session.joinCode} aria-label={copied === 'code' ? `Código ${roomLabel} copiado` : `Copiar código da sala ${roomLabel}`} title="Copiar código da sala"><MotionIcon active={copied === 'code'} activeIcon="check" inactiveIcon="copy"/><span>{copied === 'code' ? 'Copiado' : 'Sala'}</span><strong>{roomLabel}</strong></button>}
           {stageContent}
           {session && sharingParticipants.length > 0 && mode === 'connected' && (
@@ -4360,10 +4115,10 @@ export default function RoomApp() {
       </div>}
       {(phone ? profileOpen : profilePresence.present) && (
         <div ref={profilePopoverRef} className={`room-popover profile-popover unified-profile-popover ${phone ? '' : `t-dropdown ${profilePresence.className}`}`} data-origin="bottom-left" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="profile-sheet-title" {...profileSheetGesture}>
-          <header><div><span className="eyebrow">SEU PERFIL</span><h3 id="profile-sheet-title">Como você aparece</h3></div><button type="button" onClick={() => dismissProfileSheet()} aria-label="Fechar perfil"><Icon name="close"/></button></header>
+          <header><div><span className="eyebrow">Perfil</span><h3 id="profile-sheet-title">Como você aparece</h3></div><button type="button" onClick={() => dismissProfileSheet()} aria-label="Fechar perfil"><Icon name="close"/></button></header>
           <label htmlFor="profile-name">Nome</label><input id="profile-name" value={profileNameDraft} onChange={event => { profileEditRevisionRef.current += 1; profileNameDraftRef.current = event.target.value; setProfileNameDraft(event.target.value); }} onBlur={commitProfileName} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { profileNameDraftRef.current = profileRef.current.name; setProfileNameDraft(profileRef.current.name); event.currentTarget.blur(); } }} maxLength={28}/>
           <label htmlFor="profile-status">Mensagem de status</label><input id="profile-status" value={profileStatusDraft} onChange={event => { profileEditRevisionRef.current += 1; profileStatusDraftRef.current = event.target.value; setProfileStatusDraft(event.target.value); }} onBlur={commitProfileStatus} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { profileStatusDraftRef.current = profileRef.current.status; setProfileStatusDraft(profileRef.current.status); event.currentTarget.blur(); } }} maxLength={64} placeholder="Disponível"/>
-          <div className="profile-photo-heading"><label>Foto</label><small>{profileSaveState === 'saving' ? 'SALVANDO…' : profileSaveState === 'saved' ? profileStorageKind() === 'sqlite' ? 'SALVO NO SQLITE LOCAL' : 'SALVO NESTE NAVEGADOR' : profileSaveState === 'error' ? 'ERRO AO SALVAR' : 'ARMAZENAMENTO LOCAL'}</small></div>
+          <div className="profile-photo-heading"><label>Foto</label><small>{profileSaveState === 'saving' ? 'Salvando…' : profileSaveState === 'saved' ? profileStorageKind() === 'sqlite' ? 'Salvo localmente' : 'Salvo neste navegador' : profileSaveState === 'error' ? 'Erro ao salvar' : 'Armazenamento local'}</small></div>
           <div className="profile-photo-actions"><Avatar avatar={profile.avatar} name={profile.name} size="normal"/><label className="profile-photo-upload">{avatarUploading ? 'Preparando…' : 'Escolher foto'}<input type="file" accept="image/*" onChange={event => void uploadAvatar(event)} disabled={avatarUploading}/></label>{profile.avatar.startsWith('data:image/') && <button type="button" onClick={removeCustomAvatar}>Remover</button>}</div>
           <label>Avatares do app</label><div className="avatar-picker">{AVATARS.map(avatar => <button className={profile.avatar === avatar.id ? 'selected' : ''} type="button" key={avatar.id} onClick={() => updateProfile({ avatar: avatar.id })}><Avatar avatar={avatar.id} name={avatar.label}/><span>{avatar.label}</span></button>)}</div>
         </div>
@@ -4385,14 +4140,14 @@ export default function RoomApp() {
               <span className="desktop-display-source-label">{source.appIcon && <img src={source.appIcon} alt="" draggable={false}/>}<span>{source.name}</span></span>
             </button>)}</div> : <p className="desktop-display-picker-empty">Nenhuma fonte disponível nesta categoria.</p>}
           </div>
-          <footer className="desktop-display-picker-footer"><span><i aria-hidden="true"/>{desktopSystemAudioAvailable ? 'Áudio do sistema incluído quando disponível' : 'Somente o vídeo da fonte será enviado'}</span><button type="button" onClick={() => void cancelDesktopDisplayPicker()}>Cancelar</button></footer>
+          <footer className="desktop-display-picker-footer"><span className={desktopSystemAudioAvailable ? 'has-audio' : ''}><i aria-hidden="true"/>{desktopSystemAudioAvailable ? 'Áudio do sistema incluído quando disponível' : 'Somente o vídeo da fonte será enviado'}</span><button type="button" onClick={() => void cancelDesktopDisplayPicker()}>Cancelar</button></footer>
         </section>
       </div>}
-      {(phone ? qrOpen : qrPresence.present) && <div className={`modal-backdrop ${phone ? '' : `motion-overlay ${qrPresence.className}`}`} role="presentation" onPointerDown={event => { if (event.target === event.currentTarget) dismissQrSheet(); }}><section className={`qr-modal ${phone ? '' : `t-modal ${qrPresence.className}`}`} role="dialog" aria-modal="true" aria-labelledby="room-qr-title" {...qrSheetGesture}><span className="eyebrow">SALA {roomLabel}</span><h2 id="room-qr-title">Entrar pelo QR Code</h2><p>Aponte a câmera do celular para abrir o convite completo.</p>{qrCode ? <img src={qrCode} alt={`QR Code da sala ${roomLabel}`}/> : <div className="qr-loading">Gerando QR Code…</div>}<button type="button" onClick={() => dismissQrSheet()}>Fechar</button></section></div>}
+      {(phone ? qrOpen : qrPresence.present) && <div className={`modal-backdrop ${phone ? '' : `motion-overlay ${qrPresence.className}`}`} role="presentation" onPointerDown={event => { if (event.target === event.currentTarget) dismissQrSheet(); }}><section className={`qr-modal ${phone ? '' : `t-modal ${qrPresence.className}`}`} role="dialog" aria-modal="true" aria-labelledby="room-qr-title" {...qrSheetGesture}><span className="eyebrow">Sala {roomLabel}</span><h2 id="room-qr-title">Entrar pelo QR Code</h2><p>Aponte a câmera do celular para abrir o convite completo.</p>{qrCode ? <img src={qrCode} alt={`QR Code da sala ${roomLabel}`}/> : <div className="qr-loading">Gerando QR Code…</div>}<button type="button" onClick={() => dismissQrSheet()}>Fechar</button></section></div>}
       {updatePresence.present && desktopUpdate && <aside className={`desktop-update-card t-toast ${updatePresence.className} is-${desktopUpdate.status}`} role="status" aria-live="polite">
         <div className="desktop-update-icon"><Icon name={desktopUpdate.status === 'downloaded' ? 'check' : desktopUpdate.status === 'downloading' ? 'download' : 'refresh'}/></div>
         <div className="desktop-update-copy">
-          <span>ATUALIZAÇÃO DO SCREENLINK</span>
+          <span>Atualização</span>
           <strong>{desktopUpdate.status === 'available'
             ? `Versão ${desktopUpdate.version} disponível`
             : desktopUpdate.status === 'downloading'
@@ -4420,23 +4175,17 @@ export default function RoomApp() {
           </div>
         </div>
       </aside>}
-      {onboardingPresence.present && <div className={`onboarding-backdrop motion-overlay ${onboardingPresence.className}`} role="presentation">
-        <section ref={onboardingDialogRef} className={`onboarding-dialog t-modal ${onboardingPresence.className}`} role="dialog" aria-modal="true" aria-labelledby="onboarding-title" aria-describedby="onboarding-description" tabIndex={-1}>
-          <header><div className="onboarding-brand"><BrandMark/><span>Guia rápido</span></div><span className="onboarding-counter">{String(onboardingStep + 1).padStart(2, '0')} / {String(ONBOARDING_STEPS.length).padStart(2, '0')}</span><button type="button" onClick={finishOnboarding} aria-label="Fechar tutorial"><Icon name="close"/></button></header>
-          <OnboardingPreview step={onboardingStep}/>
-          <div className="onboarding-content t-stagger is-shown" key={`copy-${onboardingStep}`}>
-            <div className="onboarding-step-label t-stagger-line t-stagger-line--1"><Icon name={onboarding.icon}/><span>{onboarding.eyebrow}</span></div>
-            <h2 className="t-stagger-line t-stagger-line--2" id="onboarding-title">{onboarding.title}</h2>
-            <p className="t-stagger-line t-stagger-line--3" id="onboarding-description">{onboarding.description}</p>
-            <div className="onboarding-notes t-stagger-line t-stagger-line--4">{onboarding.points.map(point => <span key={point}><Icon name="check"/>{point}</span>)}</div>
-          </div>
-          <nav className="onboarding-progress" aria-label="Progresso do tutorial">{ONBOARDING_STEPS.map((step, index) => <button key={step.title} className={index === onboardingStep ? 'is-current' : index < onboardingStep ? 'is-complete' : ''} type="button" onClick={() => setOnboardingStep(index)} aria-label={`Ir para etapa ${index + 1}`} aria-current={index === onboardingStep ? 'step' : undefined}><span>{index + 1}</span></button>)}</nav>
-          <footer>
-            <button className="onboarding-skip" type="button" onClick={finishOnboarding}>Pular</button>
-            <div><button type="button" onClick={() => setOnboardingStep(step => Math.max(0, step - 1))} disabled={onboardingStep === 0}>Anterior</button><button className="is-primary" type="button" onClick={() => onboardingStep === ONBOARDING_STEPS.length - 1 ? finishOnboarding() : setOnboardingStep(step => step + 1)}>{onboardingStep === ONBOARDING_STEPS.length - 1 ? 'Abrir o ScreenLink' : 'Próximo'}<MotionIcon active={onboardingStep === ONBOARDING_STEPS.length - 1} activeIcon="check" inactiveIcon="chevron"/></button></div>
-          </footer>
-        </section>
-      </div>}
+      {onboardingPresence.present && (
+        <Suspense fallback={null}>
+          <OnboardingDialog
+            open={onboardingOpen}
+            className={onboardingPresence.className}
+            step={onboardingStep}
+            onStepChange={setOnboardingStep}
+            onFinish={finishOnboarding}
+          />
+        </Suspense>
+      )}
       {callErrorPresence.present && <aside className={`call-error motion-call-error ${callErrorPresence.className}`} role="alert" aria-live="assertive"><Icon name="warning"/><span>{callErrorTextRef.current}</span><div>{connectionRetryAvailable && <button type="button" onClick={retryConnection}><Icon name="refresh"/>Tentar novamente</button>}{connectionRetryAvailable && <button type="button" onClick={leaveRoom}>Sair</button>}<button className="call-error-dismiss" type="button" onClick={() => setError('')} aria-label="Fechar aviso"><Icon name="close"/></button></div></aside>}
     </div>
   );

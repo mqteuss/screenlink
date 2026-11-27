@@ -1,0 +1,106 @@
+/* ==========================================================================
+   ScreenLink — ChatGPT Visual Style Design Tokens
+   Derived from OpenAI's Apps SDK UI design system (@openai/apps-sdk-ui).
+   ========================================================================== */
+
+:root {
+  color-scheme: dark;
+
+  /* Typography */
+  --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans",
+    "Helvetica", "Arial", "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", "SF Mono", "Menlo", "Monaco", "Consolas",
+    "Liberation Mono", "DejaVu Sans Mono", "Courier New", monospace;
+
+  --font-weight-normal: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+
+  /* 4px Spatial Grid */
+  --spacing-unit: 0.25rem;
+
+  /* Radius Scale */
+  --radius-2xs: 2px;
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+  --radius-2xl: 16px;
+  --radius-3xl: 20px;
+  --radius-4xl: 24px;
+  --radius-full: 9999px;
+
+  /* Control Sizing Scale */
+  --control-size-sm: 28px;
+  --control-size-md: 32px;
+  --control-size-lg: 36px;
+  --control-size-xl: 40px;
+  --control-size-2xl: 44px;
+
+  /* Motion Curves */
+  --cubic-enter: cubic-bezier(0.19, 1, 0.22, 1);
+  --cubic-exit: cubic-bezier(0.8, 0, 0.4, 1);
+  --cubic-exit-snappy: cubic-bezier(0.65, 0, 0.4, 1);
+  --cubic-move: cubic-bezier(0.65, 0, 0.35, 1);
+  --transition-duration-basic: 150ms;
+
+  /* Alpha Scale (Dark) */
+  --alpha-02: rgb(255 255 255 / 2%);
+  --alpha-04: rgb(255 255 255 / 4%);
+  --alpha-05: rgb(255 255 255 / 5%);
+  --alpha-06: rgb(255 255 255 / 6%);
+  --alpha-08: rgb(255 255 255 / 8%);
+  --alpha-10: rgb(255 255 255 / 10%);
+  --alpha-12: rgb(255 255 255 / 12%);
+  --alpha-16: rgb(255 255 255 / 16%);
+  --alpha-20: rgb(255 255 255 / 20%);
+  --alpha-25: rgb(255 255 255 / 25%);
+  --alpha-30: rgb(255 255 255 / 30%);
+  --alpha-50: rgb(255 255 255 / 50%);
+
+  /* Semantic Surfaces (Luminance Stacking) */
+  --color-surface: #212121;
+  --color-surface-secondary: #181818;
+  --color-surface-tertiary: #131313;
+  --color-surface-elevated: #303030;
+  --color-surface-elevated-secondary: #414141;
+
+  /* Semantic Text */
+  --color-text: #ffffff;
+  --color-text-secondary: #afafaf;
+  --color-text-tertiary: #8f8f8f;
+  --color-text-inverse: #0d0d0d;
+  --color-text-disabled: #5d5d5d;
+
+  /* Semantic Borders (Hairline Alpha) */
+  --color-border-subtle: rgb(255 255 255 / 6%);
+  --color-border: rgb(255 255 255 / 12%);
+  --color-border-strong: rgb(255 255 255 / 22%);
+
+  /* Focus Ring */
+  --color-ring: #0285ff;
+
+  /* Primary Action (High-Contrast Inverted Monochrome) */
+  --color-bg-primary-solid: #f3f3f3;
+  --color-bg-primary-solid-hover: #ffffff;
+  --color-text-primary-solid: #0d0d0d;
+
+  --color-bg-primary-soft: rgb(255 255 255 / 8%);
+  --color-bg-primary-soft-hover: rgb(255 255 255 / 14%);
+
+  /* Semantic Accents (Strictly State / Focus / Alerts) */
+  --blue-400: #0285ff;
+  --green-400: #04b84c;
+  --green-500: #00a240;
+  --orange-400: #fb6a22;
+  --orange-500: #e25507;
+  --red-400: #fa423e;
+  --red-500: #e02e2a;
+  --red-600: #ba2623;
+
+  /* Elevation Shadows (Floating Overlays & Active Thumbs Only) */
+  --shadow-hairline: 0 0 0 1px rgb(255 255 255 / 10%);
+  --shadow-popover: 0 10px 15px -3px rgb(0 0 0 / 32%), 0 4px 6px -4px rgb(0 0 0 / 24%);
+  --shadow-thumb: 0 1px 4px -1px rgb(0 0 0 / 28%);
+}
