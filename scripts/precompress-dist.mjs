@@ -8,7 +8,7 @@ const brotli = promisify(brotliCompress);
 const gzipFile = promisify(gzip);
 const PROJECT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DIST_DIR = path.join(PROJECT_DIR, 'dist');
-const COMPRESSIBLE_EXTENSIONS = new Set(['.css', '.html', '.js', '.json', '.svg', '.wasm']);
+const COMPRESSIBLE_EXTENSIONS = new Set(['.css', '.html', '.js', '.json', '.webmanifest', '.svg', '.wasm']);
 const MINIMUM_BYTES = 256;
 
 async function filesBelow(directory) {

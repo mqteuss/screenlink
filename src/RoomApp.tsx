@@ -1,4 +1,4 @@
-import { lazy, memo, Suspense, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent as ReactAnimationEvent, type FormEvent, type MouseEvent as ReactMouseEvent, type TouchEvent as ReactTouchEvent } from 'react';
+import { lazy, memo, Suspense, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent as ReactAnimationEvent, type FormEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type TouchEvent as ReactTouchEvent } from 'react';
 import { playInterfaceSound as playCallSound, setInterfaceSoundOutputDevice, unlockInterfaceSounds, type InterfaceSoundName } from './callSounds';
 import type { NoiseSuppressorPipeline } from './audioNoiseSuppression';
 import { createPrivateRoom, parseInvite, signalUrl, type IceServerConfig, type Invite, type RoomParticipant, type RoomProfile, type SessionDescription } from './protocol';
@@ -1262,6 +1262,10 @@ export default function RoomApp() {
   const dismissMobileOverlayRef = useRef<() => void>(() => undefined);
   const staleMobileOverlayCleanedRef = useRef(false);
   const fullscreenHideTimerRef = useRef<number | null>(null);
+  const fullscreenLastPointerRef = useRef<{ x: number; y: number } | null>(null);
+  const fullscreenSuppressMoveUntilRef = useRef(0);
+  const fullscreenTouchDraggedRef = useRef(false);
+  const fullscreenTouchStartRef = useRef<{ x: number; y: number } | null>(null);
   const skipOverlayHistoryBackRef = useRef(false);
 
   useEffect(() => {
@@ -3457,13 +3461,58 @@ export default function RoomApp() {
     setFullscreenControlsVisible(true);
   }
 
+  function handleStagePointerDown(event: ReactPointerEvent<HTMLElement>) {
+    if (!effectiveFullscreen) return;
+    if (event.pointerType === 'touch' || event.pointerType === 'pen') {
+      fullscreenTouchStartRef.current = { x: event.clientX, y: event.clientY };
+      fullscreenTouchDraggedRef.current = false;
+    }
+    const target = event.target;
+    if (target instanceof Element && target.closest('.host-call-dock, .fullscreen-exit-button')) {
+      revealFullscreenControls();
+    }
+  }
+
+  function handleStagePointerMove(event: ReactPointerEvent<HTMLElement>) {
+    if (!effectiveFullscreen) return;
+    if (event.pointerType === 'touch' || event.pointerType === 'pen') {
+      const start = fullscreenTouchStartRef.current;
+      if (!start) return;
+      if (Math.hypot(event.clientX - start.x, event.clientY - start.y) >= 12) {
+        fullscreenTouchDraggedRef.current = true;
+        revealFullscreenControls();
+      }
+      return;
+    }
+    if (event.pointerType === 'mouse') {
+      const last = fullscreenLastPointerRef.current;
+      const movedEnough = !last || Math.hypot(event.clientX - last.x, event.clientY - last.y) >= 6;
+      if (!movedEnough) return;
+      fullscreenLastPointerRef.current = { x: event.clientX, y: event.clientY };
+      if (performance.now() >= fullscreenSuppressMoveUntilRef.current) {
+        revealFullscreenControls();
+      }
+    }
+  }
+
   function handleStageClick(event: ReactMouseEvent<HTMLElement>) {
     if (!effectiveFullscreen) return;
     const target = event.target;
     if (!(target instanceof Element)) return;
     if (target.closest('.host-call-dock, .fullscreen-exit-button, .mobile-sheet-layer, .screen-tile-focus')) return;
     if (audioMenuOpen || screenMenuOpen || moreMenuOpen || leaveMenuOpen) return;
-    setFullscreenControlsVisible(visible => !visible);
+    if (fullscreenTouchDraggedRef.current) {
+      fullscreenTouchDraggedRef.current = false;
+      return;
+    }
+    if (fullscreenControlsVisible) {
+      clearFullscreenHideTimer();
+      fullscreenSuppressMoveUntilRef.current = performance.now() + 350;
+      fullscreenLastPointerRef.current = { x: event.clientX, y: event.clientY };
+      setFullscreenControlsVisible(false);
+    } else {
+      revealFullscreenControls();
+    }
   }
 
   async function togglePictureInPicture() {
@@ -4224,7 +4273,8 @@ export default function RoomApp() {
         <section
           ref={stageRef}
           className={`share-stage unified-room-stage ${sharingParticipants.length ? 'has-screens' : ''} ${effectiveFullscreen ? 'is-fullscreen' : ''} ${effectiveFullscreen && !fullscreenControlsVisible ? 'is-hud-hidden' : ''}`}
-          onMouseMove={effectiveFullscreen ? revealFullscreenControls : undefined}
+          onPointerDown={effectiveFullscreen ? handleStagePointerDown : undefined}
+          onPointerMove={effectiveFullscreen ? handleStagePointerMove : undefined}
           onClick={effectiveFullscreen ? handleStageClick : undefined}
         >
           {session && sharingParticipants.length === 0 && <button className={`stage-room-pill ${copied === 'code' ? 'is-copied' : ''}`} type="button" onClick={() => void copyValue('code')} disabled={!session.joinCode} aria-label={copied === 'code' ? `Código ${roomLabel} copiado` : `Copiar código da sala ${roomLabel}`} title="Copiar código da sala"><MotionIcon active={copied === 'code'} activeIcon="check" inactiveIcon="copy"/><span className="stage-room-pill-copy"><span className="stage-room-pill-default"><span>Sala</span><strong>{roomLabel}</strong></span><span className="stage-room-pill-copied" aria-hidden={copied !== 'code'}>Código copiado</span></span></button>}

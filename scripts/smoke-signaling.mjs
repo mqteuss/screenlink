@@ -146,6 +146,29 @@ try {
   await identityPage.body?.cancel();
   await gzipPage.body?.cancel();
 
+  const manifestResponse = await fetch(`${HTTP_URL}/manifest.webmanifest`);
+  assert.equal(manifestResponse.status, 200);
+  assert.match(manifestResponse.headers.get('content-type') || '', /^application\/manifest\+json/i);
+  const manifest = await manifestResponse.json();
+  assert.equal(manifest.display, 'standalone');
+  assert.ok(Array.isArray(manifest.icons) && manifest.icons.length >= 4);
+  for (const icon of manifest.icons) {
+    const iconResponse = await fetch(`${HTTP_URL}${icon.src}`);
+    assert.equal(iconResponse.status, 200, `Missing PWA icon ${icon.src}`);
+    assert.match(iconResponse.headers.get('content-type') || '', /^image\/png/i);
+    const bytes = new Uint8Array(await iconResponse.arrayBuffer());
+    assert.deepEqual([...bytes.slice(0, 4)], [0x89, 0x50, 0x4e, 0x47], `Invalid PNG header for ${icon.src}`);
+  }
+  const appleIconResponse = await fetch(`${HTTP_URL}/icons/apple-touch-icon.png`);
+  assert.equal(appleIconResponse.status, 200);
+  assert.match(appleIconResponse.headers.get('content-type') || '', /^image\/png/i);
+  await appleIconResponse.body?.cancel();
+  const swResponse = await fetch(`${HTTP_URL}/sw.js`);
+  assert.equal(swResponse.status, 200);
+  assert.match(swResponse.headers.get('content-type') || '', /^text\/javascript/i);
+  assert.equal(swResponse.headers.get('cache-control'), 'no-cache');
+  await swResponse.body?.cancel();
+
   const runtimeConfig = await (await fetch(`${HTTP_URL}/runtime-config`)).json();
   assert.equal(runtimeConfig.viewerOrigin, 'https://screenlink.example.test');
   assert.equal(runtimeConfig.mode, 'p2p-mesh');

@@ -31,6 +31,7 @@ const MIME_TYPES = new Map([
   ['.js', 'text/javascript; charset=utf-8'],
   ['.css', 'text/css; charset=utf-8'],
   ['.json', 'application/json; charset=utf-8'],
+  ['.webmanifest', 'application/manifest+json; charset=utf-8'],
   ['.svg', 'image/svg+xml'],
   ['.png', 'image/png'],
   ['.jpg', 'image/jpeg'],
@@ -40,7 +41,7 @@ const MIME_TYPES = new Map([
   ['.wasm', 'application/wasm'],
   ['.woff2', 'font/woff2']
 ]);
-const PRECOMPRESSED_EXTENSIONS = new Set(['.html', '.js', '.css', '.json', '.svg', '.wasm']);
+const PRECOMPRESSED_EXTENSIONS = new Set(['.html', '.js', '.css', '.json', '.webmanifest', '.svg', '.wasm']);
 const STATIC_ASSET_CACHE_LIMIT = 64;
 const STATIC_ASSET_MAX_BYTES = 1024 * 1024;
 const staticAssetCache = new Map();
