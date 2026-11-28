@@ -15,6 +15,7 @@
     "build": "tsc --noEmit && vite build && node scripts/precompress-dist.mjs",
     "start": "node --env-file-if-exists=.env server.mjs",
     "test": "node scripts/smoke-signaling.mjs",
+    "test:screen-network": "node scripts/test-screen-network-control.mjs",
     "test:noise-suppression": "node scripts/benchmark-noise-suppression.mjs",
     "test:noise-runtime": "electron scripts/smoke-audio-worklet.mjs",
     "test:desktop-capture": "electron scripts/smoke-electron-display.mjs",

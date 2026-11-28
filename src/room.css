@@ -581,7 +581,8 @@ strong, b { font-weight: var(--font-weight-semibold); }
   background: var(--color-surface);
 }
 .unified-room-stage.has-screens { align-items: stretch; }
-.unified-room-stage:fullscreen { width: 100vw; height: 100dvh; background: #0d0d0d; }
+.unified-room-stage:fullscreen,
+.unified-room-stage:-webkit-full-screen { width: 100%; height: 100%; background: #000; }
 
 .stage-room-pill {
   position: absolute;
@@ -2984,4 +2985,152 @@ input[type="range"]::-moz-range-thumb {
   .unified-room-app.is-phone-room .segmented-control { height: 40px; }
   .unified-room-app.is-phone-room button,
   .unified-room-app.is-phone-room input[type="range"] { touch-action: manipulation; }
+}
+
+/* --------------------------------------------------------------------------
+   13. Fullscreen Mode (Edge-to-Edge Stage, Clean Canvas & Auto-Hiding HUD)
+   -------------------------------------------------------------------------- */
+.unified-room-stage.is-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  width: 100vw;
+  height: 100dvh;
+  background: #000;
+}
+
+.unified-room-stage.is-fullscreen.is-hud-hidden,
+.unified-room-stage:fullscreen.is-hud-hidden,
+.unified-room-stage:-webkit-full-screen.is-hud-hidden {
+  cursor: none;
+}
+
+.unified-room-stage.is-fullscreen .unified-screens-grid,
+.unified-room-stage:fullscreen .unified-screens-grid,
+.unified-room-stage:-webkit-full-screen .unified-screens-grid {
+  inset: 0;
+  padding: 0;
+  gap: 4px;
+  overflow: hidden;
+}
+
+.unified-room-stage.is-fullscreen .unified-screens-grid.count-1,
+.unified-room-stage:fullscreen .unified-screens-grid.count-1,
+.unified-room-stage:-webkit-full-screen .unified-screens-grid.count-1 {
+  gap: 0;
+}
+
+.unified-room-stage.is-fullscreen .unified-screen-focus-layout,
+.unified-room-stage:fullscreen .unified-screen-focus-layout,
+.unified-room-stage:-webkit-full-screen .unified-screen-focus-layout {
+  inset: 0;
+  padding: 0;
+  gap: 6px;
+}
+
+.unified-room-stage.is-fullscreen .screen-tile,
+.unified-room-stage:fullscreen .screen-tile,
+.unified-room-stage:-webkit-full-screen .screen-tile {
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  background: #000;
+}
+
+.unified-room-stage.is-fullscreen .screen-tile video,
+.unified-room-stage:fullscreen .screen-tile video,
+.unified-room-stage:-webkit-full-screen .screen-tile video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+
+.unified-room-stage.is-fullscreen .participant-rail,
+.unified-room-stage:fullscreen .participant-rail,
+.unified-room-stage:-webkit-full-screen .participant-rail {
+  display: none !important;
+}
+
+.unified-room-stage.is-fullscreen .screen-tile-label,
+.unified-room-stage:fullscreen .screen-tile-label,
+.unified-room-stage:-webkit-full-screen .screen-tile-label {
+  top: max(12px, env(safe-area-inset-top));
+  left: max(12px, env(safe-area-inset-left));
+  bottom: auto;
+  transition: opacity 200ms ease;
+}
+
+.unified-room-stage.is-fullscreen.is-hud-hidden .screen-tile-label,
+.unified-room-stage:fullscreen.is-hud-hidden .screen-tile-label,
+.unified-room-stage:-webkit-full-screen.is-hud-hidden .screen-tile-label,
+.unified-room-stage.is-fullscreen.is-hud-hidden .screen-tile-focus,
+.unified-room-stage:fullscreen.is-hud-hidden .screen-tile-focus,
+.unified-room-stage:-webkit-full-screen.is-hud-hidden .screen-tile-focus {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.fullscreen-exit-button {
+  position: absolute;
+  top: max(12px, env(safe-area-inset-top));
+  right: max(12px, env(safe-area-inset-right));
+  z-index: 20;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-full);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-text);
+  background: rgb(24 24 24 / 82%);
+  backdrop-filter: blur(8px);
+  font-size: 12px;
+  font-weight: var(--font-weight-medium);
+  transition: opacity 200ms ease, transform 200ms ease, background-color 150ms ease;
+}
+
+.fullscreen-exit-button:hover {
+  background: rgb(42 42 42 / 92%);
+}
+
+.fullscreen-exit-button .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.unified-room-stage.is-fullscreen.is-hud-hidden .fullscreen-exit-button,
+.unified-room-stage:fullscreen.is-hud-hidden .fullscreen-exit-button,
+.unified-room-stage:-webkit-full-screen.is-hud-hidden .fullscreen-exit-button {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-6px);
+}
+
+.unified-room-stage.is-fullscreen .unified-call-dock,
+.unified-room-stage:fullscreen .unified-call-dock,
+.unified-room-stage:-webkit-full-screen .unified-call-dock,
+.unified-room-app.is-phone-room .unified-room-stage.is-fullscreen .unified-call-dock {
+  display: flex;
+  left: 50%;
+  right: auto;
+  bottom: max(14px, env(safe-area-inset-bottom));
+  width: max-content;
+  max-width: calc(100% - 16px - env(safe-area-inset-left) - env(safe-area-inset-right));
+  transform: translateX(-50%);
+  background: rgb(32 32 32 / 86%);
+  backdrop-filter: blur(10px);
+  transition: opacity 200ms ease, transform 220ms ease;
+}
+
+.unified-room-stage.is-fullscreen.is-hud-hidden .unified-call-dock,
+.unified-room-stage:fullscreen.is-hud-hidden .unified-call-dock,
+.unified-room-stage:-webkit-full-screen.is-hud-hidden .unified-call-dock,
+.unified-room-app.is-phone-room .unified-room-stage.is-fullscreen.is-hud-hidden .unified-call-dock {
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 14px);
 }

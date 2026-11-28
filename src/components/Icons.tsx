@@ -23,6 +23,7 @@ export type IconName =
   | 'qr'
   | 'more'
   | 'expand'
+  | 'compress'
   | 'pip'
   | 'wake'
   | 'motion'
@@ -56,6 +57,7 @@ const ICON_PATHS: Record<IconName, ReactNode> = {
   qr: <><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><path d="M14 14h3v3h-3zM18 14h3M21 14v3M14 19h3v2M19 18h2v3" /></>,
   more: <><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" /></>,
   expand: <><path d="M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5" /></>,
+  compress: <><path d="M8 3v5H3M16 3v5h5M21 16h-5v5M3 16h5v5" /></>,
   pip: <><rect x="3" y="4" width="18" height="16" rx="2.5" /><rect x="12" y="11" width="7" height="6" rx="1.2" /></>,
   wake: <><path d="M12 3v2M5.6 5.6 7 7M3 12h2M19 12h2M17 7l1.4-1.4" /><path d="M8 16a5 5 0 1 1 8 0l-1.2 1.3V20H9.2v-2.7L8 16ZM9.5 22h5" /></>,
   motion: <><path d="M3 8.5c2.1-2.4 4.2-2.4 6.3 0s4.2 2.4 6.3 0 4.2-2.4 6.4 0" /><path d="M3 15.5c2.1-2.4 4.2-2.4 6.3 0s4.2 2.4 6.3 0 4.2-2.4 6.4 0" /></>,
