@@ -1,10 +1,23 @@
-import { lazy, memo, Suspense, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent as ReactAnimationEvent, type FormEvent, type TouchEvent as ReactTouchEvent } from 'react';
+import { lazy, memo, Suspense, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent as ReactAnimationEvent, type FormEvent, type MouseEvent as ReactMouseEvent, type TouchEvent as ReactTouchEvent } from 'react';
 import { playInterfaceSound as playCallSound, setInterfaceSoundOutputDevice, unlockInterfaceSounds, type InterfaceSoundName } from './callSounds';
 import type { NoiseSuppressorPipeline } from './audioNoiseSuppression';
 import { createPrivateRoom, parseInvite, signalUrl, type IceServerConfig, type Invite, type RoomParticipant, type RoomProfile, type SessionDescription } from './protocol';
 import { loadStoredProfile, prepareAvatar, profileStorageKind, saveStoredProfile, type DesktopDisplaySource, type DesktopUpdateState } from './profileStore';
 import { BrandMark, Icon, MotionIcon, WindowsMark } from './components/Icons';
 import { ChatComposer, type ChatComposerHandle } from './components/ChatComposer';
+import {
+  ADAPTIVE_NETWORK_PROFILES,
+  MAX_BITRATE_MBPS,
+  MIN_BITRATE_MBPS,
+  VIDEO_PRESETS,
+  adaptiveTargetBitrateMbps,
+  extractPeerNetworkMetrics,
+  updateAdaptiveNetworkLevel,
+  type FrameRate,
+  type PeerNetworkMetrics,
+  type PeerNetworkSnapshot,
+  type Resolution
+} from './screenNetworkControl';
 
 const EmojiPicker = lazy(() => import('./components/EmojiPicker'));
 const OnboardingDialog = lazy(() => import('./components/OnboardingDialog'));
@@ -23,8 +36,6 @@ type ChatChannelPayload =
   | { type: 'chat-history'; messages: ChatWireMessage[] };
 type ChatAppearance = { ownBubble: string; otherBubble: string; nameColor: string };
 type PendingChatMessage = { message: ChatMessage; awaiting: Set<string>; attempts: number; firstAttemptAt: number; lastAttemptAt: number; fallbackAccepted: boolean };
-type Resolution = 360 | 480 | 720 | 1080;
-type FrameRate = 15 | 30 | 45 | 60;
 type AudioSettings = { inputDeviceId: string; outputDeviceId: string; inputVolume: number; outputVolume: number; echoCancellation: boolean; noiseSuppression: boolean; autoGainControl: boolean };
 type VoiceSettingKey = 'echoCancellation' | 'noiseSuppression' | 'autoGainControl';
 type VoiceSettingSupport = Record<VoiceSettingKey, boolean>;
@@ -44,9 +55,6 @@ type SheetDragSession = {
   horizontal: boolean;
   frame: number | null;
 };
-
-type PeerNetworkSnapshot = { timestamp: number; bytesSent: number; packetsSent: number; packetsLost: number };
-type PeerNetworkMetrics = { rttMs: number | null; packetLoss: number | null; availableOutgoingMbps: number | null; outboundMbps: number | null; bandwidthLimited: boolean };
 
 type PeerRecord = {
   id: string;
@@ -109,30 +117,15 @@ const CHAT_BUFFER_LIMIT = 512_000;
 const CHAT_RETRY_INTERVAL_MS = 1_750;
 const CHAT_FAILURE_TIMEOUT_MS = 12_000;
 const ROOM_RECOVERY_WINDOW_MS = 30_000;
-const P2P_TOTAL_UPLOAD_BUDGET_MBPS = 18;
-const ADAPTIVE_NETWORK_PROFILES = [
-  { bitrateFactor: 1, scaleResolutionDownBy: 1, frameRateFactor: 1 },
-  { bitrateFactor: .72, scaleResolutionDownBy: 1.25, frameRateFactor: .85 },
-  { bitrateFactor: .48, scaleResolutionDownBy: 1.65, frameRateFactor: .67 },
-  { bitrateFactor: .3, scaleResolutionDownBy: 2.25, frameRateFactor: .5 }
-] as const;
 const DEFAULT_CHAT_APPEARANCE: ChatAppearance = { ownBubble: '#303030', otherBubble: '#212121', nameColor: '#ffffff' };
 const RESOLUTIONS: Resolution[] = [360, 480, 720, 1080];
 const FRAME_RATES: FrameRate[] = [15, 30, 45, 60];
 const PARTICIPANT_LIMITS = [2, 3, 4, 5, 6, 7, 8];
-const MIN_BITRATE_MBPS = 0.5;
-const MAX_BITRATE_MBPS = 20;
 const VOICE_SETTING_KEYS: VoiceSettingKey[] = ['noiseSuppression', 'echoCancellation', 'autoGainControl'];
 const VOICE_SETTING_DETAILS: Record<VoiceSettingKey, { label: string; description: string }> = {
   noiseSuppression: { label: 'Isolamento de voz', description: 'Reduz ruídos ao redor' },
   echoCancellation: { label: 'Controle de eco', description: 'Evita retorno nos alto-falantes' },
   autoGainControl: { label: 'Ganho automático', description: 'Equilibra o volume da sua voz' }
-};
-const VIDEO_PRESETS: Record<Resolution, { width: number; height: number; bitrate: number }> = {
-  360: { width: 640, height: 360, bitrate: 900_000 },
-  480: { width: 854, height: 480, bitrate: 1_600_000 },
-  720: { width: 1280, height: 720, bitrate: 3_600_000 },
-  1080: { width: 1920, height: 1080, bitrate: 7_000_000 }
 };
 
 type WebStorageName = 'localStorage' | 'sessionStorage';
@@ -905,16 +898,6 @@ function detectVoiceTrackSupport(track: MediaStreamTrack, fallback: VoiceSetting
   return result;
 }
 
-function recommendedBitrateMbps(resolution: Resolution, fps: FrameRate) {
-  return Math.min(MAX_BITRATE_MBPS, Math.max(MIN_BITRATE_MBPS, VIDEO_PRESETS[resolution].bitrate * (fps / 30) / 1_000_000));
-}
-
-function adaptiveTargetBitrateMbps(resolution: Resolution, fps: FrameRate, peerCount: number, networkLevel: number) {
-  const profile = ADAPTIVE_NETWORK_PROFILES[Math.max(0, Math.min(ADAPTIVE_NETWORK_PROFILES.length - 1, networkLevel))];
-  const perPeerBudget = Math.max(.75, P2P_TOTAL_UPLOAD_BUDGET_MBPS / Math.max(1, peerCount));
-  return Math.max(MIN_BITRATE_MBPS, Math.min(recommendedBitrateMbps(resolution, fps), perPeerBudget) * profile.bitrateFactor);
-}
-
 /**
  * Chromium's "detail" screen-content encoder becomes disproportionately
  * expensive when one captured track is fanned out to several peer
@@ -948,13 +931,16 @@ async function configureScreenSender(sender: RTCRtpSender | null, resolution: Re
   parameters.encodings[0]!.maxBitrate = Math.round((adaptive ? adaptiveTargetBitrateMbps(resolution, fps, peerCount, networkLevel) : manualMbps) * 1_000_000);
   parameters.encodings[0]!.maxFramerate = adaptive ? Math.max(12, Math.round(fps * profile.frameRateFactor)) : fps;
   parameters.encodings[0]!.scaleResolutionDownBy = adaptive ? profile.scaleResolutionDownBy : 1;
-  parameters.degradationPreference = adaptive ? 'balanced' : 'maintain-resolution';
+  // Mantém a resolução da trilha compartilhada e delega a redução por conexão a scaleResolutionDownBy;
+  // caso contrário, 'balanced' em um único par reduz a captura para todos os espectadores.
+  parameters.degradationPreference = 'maintain-resolution';
   try {
     await sender.setParameters(parameters);
   } catch {
     // Alguns motores não aceitam escala por encoding para captura de tela. O limite
     // de bitrate e FPS ainda é útil nesses casos.
     delete parameters.encodings[0]!.scaleResolutionDownBy;
+    parameters.degradationPreference = adaptive && peerCount === 1 ? 'balanced' : 'maintain-resolution';
     await sender.setParameters(parameters).catch(() => undefined);
   }
 }
@@ -1042,101 +1028,55 @@ function hasRenderableVideo(stream: MediaStream | null | undefined) {
   return Boolean(stream?.getVideoTracks().some(track => track.readyState === 'live' && !track.muted));
 }
 
-async function readPeerNetworkMetrics(record: PeerRecord): Promise<PeerNetworkMetrics> {
-  const report = await record.pc.getStats();
-  let selectedPairId = '';
-  let candidatePairRtt: number | null = null;
-  let remoteInboundRtt: number | null = null;
-  let availableOutgoingMbps: number | null = null;
-  let bytesSent = 0;
-  let packetsSent = 0;
-  let packetsLost = 0;
-  let outboundTimestamp = 0;
-  let bandwidthLimited = false;
+type FullscreenDocument = Document & {
+  webkitFullscreenElement?: Element | null;
+  webkitExitFullscreen?: () => Promise<void> | void;
+};
 
-  report.forEach(stat => {
-    if (stat.type === 'transport' && stat.selectedCandidatePairId) selectedPairId = String(stat.selectedCandidatePairId);
-  });
-  report.forEach(stat => {
-    const isSelectedPair = stat.type === 'candidate-pair' && (selectedPairId
-      ? stat.id === selectedPairId
-      : stat.selected || (stat.nominated && stat.state === 'succeeded'));
-    if (isSelectedPair) {
-      const rtt = Number(stat.currentRoundTripTime);
-      if (Number.isFinite(rtt) && rtt >= 0) candidatePairRtt = Math.max(candidatePairRtt ?? 0, rtt * 1_000);
-      const available = Number(stat.availableOutgoingBitrate);
-      if (Number.isFinite(available) && available >= 0) availableOutgoingMbps = available / 1_000_000;
-    }
-    if (stat.type === 'remote-inbound-rtp' && (stat.kind === 'video' || stat.mediaType === 'video')) {
-      const rtt = Number(stat.roundTripTime);
-      if (Number.isFinite(rtt) && rtt >= 0) remoteInboundRtt = Math.max(remoteInboundRtt ?? 0, rtt * 1_000);
-      const lost = Number(stat.packetsLost);
-      if (Number.isFinite(lost) && lost >= 0) packetsLost = Math.max(packetsLost, lost);
-    }
-    if (stat.type === 'outbound-rtp' && !stat.isRemote && (stat.kind === 'video' || stat.mediaType === 'video')) {
-      const sentBytes = Number(stat.bytesSent);
-      const sentPackets = Number(stat.packetsSent);
-      const timestamp = Number(stat.timestamp);
-      if (Number.isFinite(sentBytes) && sentBytes >= 0) bytesSent = Math.max(bytesSent, sentBytes);
-      if (Number.isFinite(sentPackets) && sentPackets >= 0) packetsSent = Math.max(packetsSent, sentPackets);
-      if (Number.isFinite(timestamp) && timestamp >= 0) outboundTimestamp = Math.max(outboundTimestamp, timestamp);
-      bandwidthLimited ||= stat.qualityLimitationReason === 'bandwidth';
-    }
-  });
+type FullscreenElement = HTMLElement & {
+  webkitRequestFullscreen?: () => Promise<void> | void;
+};
 
-  const rtt = candidatePairRtt ?? remoteInboundRtt;
-  const previous = record.lastNetworkSnapshot;
-  const current = { timestamp: outboundTimestamp || performance.now(), bytesSent, packetsSent, packetsLost };
-  record.lastNetworkSnapshot = current;
-  const elapsedSeconds = previous ? Math.max(0, current.timestamp - previous.timestamp) / 1_000 : 0;
-  const sentDelta = previous ? Math.max(0, current.packetsSent - previous.packetsSent) : 0;
-  const lostDelta = previous ? Math.max(0, current.packetsLost - previous.packetsLost) : 0;
-  const packetLoss = sentDelta + lostDelta > 0 ? lostDelta / (sentDelta + lostDelta) : null;
-  const outboundMbps = previous && elapsedSeconds > 0
-    ? Math.max(0, current.bytesSent - previous.bytesSent) * 8 / elapsedSeconds / 1_000_000
-    : null;
-  return {
-    rttMs: rtt === null ? null : Math.round(rtt),
-    packetLoss,
-    availableOutgoingMbps,
-    outboundMbps,
-    bandwidthLimited
-  };
+function getNativeFullscreenElement(): Element | null {
+  const doc = document as FullscreenDocument;
+  return doc.fullscreenElement ?? doc.webkitFullscreenElement ?? null;
 }
 
-function updateAdaptiveNetworkLevel(record: PeerRecord, metrics: PeerNetworkMetrics, targetMbps: number) {
-  const poor = metrics.bandwidthLimited
-    || (metrics.packetLoss !== null && metrics.packetLoss >= .06)
-    || (metrics.rttMs !== null && metrics.rttMs >= 450)
-    || (metrics.availableOutgoingMbps !== null && metrics.availableOutgoingMbps < targetMbps * .85);
-  const healthy = !metrics.bandwidthLimited
-    && (metrics.packetLoss === null || metrics.packetLoss <= .015)
-    && (metrics.rttMs === null || metrics.rttMs <= 160)
-    && (metrics.availableOutgoingMbps === null || metrics.availableOutgoingMbps >= targetMbps * 1.35);
-
-  if (poor) {
-    record.poorNetworkSamples += 1;
-    record.healthyNetworkSamples = 0;
-    if (record.poorNetworkSamples >= 2 && record.networkLevel < ADAPTIVE_NETWORK_PROFILES.length - 1) {
-      record.networkLevel += 1;
-      record.poorNetworkSamples = 0;
+async function requestElementFullscreen(element: HTMLElement | null): Promise<boolean> {
+  if (!element) return false;
+  const target = element as FullscreenElement;
+  try {
+    if (typeof target.requestFullscreen === 'function') {
+      await target.requestFullscreen();
       return true;
     }
-    return false;
-  }
-  if (healthy) {
-    record.healthyNetworkSamples += 1;
-    record.poorNetworkSamples = 0;
-    if (record.healthyNetworkSamples >= 5 && record.networkLevel > 0) {
-      record.networkLevel -= 1;
-      record.healthyNetworkSamples = 0;
-      return true;
+    if (typeof target.webkitRequestFullscreen === 'function') {
+      await target.webkitRequestFullscreen();
+      return Boolean(getNativeFullscreenElement());
     }
+  } catch {
     return false;
   }
-  record.poorNetworkSamples = 0;
-  record.healthyNetworkSamples = 0;
   return false;
+}
+
+async function exitNativeFullscreen(): Promise<void> {
+  const doc = document as FullscreenDocument;
+  if (!getNativeFullscreenElement()) return;
+  if (typeof doc.exitFullscreen === 'function') {
+    await doc.exitFullscreen();
+    return;
+  }
+  if (typeof doc.webkitExitFullscreen === 'function') {
+    await doc.webkitExitFullscreen();
+  }
+}
+
+async function readPeerNetworkMetrics(record: PeerRecord): Promise<PeerNetworkMetrics> {
+  const report = await record.pc.getStats();
+  const { metrics, snapshot } = extractPeerNetworkMetrics(report, record.lastNetworkSnapshot);
+  record.lastNetworkSnapshot = snapshot;
+  return metrics;
 }
 
 const ScreenTile = memo(function ScreenTile({ tileId, stream, name, local, focused, thumbnail, focusable, onFocus }: { tileId: string; stream: MediaStream; name: string; local?: boolean; focused?: boolean; thumbnail?: boolean; focusable?: boolean; onFocus?: (id: string | null) => void }) {
@@ -1234,6 +1174,10 @@ export default function RoomApp() {
   const [screenMenuOpen, setScreenMenuOpen] = useState(false);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [leaveMenuOpen, setLeaveMenuOpen] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(() => Boolean(getNativeFullscreenElement()));
+  const [pseudoFullscreen, setPseudoFullscreen] = useState(false);
+  const effectiveFullscreen = isFullscreen || pseudoFullscreen;
+  const [fullscreenControlsVisible, setFullscreenControlsVisible] = useState(true);
   const [keepAwake, setKeepAwake] = useState(() => readStorage('localStorage', 'screenlink-keep-awake-v1') === 'true');
   const [wakeLockActive, setWakeLockActive] = useState(false);
   const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
@@ -1317,6 +1261,8 @@ export default function RoomApp() {
   const mobileOverlayHistoryActiveRef = useRef(false);
   const dismissMobileOverlayRef = useRef<() => void>(() => undefined);
   const staleMobileOverlayCleanedRef = useRef(false);
+  const fullscreenHideTimerRef = useRef<number | null>(null);
+  const skipOverlayHistoryBackRef = useRef(false);
 
   useEffect(() => {
     if (!joinErrorRevision) return undefined;
@@ -1704,11 +1650,15 @@ export default function RoomApp() {
         setControlsOpen(false);
         return;
       }
+      if (pseudoFullscreen) {
+        setPseudoFullscreen(false);
+        return;
+      }
       if (chatOpen) setChatOpen(false);
     };
     document.addEventListener('keydown', dismissOverlays);
     return () => document.removeEventListener('keydown', dismissOverlays);
-  }, [audioMenuOpen, chatOpen, chatSettingsOpen, controlsOpen, emojiOpen, leaveMenuOpen, moreMenuOpen, phone, profileOpen, qrOpen, screenMenuOpen]);
+  }, [audioMenuOpen, chatOpen, chatSettingsOpen, controlsOpen, emojiOpen, leaveMenuOpen, moreMenuOpen, phone, profileOpen, pseudoFullscreen, qrOpen, screenMenuOpen]);
 
   const scrollChatToLatest = useCallback((smooth = false) => {
     const log = chatLogRef.current;
@@ -2504,7 +2454,8 @@ export default function RoomApp() {
       await Promise.all(samples.map(async ({ record, metrics: peerMetrics }) => {
         if (!peerMetrics || !record.screenVideoSender?.track) return;
         const currentTarget = adaptiveTargetBitrateMbps(activeResolution, activeFps, peerCount, record.networkLevel);
-        const changed = updateAdaptiveNetworkLevel(record, peerMetrics, currentTarget);
+        const recoveryTarget = adaptiveTargetBitrateMbps(activeResolution, activeFps, peerCount, Math.max(0, record.networkLevel - 1));
+        const changed = updateAdaptiveNetworkLevel(record, peerMetrics, currentTarget, recoveryTarget);
         if (!changed && record.configuredPeerCount === peerCount) return;
         await configureScreenSender(record.screenVideoSender, activeResolution, activeFps, true, bitrateMbpsRef.current, peerCount, record.networkLevel);
         record.configuredPeerCount = peerCount;
@@ -2783,9 +2734,14 @@ export default function RoomApp() {
     sharingRef.current = false;
     setSharing(false);
     for (const peer of peersRef.current.values()) {
+      peer.networkLevel = 0;
+      peer.poorNetworkSamples = 0;
+      peer.healthyNetworkSamples = 0;
+      peer.lastNetworkSnapshot = null;
       void peer.screenVideoSender?.replaceTrack(null);
       void peer.screenAudioSender?.replaceTrack(null);
     }
+    setAdaptiveNetworkLevel(0);
     updateSelfMediaState({ sharing: false });
     if (wasSharing && !endingCallRef.current) playSound('screenStopped');
   }, [playSound, updateSelfMediaState]);
@@ -3382,15 +3338,132 @@ export default function RoomApp() {
 
   useEffect(() => () => { void releaseWakeLock(); }, [releaseWakeLock]);
 
-  async function toggleFullscreen() {
-    try {
-      if (document.fullscreenElement) await document.exitFullscreen();
-      else await stageRef.current?.requestFullscreen();
-    } catch {
-      setError('A tela cheia não está disponível neste navegador.');
+  const clearFullscreenHideTimer = useCallback(() => {
+    if (fullscreenHideTimerRef.current !== null) {
+      window.clearTimeout(fullscreenHideTimerRef.current);
+      fullscreenHideTimerRef.current = null;
     }
-    if (phone && moreMenuOpen) dismissMobileOverlayRef.current();
-    else setMoreMenuOpen(false);
+  }, []);
+
+  const exitFullscreen = useCallback(async () => {
+    clearFullscreenHideTimer();
+    setPseudoFullscreen(false);
+    setFullscreenControlsVisible(true);
+    try {
+      await exitNativeFullscreen();
+    } catch {
+      // Ignora falhas se o navegador já tiver encerrado a tela cheia externamente.
+    }
+    setIsFullscreen(Boolean(getNativeFullscreenElement()));
+  }, [clearFullscreenHideTimer]);
+
+  const scheduleFullscreenHide = useCallback(() => {
+    clearFullscreenHideTimer();
+    fullscreenHideTimerRef.current = window.setTimeout(() => {
+      fullscreenHideTimerRef.current = null;
+      setFullscreenControlsVisible(false);
+    }, 3_000);
+  }, [clearFullscreenHideTimer]);
+
+  const revealFullscreenControls = useCallback(() => {
+    if (!effectiveFullscreen) return;
+    setFullscreenControlsVisible(true);
+    if (audioMenuOpen || screenMenuOpen || moreMenuOpen || leaveMenuOpen) {
+      clearFullscreenHideTimer();
+      return;
+    }
+    scheduleFullscreenHide();
+  }, [audioMenuOpen, clearFullscreenHideTimer, effectiveFullscreen, leaveMenuOpen, moreMenuOpen, scheduleFullscreenHide, screenMenuOpen]);
+
+  useEffect(() => {
+    const syncFullscreen = () => {
+      const active = Boolean(getNativeFullscreenElement());
+      setIsFullscreen(active);
+      setPseudoFullscreen(false);
+      setFullscreenControlsVisible(true);
+      if (!active) {
+        clearFullscreenHideTimer();
+        setAudioMenuOpen(false);
+        setScreenMenuOpen(false);
+        setMoreMenuOpen(false);
+        setLeaveMenuOpen(false);
+      }
+    };
+    const handleFullscreenError = () => {
+      setIsFullscreen(Boolean(getNativeFullscreenElement()));
+    };
+    document.addEventListener('fullscreenchange', syncFullscreen);
+    document.addEventListener('webkitfullscreenchange', syncFullscreen);
+    document.addEventListener('fullscreenerror', handleFullscreenError);
+    document.addEventListener('webkitfullscreenerror', handleFullscreenError);
+    return () => {
+      document.removeEventListener('fullscreenchange', syncFullscreen);
+      document.removeEventListener('webkitfullscreenchange', syncFullscreen);
+      document.removeEventListener('fullscreenerror', handleFullscreenError);
+      document.removeEventListener('webkitfullscreenerror', handleFullscreenError);
+    };
+  }, [clearFullscreenHideTimer]);
+
+  useEffect(() => {
+    if (effectiveFullscreen && (!session || mode === 'error')) {
+      void exitFullscreen();
+    }
+  }, [effectiveFullscreen, exitFullscreen, mode, session]);
+
+  useEffect(() => {
+    if (!effectiveFullscreen) {
+      clearFullscreenHideTimer();
+      setFullscreenControlsVisible(true);
+      return;
+    }
+    if (audioMenuOpen || screenMenuOpen || moreMenuOpen || leaveMenuOpen) {
+      clearFullscreenHideTimer();
+      setFullscreenControlsVisible(true);
+      return;
+    }
+    if (fullscreenControlsVisible) {
+      scheduleFullscreenHide();
+    }
+    return () => clearFullscreenHideTimer();
+  }, [
+    audioMenuOpen,
+    clearFullscreenHideTimer,
+    effectiveFullscreen,
+    fullscreenControlsVisible,
+    leaveMenuOpen,
+    moreMenuOpen,
+    scheduleFullscreenHide,
+    screenMenuOpen
+  ]);
+
+  async function toggleFullscreen() {
+    if (effectiveFullscreen) {
+      setMoreMenuOpen(false);
+      await exitFullscreen();
+      return;
+    }
+    if (phone && moreMenuOpen) skipOverlayHistoryBackRef.current = true;
+    setMoreMenuOpen(false);
+    if (phone) setChatOpen(false);
+    const enteredNative = await requestElementFullscreen(stageRef.current);
+    if (enteredNative) {
+      setIsFullscreen(Boolean(getNativeFullscreenElement()));
+      setPseudoFullscreen(false);
+      setFullscreenControlsVisible(true);
+      return;
+    }
+    skipOverlayHistoryBackRef.current = false;
+    setPseudoFullscreen(true);
+    setFullscreenControlsVisible(true);
+  }
+
+  function handleStageClick(event: ReactMouseEvent<HTMLElement>) {
+    if (!effectiveFullscreen) return;
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    if (target.closest('.host-call-dock, .fullscreen-exit-button, .mobile-sheet-layer, .screen-tile-focus')) return;
+    if (audioMenuOpen || screenMenuOpen || moreMenuOpen || leaveMenuOpen) return;
+    setFullscreenControlsVisible(visible => !visible);
   }
 
   async function togglePictureInPicture() {
@@ -3493,6 +3566,7 @@ export default function RoomApp() {
 
   function toggleChatSidebar() {
     if (chatOpen) setProfileOpen(false);
+    else if (effectiveFullscreen) void exitFullscreen();
     setAudioMenuOpen(false);
     setScreenMenuOpen(false);
     setMoreMenuOpen(false);
@@ -3680,7 +3754,9 @@ export default function RoomApp() {
                 ? 'controls'
                 : activeChat
                   ? 'chat'
-                  : '';
+                  : pseudoFullscreen
+                    ? 'fullscreen'
+                    : '';
   const mobilePresentationOpen = phone && Boolean(mobileOverlayKey);
   const [dockSheetGesture, dismissDockSheet] = useBottomSheetGesture(dockSheetOpen, closeDockSheets);
   const [controlsSheetGesture, dismissControlsSheet] = useBottomSheetGesture(phone && controlsOpen, () => setControlsOpen(false));
@@ -3700,29 +3776,43 @@ export default function RoomApp() {
       setProfileOpen(false);
       setChatSettingsOpen(false);
       setEmojiOpen(false);
+    } else if (mobileOverlayKey === 'fullscreen') {
+      setPseudoFullscreen(false);
     }
   };
 
   useEffect(() => {
     if (!phone) return;
     const handlePlatformBack = () => {
+      if (getNativeFullscreenElement()) {
+        void exitFullscreen();
+      }
       if (!mobileOverlayHistoryActiveRef.current) return;
       mobileOverlayHistoryActiveRef.current = false;
       dismissMobileOverlayRef.current();
     };
     window.addEventListener('popstate', handlePlatformBack);
     return () => window.removeEventListener('popstate', handlePlatformBack);
-  }, [phone]);
+  }, [exitFullscreen, phone]);
 
   useEffect(() => {
     const historyState = window.history.state;
     const currentMarker = historyState && typeof historyState === 'object'
       ? historyState.__screenlinkMobileOverlay
       : undefined;
-    if (!phone) {
+    if (!phone || isFullscreen) {
       if (mobileOverlayHistoryActiveRef.current) {
         mobileOverlayHistoryActiveRef.current = false;
-        if (currentMarker === mobileOverlayMarker) window.history.back();
+        if (currentMarker === mobileOverlayMarker) {
+          if (isFullscreen || skipOverlayHistoryBackRef.current) {
+            skipOverlayHistoryBackRef.current = false;
+            const cleanedState = { ...(historyState as Record<string, unknown>) };
+            delete cleanedState.__screenlinkMobileOverlay;
+            window.history.replaceState(cleanedState, '', window.location.href);
+          } else {
+            window.history.back();
+          }
+        }
       }
       return;
     }
@@ -3734,12 +3824,21 @@ export default function RoomApp() {
     }
     if (!mobileOverlayKey && mobileOverlayHistoryActiveRef.current) {
       mobileOverlayHistoryActiveRef.current = false;
-      if (currentMarker === mobileOverlayMarker) window.history.back();
+      if (currentMarker === mobileOverlayMarker) {
+        if (skipOverlayHistoryBackRef.current || getNativeFullscreenElement()) {
+          skipOverlayHistoryBackRef.current = false;
+          const cleanedState = { ...(historyState as Record<string, unknown>) };
+          delete cleanedState.__screenlinkMobileOverlay;
+          window.history.replaceState(cleanedState, '', window.location.href);
+        } else {
+          window.history.back();
+        }
+      }
     }
-  }, [mobileOverlayKey, mobileOverlayMarker, phone]);
+  }, [isFullscreen, mobileOverlayKey, mobileOverlayMarker, phone]);
 
   useEffect(() => {
-    if (!phone || !mobileOverlayKey || mobileOverlayKey === 'chat') return undefined;
+    if (!phone || !mobileOverlayKey || mobileOverlayKey === 'chat' || mobileOverlayKey === 'fullscreen') return undefined;
     const sheetSelector = {
       qr: '.qr-modal',
       profile: '.profile-popover',
@@ -3935,9 +4034,9 @@ export default function RoomApp() {
   const morePopover = (mobile ? moreMenuOpen : moreMenuPresence.present) ? (
     <section className={`dock-popover more-popover viewing-popover ${mobile ? '' : `t-dropdown ${moreMenuPresence.className}`}`} data-origin="bottom-center" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="more-sheet-title" {...dockSheetGesture}>
       <header><strong id="more-sheet-title">Mais opções</strong><small>Este dispositivo</small><button className="mobile-sheet-close" type="button" onClick={() => dismissDockSheet()} aria-label="Fechar mais opções"><Icon name="close"/></button></header>
-      {phone && <button type="button" onClick={() => { setMoreMenuOpen(false); setControlsOpen(true); setChatOpen(false); setProfileOpen(false); }}><Icon name="settings"/><span><strong>Controles da sala</strong><small>Convite, participantes e qualidade</small></span><Icon name="chevron"/></button>}
+      {phone && <button type="button" onClick={() => { if (effectiveFullscreen) void exitFullscreen(); setMoreMenuOpen(false); setControlsOpen(true); setChatOpen(false); setProfileOpen(false); }}><Icon name="settings"/><span><strong>Controles da sala</strong><small>Convite, participantes e qualidade</small></span><Icon name="chevron"/></button>}
       {mobile && <button type="button" onClick={() => { setMoreMenuOpen(false); setScreenMenuOpen(true); }}><Icon name="screen"/><span><strong>Compartilhamentos</strong><small>{remoteSharingParticipants.length ? `Ajustar áudio de ${remoteSharingParticipants.length} tela${remoteSharingParticipants.length === 1 ? '' : 's'}` : screenShareSupported ? 'Tela, áudio e bitrate' : 'Áudio das telas recebidas'}</small></span><Icon name="chevron"/></button>}
-      <button type="button" onClick={() => void toggleFullscreen()}><Icon name="expand"/><span><strong>{document.fullscreenElement ? 'Sair da tela cheia' : 'Tela cheia'}</strong><small>Amplia a área compartilhada</small></span></button>
+      <button type="button" onClick={() => void toggleFullscreen()}><Icon name={effectiveFullscreen ? 'compress' : 'expand'}/><span><strong>{effectiveFullscreen ? 'Sair da tela cheia' : 'Tela cheia'}</strong><small>{effectiveFullscreen ? 'Voltar para a visualização normal' : 'Amplia a área compartilhada'}</small></span></button>
       <button type="button" onClick={() => void togglePictureInPicture()} disabled={!sharingParticipants.length}><Icon name="pip"/><span><strong>Miniplayer</strong><small>{sharingParticipants.length ? 'Mantém uma tela sobre as outras janelas' : 'Disponível quando alguém compartilhar'}</small></span></button>
       <button className={keepAwake ? 'is-selected' : ''} type="button" onClick={toggleKeepAwake} disabled={!('wakeLock' in navigator)}><Icon name="wake"/><span><strong>Manter tela ativa</strong><small>{'wakeLock' in navigator ? 'Evita que este dispositivo adormeça na chamada' : 'Não disponível neste navegador'}</small></span><i>{keepAwake ? wakeLockActive ? 'Ativo' : 'Aguardando' : 'Desligado'}</i></button>
     </section>
@@ -4026,7 +4125,7 @@ export default function RoomApp() {
       </div>}
       <button className={`dock-chat-button ${activeChat ? 'is-on' : ''}`} type="button" onClick={toggleChatSidebar} aria-label={activeChat ? 'Fechar chat' : unreadMessages ? `Abrir chat, ${unreadMessages} mensagem${unreadMessages === 1 ? '' : 's'} não lida${unreadMessages === 1 ? '' : 's'}` : 'Abrir chat'} data-label="Chat"><Icon name="chat"/><span className="chat-unread-badge t-badge" data-open={unreadMessages > 0 ? 'true' : 'false'} aria-hidden="true"><span className="t-badge-dot">{unreadMessages === 99 ? '99+' : unreadMessages}</span></span></button>
       <button className={moreMenuOpen ? 'is-on' : ''} type="button" onClick={() => { if (moreMenuOpen) dismissDockSheet(); else { setMoreMenuOpen(true); setAudioMenuOpen(false); setScreenMenuOpen(false); setLeaveMenuOpen(false); } }} aria-expanded={moreMenuOpen} aria-label="Mais opções" data-label="Mais"><Icon name="more"/></button>
-      {mobile && !phone && <button className={controlsOpen ? 'is-on mobile-controls-trigger' : 'mobile-controls-trigger'} type="button" onClick={() => { if (controlsOpen) dismissControlsSheet(); else { setControlsOpen(true); setChatOpen(false); setProfileOpen(false); setAudioMenuOpen(false); setScreenMenuOpen(false); setMoreMenuOpen(false); setLeaveMenuOpen(false); } }} aria-expanded={controlsOpen} aria-label="Abrir controles" data-label="Controles"><Icon name="settings"/></button>}
+      {mobile && !phone && <button className={controlsOpen ? 'is-on mobile-controls-trigger' : 'mobile-controls-trigger'} type="button" onClick={() => { if (controlsOpen) dismissControlsSheet(); else { if (effectiveFullscreen) void exitFullscreen(); setControlsOpen(true); setChatOpen(false); setProfileOpen(false); setAudioMenuOpen(false); setScreenMenuOpen(false); setMoreMenuOpen(false); setLeaveMenuOpen(false); } }} aria-expanded={controlsOpen} aria-label="Abrir controles" data-label="Controles"><Icon name="settings"/></button>}
       <span className="dock-divider"/>
       <button className="hangup" type="button" onClick={() => { if (leaveMenuOpen) dismissDockSheet(); else { setLeaveMenuOpen(true); setAudioMenuOpen(false); setScreenMenuOpen(false); setMoreMenuOpen(false); } }} aria-expanded={leaveMenuOpen} aria-label="Opções para sair da chamada" data-label="Sair"><Icon name="hangup"/></button>
       {!phone && dockPopovers}
@@ -4091,6 +4190,13 @@ export default function RoomApp() {
     </section>
   );
 
+  const mobileDockSheetLayer = dockSheetOpen ? (
+    <div ref={mobileSheetRef} className="mobile-sheet-layer">
+      <button className="mobile-sheet-backdrop" type="button" tabIndex={-1} aria-label="Fechar painel" onClick={() => dismissDockSheet()}/>
+      <div className="mobile-sheet-host">{dockPopovers}</div>
+    </div>
+  ) : null;
+
   return (
     <div ref={roomAppRef} className={`app room-app unified-room-app ${desktopApp ? 'is-electron-shell' : ''} ${mobile ? 'viewer-mode is-mobile-room' : ''} ${phone ? 'is-phone-room' : ''} ${activeChat ? 'is-chat-open' : ''} ${chatInputFocused ? 'is-chat-input-focused' : ''} ${emojiOpen ? 'is-emoji-open' : ''} ${controlsOpen ? 'is-controls-open' : ''} ${mobilePresentationOpen ? 'has-mobile-overlay' : ''} ${animationsEnabled ? '' : 'animations-disabled'}`}>
       {desktopApp && !phone && <div className="electron-drag-region" aria-hidden="true"/>}
@@ -4115,13 +4221,25 @@ export default function RoomApp() {
               <Icon name="settings"/>
             </button>
           </aside>
-        <section ref={stageRef} className={`share-stage unified-room-stage ${sharingParticipants.length ? 'has-screens' : ''}`}>
+        <section
+          ref={stageRef}
+          className={`share-stage unified-room-stage ${sharingParticipants.length ? 'has-screens' : ''} ${effectiveFullscreen ? 'is-fullscreen' : ''} ${effectiveFullscreen && !fullscreenControlsVisible ? 'is-hud-hidden' : ''}`}
+          onMouseMove={effectiveFullscreen ? revealFullscreenControls : undefined}
+          onClick={effectiveFullscreen ? handleStageClick : undefined}
+        >
           {session && sharingParticipants.length === 0 && <button className={`stage-room-pill ${copied === 'code' ? 'is-copied' : ''}`} type="button" onClick={() => void copyValue('code')} disabled={!session.joinCode} aria-label={copied === 'code' ? `Código ${roomLabel} copiado` : `Copiar código da sala ${roomLabel}`} title="Copiar código da sala"><MotionIcon active={copied === 'code'} activeIcon="check" inactiveIcon="copy"/><span className="stage-room-pill-copy"><span className="stage-room-pill-default"><span>Sala</span><strong>{roomLabel}</strong></span><span className="stage-room-pill-copied" aria-hidden={copied !== 'code'}>Código copiado</span></span></button>}
           {stageContent}
-          {session && sharingParticipants.length > 0 && mode === 'connected' && (
+          {!effectiveFullscreen && session && sharingParticipants.length > 0 && mode === 'connected' && (
             <div className="participant-rail">{connectedParticipants.map(participant => <div key={participant.id} className={speakingIds.has(participant.id) ? 'is-speaking' : ''}><Avatar avatar={participant.avatar} name={participant.name} speaking={speakingIds.has(participant.id)} leader={participant.id === leaderId} size="small"/><span><strong>{participant.name}</strong><small>{participant.status}</small></span></div>)}</div>
           )}
+          {effectiveFullscreen && (
+            <button className="fullscreen-exit-button" type="button" onClick={() => void exitFullscreen()} aria-label="Sair da tela cheia">
+              <Icon name="compress"/>
+              <span>Sair da tela cheia</span>
+            </button>
+          )}
           {callDock}
+          {effectiveFullscreen && mobileDockSheetLayer}
         </section>
         <aside className={`control-panel unified-control-panel ${controlsOpen ? 'is-open' : ''} ${compactJoinPanel ? 'is-join-sheet' : ''}`} role={phone && controlsOpen ? 'dialog' : undefined} aria-modal={phone && controlsOpen || undefined} aria-hidden={mobile && !controlsOpen} {...controlsSheetGesture}>
           <div className="panel-header"><div><h2>{compactJoinPanel ? 'Entrar em uma chamada' : 'Controles'}</h2></div>{!compactJoinPanel && <button className={`sidebar-connection-indicator room-status-${connectionQuality}`} type="button" aria-label={!session ? 'Pronto para iniciar uma chamada' : !signalingConnected ? 'Reconectando a sinalização; a mídia P2P existente foi preservada' : mediaLatency === null ? 'Conexão P2P aguardando medição' : `Conexão P2P com ${mediaLatency} milissegundos de latência e ${packetLossLabel} de perda`}><i/><MotionText value={session ? connectionStatusLabel : 'Pronto'} enabled={animationsEnabled}/><span className="connection-tooltip"><strong>{session ? !signalingConnected ? 'Reconectando sinalização' : mediaLatency === null ? 'Medindo conexão' : `${latencyLabel} ms · ${packetLossLabel} perda` : 'Sem chamada ativa'}</strong><small>{session ? !signalingConnected ? `${connectedPeerCount} par${connectedPeerCount === 1 ? '' : 'es'} P2P preservado${connectedPeerCount === 1 ? '' : 's'}` : `RTT e perda WebRTC · ${connectedPeerCount} par${connectedPeerCount === 1 ? '' : 'es'} · ${turnAvailable ? 'relay disponível' : 'conexão direta'}` : 'O status da rede aparecerá durante a chamada'}</small></span></button>}{mobile && <button className="mobile-panel-close" type="button" onClick={() => dismissControlsSheet()} aria-label={compactJoinPanel ? 'Fechar entrada por código' : 'Fechar controles'}><Icon name="close"/></button>}</div>
@@ -4133,10 +4251,7 @@ export default function RoomApp() {
         <button className="mobile-overlay-backdrop" type="button" tabIndex={-1} aria-label="Fechar painel" onClick={() => { if (profileOpen) dismissProfileSheet(); else if (chatSettingsOpen) dismissChatSettingsSheet(); else dismissControlsSheet(); }}/>
       )}
       {phone && chatSettingsOpen && chatSettingsPopover}
-      {dockSheetOpen && <div ref={mobileSheetRef} className="mobile-sheet-layer">
-        <button className="mobile-sheet-backdrop" type="button" tabIndex={-1} aria-label="Fechar painel" onClick={() => dismissDockSheet()}/>
-        <div className="mobile-sheet-host">{dockPopovers}</div>
-      </div>}
+      {!effectiveFullscreen && mobileDockSheetLayer}
       {(phone ? profileOpen : profilePresence.present) && (
         <div ref={profilePopoverRef} className={`room-popover profile-popover unified-profile-popover ${phone ? '' : `t-dropdown ${profilePresence.className}`}`} data-origin="bottom-left" role={phone ? 'dialog' : undefined} aria-modal={phone || undefined} aria-labelledby="profile-sheet-title" {...profileSheetGesture}>
           <header><div><span className="eyebrow">Perfil</span><h3 id="profile-sheet-title">Como você aparece</h3></div><button type="button" onClick={() => dismissProfileSheet()} aria-label="Fechar perfil"><Icon name="close"/></button></header>
